@@ -1,0 +1,69 @@
+name: Teamwork -> BigQuery sync
+
+# Runs the Teamwork -> BigQuery sync script automatically, twice a day.
+#
+# Schedule below is 10:00 and 17:00 UTC, which is 5am / noon US Eastern
+# Standard Time. GitHub Actions cron does not know about daylight saving,
+# so during Eastern Daylight Time (roughly mid-March to early November)
+# this will actually run at 6am / 1pm Eastern instead. If exact clock-hour
+# timing matters year-round, ask to add DST-aware gating — for now this
+# keeps things simple.
+on:
+  schedule:
+    - cron: '0 10,17 * * *'
+  # Lets you trigger a run manually from the "Actions" tab in GitHub,
+  # instead of waiting for the schedule — useful for testing.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run only (checks Teamwork connectivity, writes nothing to BigQuery)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Prevents two runs from overlapping if a manual run and a scheduled run
+# happen to land at the same time.
+concurrency:
+  group: teamwork-bigquery-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: teamwork_bigquery_sync
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write GCP service account key to a file
+        run: echo "$GCP_SA_KEY_JSON" > "$RUNNER_TEMP/gcp-sa-key.json"
+        env:
+          GCP_SA_KEY_JSON: ${{ secrets.GCP_SA_KEY_JSON }}
+
+      - name: Run sync
+        env:
+          TEAMWORK_API_KEY: ${{ secrets.TEAMWORK_API_KEY }}
+          TEAMWORK_BASE_URL: ${{ secrets.TEAMWORK_BASE_URL }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/gcp-sa-key.json
+          GCP_PROJECT_ID: radiant-rig-284611
+          BQ_DATASET: teamwork_data
+          BQ_LOCATION: US
+          SYNC_TIMEZONE: America/New_York
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python sync.py --dry-run
+          else
+            python sync.py
+          fi
