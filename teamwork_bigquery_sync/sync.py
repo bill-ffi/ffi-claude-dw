@@ -4,14 +4,23 @@ them into BigQuery. Meant to be triggered by an external scheduler (cron,
 GitHub Actions, or Cloud Scheduler + Cloud Run) — see README.md.
 
 Usage:
-    python sync.py             # full sync
+    python sync.py             # full sync (projects, tasks, current-month timelogs)
     python sync.py --dry-run   # connectivity + payload-shape check only,
                                 # does not touch BigQuery or write anything
+    python sync.py --backfill-months 2026-01,2026-02,2026-03
+                                # re-pulls and replaces ONLY the timelogs for
+                                # each listed month (YYYY-MM), leaving all
+                                # other months untouched. Does not touch
+                                # projects/tasks. Use this to load history
+                                # that predates when this script started
+                                # running, or to fix a month you know is
+                                # wrong. Safe to re-run for the same month.
 """
 
 import argparse
 import json
 import logging
+import re
 import sys
 import traceback
 from datetime import date, datetime, timedelta, timezone
@@ -36,17 +45,46 @@ logging.basicConfig(
 logger = logging.getLogger("sync")
 
 
+MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+def month_bounds(year, month):
+    """Returns (month_start, month_end_exclusive) as date objects for the
+    given calendar month.
+    """
+    month_start = date(year, month, 1)
+    if month == 12:
+        month_end_exclusive = date(year + 1, 1, 1)
+    else:
+        month_end_exclusive = date(year, month + 1, 1)
+    return month_start, month_end_exclusive
+
+
 def month_window(tz_name):
-    """Returns (month_start, month_end_exclusive) as date objects for
-    "this calendar month" in the given timezone.
+    """Returns (month_start, month_end_exclusive) for "this calendar month"
+    in the given timezone.
     """
     now = datetime.now(ZoneInfo(tz_name))
-    month_start = date(now.year, now.month, 1)
-    if now.month == 12:
-        month_end_exclusive = date(now.year + 1, 1, 1)
-    else:
-        month_end_exclusive = date(now.year, now.month + 1, 1)
-    return month_start, month_end_exclusive
+    return month_bounds(now.year, now.month)
+
+
+def parse_backfill_months(raw_value):
+    """Parses a comma-separated "YYYY-MM,YYYY-MM,..." string into a sorted,
+    de-duplicated list of (year, month) tuples. Raises ValueError on any
+    malformed entry, naming the bad one, rather than silently skipping it.
+    """
+    months = []
+    for token in raw_value.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if not MONTH_RE.match(token):
+            raise ValueError(f"Invalid month '{token}' — expected format YYYY-MM")
+        year_str, month_str = token.split("-")
+        months.append((int(year_str), int(month_str)))
+    if not months:
+        raise ValueError("--backfill-months given but no months parsed")
+    return sorted(set(months))
 
 
 def run_dry_run(client):
@@ -143,8 +181,11 @@ def sync_tasks(tw_client, bq_client, dataset_ref, valid_project_ids):
     }
 
 
-def sync_timelogs(tw_client, bq_client, gcp_project_id, dataset_id, tz_name):
-    month_start, month_end_exclusive = month_window(tz_name)
+def sync_timelogs_for_month(tw_client, bq_client, gcp_project_id, dataset_id, month_start, month_end_exclusive):
+    """Deletes+reinserts the timelogs rows for exactly [month_start,
+    month_end_exclusive). Used both for "this calendar month" (the normal
+    run) and for backfilling an arbitrary past month.
+    """
     last_day_inclusive = month_end_exclusive - timedelta(days=1)
 
     raw_timelogs = tw_client.list_timelogs(
@@ -199,8 +240,10 @@ def run_full_sync(cfg):
         stages["tasks"] = {"status": "failed", "error": traceback.format_exc()}
 
     try:
-        stages["timelogs"] = sync_timelogs(
-            tw_client, bq_client, cfg.gcp_project_id, cfg.bq_dataset, cfg.sync_timezone
+        month_start, month_end_exclusive = month_window(cfg.sync_timezone)
+        stages["timelogs"] = sync_timelogs_for_month(
+            tw_client, bq_client, cfg.gcp_project_id, cfg.bq_dataset,
+            month_start, month_end_exclusive,
         )
     except Exception:
         logger.error("Timelogs sync failed:\n%s", traceback.format_exc())
@@ -221,16 +264,77 @@ def run_full_sync(cfg):
     return 0 if all_ok else 1
 
 
+def run_backfill(cfg, months):
+    """Re-pulls and replaces timelogs for each (year, month) in `months`,
+    one at a time. Projects/tasks are untouched — they're always a full
+    replace on the normal run, so there's nothing to "backfill" there.
+    """
+    tw_client = TeamworkClient(cfg.teamwork_base_url, cfg.teamwork_api_key)
+    bq_client = bigquery_sync.get_client(cfg.gcp_project_id)
+    dataset_ref = bigquery_sync.ensure_dataset(
+        bq_client, cfg.gcp_project_id, cfg.bq_dataset, cfg.bq_location
+    )
+    bigquery_sync.ensure_all_tables(bq_client, dataset_ref)
+
+    started_at = datetime.now(timezone.utc)
+    stages = {}
+    for year, month in months:
+        label = f"{year:04d}-{month:02d}"
+        month_start, month_end_exclusive = month_bounds(year, month)
+        print(f"Backfilling timelogs for {label} ({month_start} to {month_end_exclusive}, exclusive)...")
+        try:
+            stages[label] = sync_timelogs_for_month(
+                tw_client, bq_client, cfg.gcp_project_id, cfg.bq_dataset,
+                month_start, month_end_exclusive,
+            )
+            print(f"  done: {stages[label]['rows_written']} rows written")
+        except Exception:
+            logger.error("Backfill for %s failed:\n%s", label, traceback.format_exc())
+            stages[label] = {"status": "failed", "error": traceback.format_exc()}
+            print(f"  FAILED — see log above")
+
+    finished_at = datetime.now(timezone.utc)
+    summary = {
+        "mode": "backfill",
+        "run_started_at": started_at.isoformat(),
+        "run_finished_at": finished_at.isoformat(),
+        "duration_seconds": (finished_at - started_at).total_seconds(),
+        "gcp_project_id": cfg.gcp_project_id,
+        "bq_dataset": cfg.bq_dataset,
+        "months": stages,
+    }
+    logger.info("RUN_SUMMARY %s", json.dumps(summary, default=str))
+
+    all_ok = all(stage.get("status") == "success" for stage in stages.values())
+    return 0 if all_ok else 1
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Probe Teamwork endpoints and print payload shapes; no BigQuery writes.",
     )
+    parser.add_argument(
+        "--backfill-months",
+        metavar="YYYY-MM[,YYYY-MM,...]",
+        help="Re-pull and replace ONLY the timelogs for these calendar months. "
+             "Does not touch projects/tasks or any other month.",
+    )
     args = parser.parse_args()
 
     cfg = load_config()
+
+    if args.backfill_months:
+        try:
+            months = parse_backfill_months(args.backfill_months)
+        except ValueError as exc:
+            print(f"error: {exc}")
+            sys.exit(2)
+        sys.exit(run_backfill(cfg, months))
 
     if args.dry_run:
         tw_client = TeamworkClient(cfg.teamwork_base_url, cfg.teamwork_api_key)

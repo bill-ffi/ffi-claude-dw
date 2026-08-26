@@ -19,6 +19,10 @@ on:
         description: "Dry run only (checks Teamwork connectivity, writes nothing to BigQuery)"
         type: boolean
         default: false
+      backfill_months:
+        description: "Backfill months instead of a normal run, e.g. 2026-01,2026-02,2026-03 (leave blank for a normal run)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -62,7 +66,9 @@ jobs:
           BQ_LOCATION: US
           SYNC_TIMEZONE: America/New_York
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          if [ -n "${{ inputs.backfill_months }}" ]; then
+            python sync.py --backfill-months "${{ inputs.backfill_months }}"
+          elif [ "${{ inputs.dry_run }}" = "true" ]; then
             python sync.py --dry-run
           else
             python sync.py

@@ -49,6 +49,29 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
    Exits 0 if all three datasets synced successfully, 1 if any stage failed
    (check the logged `RUN_SUMMARY` / stderr for which one and why).
 
+## Backfilling history
+
+The normal run only ever touches "this calendar month" for timelogs (see
+**What it does** above), so it won't populate past months on its own. To
+load history — e.g. the last several months before this script started
+running — use `--backfill-months`:
+
+```
+python sync.py --backfill-months 2026-01,2026-02,2026-03
+```
+
+- Give it one or more `YYYY-MM` months, comma-separated, in any order.
+- For each month, it deletes and reinserts that month's timelogs rows only
+  — every other month (including months not in the list) is untouched.
+- It does **not** touch `projects` or `tasks` — those are always a full
+  replace on the normal run, so there's nothing to backfill there.
+- Safe to re-run for the same month if something looks off — it'll just
+  replace it again with a fresh pull.
+- From GitHub Actions: **Actions** tab → **Teamwork -> BigQuery sync** →
+  **Run workflow** → type the months (e.g. `2026-01,2026-02,2026-03`) into
+  the **Backfill months** box → leave **Dry run only** unchecked → **Run
+  workflow**. Leave the box blank for a normal run.
+
 ## Scheduling recommendation
 
 Target cadence: daily at 5am and noon (pick the timezone via `SYNC_TIMEZONE`
