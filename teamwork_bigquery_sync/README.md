@@ -72,14 +72,14 @@ I'll wire up whichever one you pick.
 
 ## Known gaps / things to verify before relying on this
 
-- **Endpoint paths unverified against live docs.** `apidocs.teamwork.com`
-  was unreachable from the sandbox this was built in (network policy
-  blocked it). The paths in `teamwork_client.py` (`PROJECTS_PATH`,
-  `TASKS_PATH`, `TIMELOGS_PATH`, `PROJECT_BUDGETS_PATH`) are based on
-  Teamwork's documented v3 conventions and on response *shapes* (pagination
-  `meta.page`, field names) observed via a live Teamwork connector call
-  during development — not confirmed against the actual REST API docs.
-  Run `python sync.py --dry-run` and fix any `*_PATH` constant that 404s.
+- **Endpoint paths.** `PROJECTS_PATH` and `TASKS_PATH` in `teamwork_client.py`
+  are confirmed working against this account (a real `--dry-run` returned
+  data from both). `TIMELOGS_PATH` and `PROJECT_BUDGETS_PATH` originally
+  404'd; they've been corrected to `/projects/api/v3/time.json` and
+  `/projects/api/v3/budgets.json` per Teamwork's public docs, but haven't
+  been live-tested yet since `apidocs.teamwork.com` itself is unreachable
+  from this sandbox's network policy. Run `python sync.py --dry-run` again
+  and confirm all four checks say `[OK]` before doing a real sync.
 - **`health` (project health)** is included as a column but is best-effort:
   it wasn't present in the standard project payload during testing (even
   though Teamwork lets you *filter* projects by health). The code just

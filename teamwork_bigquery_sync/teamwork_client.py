@@ -1,14 +1,13 @@
 """Thin client for the Teamwork Projects REST API (v3).
 
-IMPORTANT — endpoint paths below were NOT verified against live API docs.
-apidocs.teamwork.com was unreachable from the environment this script was
-written in (outbound network policy blocked it), so the paths and query
-params here are based on Teamwork's documented v3 conventions and on the
-response *shapes* (pagination meta, field names) observed via a live
-Teamwork connector call during development. Before scheduling this for
-real, run `python sync.py --dry-run` against your account and confirm each
-endpoint returns data rather than a 404 — adjust the *_PATH constants below
-if it doesn't.
+Endpoint status as of the last real dry-run against this account:
+- PROJECTS_PATH, TASKS_PATH: confirmed working (returned real data).
+- TIMELOGS_PATH, PROJECT_BUDGETS_PATH: the original guesses 404'd; these
+  were corrected using Teamwork's public API docs (found via search, since
+  apidocs.teamwork.com itself is unreachable from this environment's
+  network policy) but have NOT yet been live-tested against this account.
+  Re-run `python sync.py --dry-run` after any endpoint change and confirm
+  [OK] on all four checks before relying on this.
 """
 
 import logging
@@ -20,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 PROJECTS_PATH = "/projects/api/v3/projects.json"
 TASKS_PATH = "/projects/api/v3/tasks.json"
-TIMELOGS_PATH = "/projects/api/v3/timelogs.json"
-PROJECT_BUDGETS_PATH = "/projects/api/v3/projectbudgets.json"
+TIMELOGS_PATH = "/projects/api/v3/time.json"
+PROJECT_BUDGETS_PATH = "/projects/api/v3/budgets.json"
 
 PAGE_SIZE = 250
 MAX_RETRIES = 4
