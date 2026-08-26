@@ -90,14 +90,14 @@ def parse_backfill_months(raw_value):
 def run_dry_run(client):
     print("Dry run — probing Teamwork endpoints (no BigQuery writes).\n")
     checks = [
-        ("projects", PROJECTS_PATH, {"page[size]": 1, "page[offset]": 0}, "projects"),
-        ("tasks", TASKS_PATH, {"page[size]": 1, "page[offset]": 0}, "tasks"),
+        ("projects", PROJECTS_PATH, {"page": 1, "pageSize": 1}, "projects"),
+        ("tasks", TASKS_PATH, {"page": 1, "pageSize": 1}, "tasks"),
         (
             "timelogs",
             TIMELOGS_PATH,
             {
-                "page[size]": 1,
-                "page[offset]": 0,
+                "page": 1,
+                "pageSize": 1,
                 "startDate": date.today().isoformat(),
                 "endDate": date.today().isoformat(),
             },
@@ -106,7 +106,7 @@ def run_dry_run(client):
         (
             "project budgets",
             PROJECT_BUDGETS_PATH,
-            {"page[size]": 1, "page[offset]": 0},
+            {"page": 1, "pageSize": 1},
             "budgets",
         ),
     ]
@@ -116,7 +116,15 @@ def run_dry_run(client):
             payload = client._get(path, params)
             items = payload.get(item_key, [])
             sample_keys = sorted(items[0].keys()) if items else []
-            print(f"[OK] {label} ({path}) — {len(items)} item(s) returned")
+            requested_size = params.get("pageSize")
+            actual_size = len(items)
+            print(f"[OK] {label} ({path}) — {actual_size} item(s) returned")
+            if requested_size is not None and actual_size > requested_size:
+                print(
+                    f"     WARNING: asked for pageSize={requested_size} but got "
+                    f"{actual_size} back — the API may be ignoring the pageSize "
+                    "param. If this is unexpected, treat pagination as unverified."
+                )
             if sample_keys:
                 print(f"     sample fields: {', '.join(sample_keys)}")
             if label == "projects" and items and "health" not in sample_keys:
@@ -124,12 +132,37 @@ def run_dry_run(client):
         except Exception as exc:
             any_failed = True
             print(f"[FAIL] {label} ({path}) — {exc}")
+
+    # Pagination sanity check: fetch page 1 and page 2 (small pageSize) for
+    # projects, and confirm page 2 actually returns *different* rows. This
+    # is what would have caught the page[offset]-vs-page bug before it ever
+    # ran for real and got rate-limited.
+    try:
+        page1 = client._get(PROJECTS_PATH, {"page": 1, "pageSize": 3}).get("projects", [])
+        page2 = client._get(PROJECTS_PATH, {"page": 2, "pageSize": 3}).get("projects", [])
+        page1_ids = {p.get("id") for p in page1}
+        page2_ids = {p.get("id") for p in page2}
+        if page2 and page1_ids & page2_ids:
+            any_failed = True
+            print(
+                f"\n[FAIL] pagination sanity check — page 1 and page 2 of "
+                f"projects returned overlapping ids ({page1_ids & page2_ids}). "
+                "Pagination params are likely wrong; fix before running for real."
+            )
+        elif page2:
+            print("\n[OK] pagination sanity check — page 1 and page 2 returned distinct rows")
+        else:
+            print("\n[OK] pagination sanity check — fewer than 2 pages of projects exist, nothing to compare")
+    except Exception as exc:
+        any_failed = True
+        print(f"\n[FAIL] pagination sanity check — {exc}")
+
     print()
     if any_failed:
-        print("One or more endpoints failed. Fix TEAMWORK_BASE_URL/API key or the")
-        print("*_PATH constants in teamwork_client.py before scheduling this.")
+        print("One or more checks failed. Fix TEAMWORK_BASE_URL/API key or the")
+        print("*_PATH constants / pagination params in teamwork_client.py before scheduling this.")
         return 1
-    print("All endpoints reachable.")
+    print("All endpoints reachable and pagination looks correct.")
     return 0
 
 

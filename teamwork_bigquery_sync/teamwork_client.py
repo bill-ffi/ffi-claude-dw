@@ -25,6 +25,21 @@ PROJECT_BUDGETS_PATH = "/projects/api/v3/budgets.json"
 PAGE_SIZE = 250
 MAX_RETRIES = 4
 RETRY_BACKOFF_SECONDS = 2
+# Hard backstop against a runaway pagination loop (e.g. if `hasMore` never
+# goes false for some reason) — 500 pages * PAGE_SIZE is far more than any
+# expected dataset here, so hitting this means something is genuinely wrong
+# and should fail loudly rather than hammer the API indefinitely.
+MAX_PAGES = 500
+
+
+class PaginationLimitExceeded(RuntimeError):
+    def __init__(self, path, max_pages):
+        super().__init__(
+            f"GET {path}: exceeded MAX_PAGES ({max_pages}) while paginating — "
+            "aborting to avoid a runaway loop. This usually means the API's "
+            "hasMore flag isn't behaving as expected; investigate before "
+            "raising MAX_PAGES."
+        )
 
 
 class TeamworkAPIError(RuntimeError):
@@ -67,22 +82,26 @@ class TeamworkClient:
         raise last_error
 
     def _paginate(self, path, params, item_key):
-        """Yields every item across all pages for a Teamwork v3 list endpoint."""
-        offset = 0
-        page_num = 0
+        """Yields every item across all pages for a Teamwork v3 list endpoint.
+
+        Teamwork v3 pages by `page` (1-based page number) + `pageSize`, NOT
+        the page[offset]/page[size] bracket syntax — using the wrong names
+        silently gets ignored by the API rather than erroring, so a bug here
+        looks like "it fetched the same page forever" rather than a clean
+        failure. Hence MAX_PAGES as a backstop.
+        """
+        page_number = 1
         while True:
             page_params = dict(params)
-            page_params["page[size]"] = PAGE_SIZE
-            page_params["page[offset]"] = offset
+            page_params["page"] = page_number
+            page_params["pageSize"] = PAGE_SIZE
             payload = self._get(path, page_params)
             items = payload.get(item_key, [])
-            page_num += 1
             logger.info(
-                "Fetched %s page %d: %d items (offset=%d)",
+                "Fetched %s page %d: %d items",
                 item_key,
-                page_num,
+                page_number,
                 len(items),
-                offset,
             )
             for item in items:
                 yield item
@@ -90,7 +109,9 @@ class TeamworkClient:
             has_more = page_meta.get("hasMore", False)
             if not has_more or not items:
                 break
-            offset += PAGE_SIZE
+            page_number += 1
+            if page_number > MAX_PAGES:
+                raise PaginationLimitExceeded(path, MAX_PAGES)
 
     def list_projects(self):
         """All non-deleted projects, regardless of status (active, current,
@@ -108,28 +129,23 @@ class TeamworkClient:
         }
         projects = []
         included = {}
-        offset = 0
-        page_num = 0
+        page_number = 1
         while True:
             page_params = dict(params)
-            page_params["page[size]"] = PAGE_SIZE
-            page_params["page[offset]"] = offset
+            page_params["page"] = page_number
+            page_params["pageSize"] = PAGE_SIZE
             payload = self._get(PROJECTS_PATH, page_params)
             items = payload.get("projects", [])
-            page_num += 1
-            logger.info(
-                "Fetched projects page %d: %d items (offset=%d)",
-                page_num,
-                len(items),
-                offset,
-            )
+            logger.info("Fetched projects page %d: %d items", page_number, len(items))
             projects.extend(items)
             for included_type, records in (payload.get("included") or {}).items():
                 included.setdefault(included_type, {}).update(records)
             page_meta = payload.get("meta", {}).get("page", {})
             if not page_meta.get("hasMore", False) or not items:
                 break
-            offset += PAGE_SIZE
+            page_number += 1
+            if page_number > MAX_PAGES:
+                raise PaginationLimitExceeded(PROJECTS_PATH, MAX_PAGES)
         return projects, included
 
     def list_tasks(self):

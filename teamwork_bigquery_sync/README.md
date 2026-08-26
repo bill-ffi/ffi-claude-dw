@@ -95,14 +95,19 @@ I'll wire up whichever one you pick.
 
 ## Known gaps / things to verify before relying on this
 
-- **Endpoint paths.** `PROJECTS_PATH` and `TASKS_PATH` in `teamwork_client.py`
-  are confirmed working against this account (a real `--dry-run` returned
-  data from both). `TIMELOGS_PATH` and `PROJECT_BUDGETS_PATH` originally
-  404'd; they've been corrected to `/projects/api/v3/time.json` and
-  `/projects/api/v3/budgets.json` per Teamwork's public docs, but haven't
-  been live-tested yet since `apidocs.teamwork.com` itself is unreachable
-  from this sandbox's network policy. Run `python sync.py --dry-run` again
-  and confirm all four checks say `[OK]` before doing a real sync.
+- **Endpoint paths.** All four (`PROJECTS_PATH`, `TASKS_PATH`,
+  `TIMELOGS_PATH`, `PROJECT_BUDGETS_PATH`) have now returned real data in a
+  live `--dry-run` against this account.
+- **Pagination (fixed).** The first real full-sync run failed: pagination
+  used the wrong query param names (`page[size]`/`page[offset]` instead of
+  Teamwork's actual `pageSize`/`page`), so every "next page" request was
+  silently ignored by the API and kept re-fetching, running away until
+  Teamwork rate-limited it (HTTP 429). Fixed to use the correct param names,
+  and added a hard `MAX_PAGES` cap in `teamwork_client.py` plus a page-1-vs-
+  page-2 sanity check in `--dry-run` so this class of bug fails loudly
+  next time instead of quietly hammering the API. Re-run `--dry-run` after
+  any pagination-related change and confirm the "pagination sanity check"
+  line says `[OK]`.
 - **`health` (project health)** is included as a column but is best-effort:
   it wasn't present in the standard project payload during testing (even
   though Teamwork lets you *filter* projects by health). The code just
