@@ -220,11 +220,36 @@ def sync_projects(tw_client, bq_client, dataset_ref):
     category_names = transform.build_category_name_map(included)
     budgets_by_project = transform.build_budgets_by_project(raw_budgets)
 
+    # Diagnostic: this table has a real bug report (category_name always
+    # NULL despite category_id being populated) that offline testing and a
+    # live API sample couldn't reproduce — so log hard numbers from the
+    # actual production call itself rather than guessing further.
+    included_types = list(included.keys())
+    logger.info(
+        "Category resolution: included types=%s, categories resolved=%d, sample=%s",
+        included_types,
+        len(category_names),
+        dict(list(category_names.items())[:3]),
+    )
+    projects_with_category_id = sum(1 for raw in raw_projects if raw.get("categoryId") or raw.get("category"))
+    logger.info(
+        "%d/%d raw projects have a category ref (categoryId or category set)",
+        projects_with_category_id,
+        len(raw_projects),
+    )
+
     rows = []
     for raw in raw_projects:
         row = transform.normalize_project(raw, category_names, budgets_by_project)
         if row is not None:
             rows.append(row)
+
+    rows_with_category_name = sum(1 for row in rows if row.get("category_name") is not None)
+    logger.info(
+        "%d/%d final rows have a non-null category_name",
+        rows_with_category_name,
+        len(rows),
+    )
 
     written = bigquery_sync.truncate_and_load(
         bq_client, dataset_ref, schemas.PROJECTS_TABLE, schemas.PROJECTS_SCHEMA, rows
@@ -234,6 +259,8 @@ def sync_projects(tw_client, bq_client, dataset_ref):
         "status": "success",
         "rows_pulled": len(raw_projects),
         "rows_written": written,
+        "categories_resolved": len(category_names),
+        "rows_with_category_name": rows_with_category_name,
     }, valid_project_ids
 
 
