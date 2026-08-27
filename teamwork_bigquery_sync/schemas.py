@@ -15,6 +15,7 @@ PROJECTS_SCHEMA = [
     bigquery.SchemaField("category_id", "INT64"),
     bigquery.SchemaField("category_name", "STRING"),
     bigquery.SchemaField("company_id", "INT64"),
+    bigquery.SchemaField("client_name", "STRING"),
     bigquery.SchemaField("owner_id", "INT64"),
     bigquery.SchemaField("is_billable", "BOOL"),
     bigquery.SchemaField("start_date", "DATE"),
@@ -47,6 +48,10 @@ TASKS_SCHEMA = [
     bigquery.SchemaField("tasklist_id", "INT64"),
     bigquery.SchemaField("tasklist_name", "STRING"),
     bigquery.SchemaField("parent_task_id", "INT64"),
+    # Teamwork's native recurring-task mechanism: all occurrences of a
+    # recurring task share the same sequence_id. NULL for non-recurring
+    # tasks. Confirmed real and in active use (see README).
+    bigquery.SchemaField("sequence_id", "INT64"),
     bigquery.SchemaField("name", "STRING"),
     bigquery.SchemaField("description", "STRING"),
     bigquery.SchemaField("status", "STRING"),

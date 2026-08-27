@@ -20,6 +20,14 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
   — they're kept (flagged via `is_deleted`) rather than dropped, so
   historical timelogs/tasks referencing them still resolve to a name instead
   of a dangling ID.
+- **`projects.client_name`**: resolved from `company_id` via a dedicated
+  `companies.json` call (`list_companies()`), the same pattern used for
+  `category_name`. `company_id` is Teamwork's internal field for what we
+  call a client.
+- **`tasks.sequence_id`**: Teamwork's native recurring-task identifier — all
+  occurrences of a recurring task share the same `sequence_id`; `NULL` for
+  non-recurring tasks. No extra API call needed, it rides on the normal
+  tasks pull.
 - **`tasks.activity`**: the "Activity" preset-list custom field, resolved to
   its option label. Pulled in bulk at zero extra API cost via
   `tasks.json?includeCustomFields=true` (confirmed real via Teamwork's own
@@ -142,6 +150,17 @@ I'll wire up whichever one you pick.
   reads `raw.get("health")`, so it'll populate automatically if your
   account's API happens to return it, and silently stay `NULL` otherwise —
   it won't break the sync either way.
+- **`client_name` (company/client resolution).** Sourced from a dedicated
+  `companies.json` endpoint (`list_companies()`), not from any
+  `projects.json` sideload — following the same reasoning as the
+  `category_name` fix below, since this API has a track record of
+  sideloads not being reliable in production even when they work in direct
+  sampling. Item-key casing for `companies.json` hasn't been directly
+  observed, so `list_companies()` defensively tries `"companies"` then
+  `"Companies"` and logs the real top-level keys if neither matches — same
+  pattern as `list_project_categories()`. Check `--dry-run`'s "Client
+  (company) diagnostic" section, or `rows_with_client_name` /
+  `clients_resolved` in a real run's `RUN_SUMMARY`, to confirm.
 - **Portfolio boards / Portfolio columns** — not included. No endpoint for
   this surfaced anywhere in the Teamwork API surface available during
   development; it may require a separate Portfolio-specific endpoint. Let

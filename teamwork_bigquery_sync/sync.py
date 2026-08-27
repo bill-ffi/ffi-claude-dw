@@ -31,6 +31,7 @@ import schemas
 import transform
 from config import load_config
 from teamwork_client import (
+    COMPANIES_PATH,
     CUSTOM_FIELDS_PATH,
     PROJECT_BUDGETS_PATH,
     PROJECT_CATEGORIES_PATH,
@@ -249,6 +250,25 @@ def run_dry_run(client):
         any_failed = True
         print(f"[FAIL] project category diagnostic — {exc}")
 
+    # Client (Teamwork "company") diagnostic — same pattern as project
+    # categories, since companies.json's item-key casing hasn't been
+    # directly observed either.
+    print("\n--- Client (company) diagnostic ---")
+    try:
+        companies = client.list_companies()
+        print(f"[OK] companies.json ({COMPANIES_PATH}) — {len(companies)} companies")
+        if companies:
+            print(f"     sample: {json.dumps(companies[0], default=str)}")
+        else:
+            print(
+                "     WARNING: 0 companies returned. Either this account genuinely has none, "
+                "or the item-key guess in list_companies() is wrong for this account — check "
+                "the logged 'top-level keys were' warning if this looks unexpected."
+            )
+    except Exception as exc:
+        any_failed = True
+        print(f"[FAIL] client (company) diagnostic — {exc}")
+
     print()
     if any_failed:
         print("One or more checks failed. Fix TEAMWORK_BASE_URL/API key or the")
@@ -262,8 +282,22 @@ def sync_projects(tw_client, bq_client, dataset_ref):
     raw_projects, included = tw_client.list_projects()
     raw_budgets = tw_client.list_project_budgets()
     raw_categories = tw_client.list_project_categories()
+    raw_companies = tw_client.list_companies()
     category_names = transform.build_category_name_map(raw_categories)
+    client_names = transform.build_client_name_map(raw_companies)
     budgets_by_project = transform.build_budgets_by_project(raw_budgets)
+
+    logger.info(
+        "Client resolution: companies fetched=%d, resolved sample=%s",
+        len(client_names),
+        dict(list(client_names.items())[:3]),
+    )
+    projects_with_company_id = sum(1 for raw in raw_projects if raw.get("companyId") or raw.get("company"))
+    logger.info(
+        "%d/%d raw projects have a company ref (companyId or company set)",
+        projects_with_company_id,
+        len(raw_projects),
+    )
 
     # Diagnostic kept from the original bug investigation: confirms
     # projects.json's sideload really is empty in production (informational
@@ -285,14 +319,20 @@ def sync_projects(tw_client, bq_client, dataset_ref):
 
     rows = []
     for raw in raw_projects:
-        row = transform.normalize_project(raw, category_names, budgets_by_project)
+        row = transform.normalize_project(raw, category_names, budgets_by_project, client_names)
         if row is not None:
             rows.append(row)
 
     rows_with_category_name = sum(1 for row in rows if row.get("category_name") is not None)
+    rows_with_client_name = sum(1 for row in rows if row.get("client_name") is not None)
     logger.info(
         "%d/%d final rows have a non-null category_name",
         rows_with_category_name,
+        len(rows),
+    )
+    logger.info(
+        "%d/%d final rows have a non-null client_name",
+        rows_with_client_name,
         len(rows),
     )
 
@@ -306,6 +346,8 @@ def sync_projects(tw_client, bq_client, dataset_ref):
         "rows_written": written,
         "categories_resolved": len(category_names),
         "rows_with_category_name": rows_with_category_name,
+        "clients_resolved": len(client_names),
+        "rows_with_client_name": rows_with_client_name,
     }, valid_project_ids
 
 

@@ -31,12 +31,13 @@ def pick_current_budget(budgets_for_project):
     return max(candidates, key=lambda b: b.get("startDate") or "")
 
 
-def normalize_project(raw, category_names_by_id, budgets_by_project_id):
+def normalize_project(raw, category_names_by_id, budgets_by_project_id, client_names_by_id=None):
     if raw.get("status") == "deleted" or raw.get("deletedAt"):
         return None
 
     project_id = raw["id"]
     category_id = _ref_id(raw.get("category"))
+    company_id = raw.get("companyId") or _ref_id(raw.get("company"))
     budget = pick_current_budget(budgets_by_project_id.get(project_id, []))
     budget_capacity = budget.get("capacity") if budget else None
     budget_used = budget.get("capacityUsed") if budget else None
@@ -54,7 +55,8 @@ def normalize_project(raw, category_names_by_id, budgets_by_project_id):
         "sub_status": raw.get("subStatus"),
         "category_id": category_id,
         "category_name": category_names_by_id.get(category_id),
-        "company_id": raw.get("companyId") or _ref_id(raw.get("company")),
+        "company_id": company_id,
+        "client_name": (client_names_by_id or {}).get(company_id),
         "owner_id": raw.get("projectOwnerId") or raw.get("ownerId"),
         "is_billable": raw.get("isBillable"),
         "start_date": _date_part(raw.get("startAt") or raw.get("startDate")),
@@ -94,6 +96,7 @@ def normalize_task(raw, in_scope_project_ids):
         "tasklist_id": raw.get("tasklistId") or _ref_id(tasklist),
         "tasklist_name": tasklist_meta.get("name"),
         "parent_task_id": raw.get("parentTaskId") or None,
+        "sequence_id": raw.get("sequenceId") or _ref_id(raw.get("sequence")),
         "name": raw.get("name"),
         "description": raw.get("description"),
         "status": raw.get("status"),
@@ -305,6 +308,14 @@ def build_category_name_map(categories):
     production; see teamwork_client.py).
     """
     return {cat["id"]: cat.get("name") for cat in categories if cat.get("id") is not None}
+
+
+def build_client_name_map(companies):
+    """Maps company id -> name from list_companies()'s result (a flat list
+    of company dicts, "company" being Teamwork's internal term for what we
+    call a client). Mirrors build_category_name_map().
+    """
+    return {c["id"]: c.get("name") for c in companies if c.get("id") is not None}
 
 
 def build_budgets_by_project(budgets):

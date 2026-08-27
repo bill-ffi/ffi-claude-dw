@@ -41,6 +41,7 @@ USERS_PATH = "/projects/api/v3/people.json"
 CUSTOM_FIELDS_PATH = "/projects/api/v3/customfields.json"
 TASK_CUSTOM_FIELDS_PATH_TEMPLATE = "/projects/api/v3/tasks/{task_id}/customfields.json"
 PROJECT_CATEGORIES_PATH = "/projects/api/v3/projectcategories.json"
+COMPANIES_PATH = "/projects/api/v3/companies.json"
 
 # How many task-custom-field-value requests to have in flight at once when
 # fetching per-task (no bulk endpoint exists for this). Kept modest given
@@ -276,6 +277,37 @@ class TeamworkClient:
             if page_number > MAX_PAGES:
                 raise PaginationLimitExceeded(PROJECT_CATEGORIES_PATH, MAX_PAGES)
         return categories
+
+    def list_companies(self):
+        """All companies (Teamwork's term for clients), for resolving a
+        project's company_id -> a client name. Same defensive key-detection
+        as list_project_categories() — this endpoint's item-key casing
+        hasn't been directly observed either, and this API's track record
+        on casing (see module docstring) makes guessing risky.
+        """
+        payload = self._get(COMPANIES_PATH, {"page": 1, "pageSize": PAGE_SIZE})
+        item_key = None
+        for candidate in ("companies", "Companies"):
+            if candidate in payload:
+                item_key = candidate
+                break
+        if item_key is None:
+            logger.warning(
+                "companies.json response has neither 'companies' nor 'Companies' — "
+                "top-level keys were: %s",
+                list(payload.keys()),
+            )
+            return []
+
+        companies = list(payload.get(item_key) or [])
+        page_number = 1
+        while (payload.get("meta", {}).get("page", {}) or {}).get("hasMore", False):
+            page_number += 1
+            payload = self._get(COMPANIES_PATH, {"page": page_number, "pageSize": PAGE_SIZE})
+            companies.extend(payload.get(item_key) or [])
+            if page_number > MAX_PAGES:
+                raise PaginationLimitExceeded(COMPANIES_PATH, MAX_PAGES)
+        return companies
 
     def get_task_custom_field_values(self, task_id):
         """The custom field values set on one specific task. There is no
