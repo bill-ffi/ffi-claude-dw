@@ -123,6 +123,19 @@ I'll wire up whichever one you pick.
   next time instead of quietly hammering the API. Re-run `--dry-run` after
   any pagination-related change and confirm the "pagination sanity check"
   line says `[OK]`.
+- **`category_name` (fixed).** Originally resolved from `projects.json`'s
+  sideloaded `included["projectCategories"]` block, which is confirmed
+  present when sampled through other tooling but was confirmed **empty on
+  every page of every real production run of this script** — `category_id`
+  populated fine, but the name lookup always came back NULL as a result.
+  Root cause not pinned down (same auth/params, different result — never
+  reproduced outside production). Rather than keep chasing it,
+  `category_name` now comes from a dedicated `projectcategories.json` call
+  (`list_project_categories()`), the same pattern already used for
+  budgets/custom fields — not dependent on whatever does or doesn't ride
+  along with the main projects pull. Re-run and check `--dry-run`'s
+  "Project category diagnostic" section, or the `rows_with_category_name`
+  count in a real run's `RUN_SUMMARY`, to confirm.
 - **`health` (project health)** is included as a column but is best-effort:
   it wasn't present in the standard project payload during testing (even
   though Teamwork lets you *filter* projects by health). The code just

@@ -16,6 +16,13 @@ Endpoint status as of the last real full sync against this account:
   This means the per-task fetching in get_task_custom_field_values_bulk()
   is a fallback, not the primary path — see sync.py's
   enrich_tasks_with_activity() for which one actually ran.
+- projects.json's included["projectCategories"] sideload is UNRELIABLE:
+  confirmed present when sampled via other tooling, but confirmed EMPTY on
+  every page of every real production run of this script (same params).
+  Root cause not pinned down. category_name now comes from a dedicated
+  PROJECT_CATEGORIES_PATH call instead (list_project_categories()) — same
+  pattern already used for budgets/custom fields, not dependent on
+  whatever does or doesn't ride along with the main projects pull.
 """
 
 import logging
@@ -33,6 +40,7 @@ PROJECT_BUDGETS_PATH = "/projects/api/v3/budgets.json"
 USERS_PATH = "/projects/api/v3/people.json"
 CUSTOM_FIELDS_PATH = "/projects/api/v3/customfields.json"
 TASK_CUSTOM_FIELDS_PATH_TEMPLATE = "/projects/api/v3/tasks/{task_id}/customfields.json"
+PROJECT_CATEGORIES_PATH = "/projects/api/v3/projectcategories.json"
 
 # How many task-custom-field-value requests to have in flight at once when
 # fetching per-task (no bulk endpoint exists for this). Kept modest given
@@ -227,6 +235,47 @@ class TeamworkClient:
         lowercase) — NOT "customFields".
         """
         return list(self._paginate(CUSTOM_FIELDS_PATH, {}, "customfields"))
+
+    def list_project_categories(self):
+        """All project category definitions (id, name), via a dedicated
+        endpoint rather than projects.json's sideloaded
+        included["projectCategories"] block — that sideload came back
+        completely empty in real production runs (every page, every run)
+        despite reliably showing up when sampled through other tooling
+        with matching params; the discrepancy was never root-caused, so
+        this sidesteps it entirely rather than depending on it.
+
+        Response item-key casing for this specific endpoint has NOT been
+        directly observed (apidocs.teamwork.com unreachable from here to
+        confirm); tries the lowercase-URL-matching key first
+        ("projectcategories", matching the customfields.json precedent),
+        then the camelCase form as a fallback, and logs+returns [] with the
+        real top-level keys visible if neither matches — see --dry-run's
+        diagnostic for this endpoint.
+        """
+        payload = self._get(PROJECT_CATEGORIES_PATH, {"page": 1, "pageSize": PAGE_SIZE})
+        item_key = None
+        for candidate in ("projectcategories", "projectCategories"):
+            if candidate in payload:
+                item_key = candidate
+                break
+        if item_key is None:
+            logger.warning(
+                "projectcategories.json response has neither 'projectcategories' nor "
+                "'projectCategories' — top-level keys were: %s",
+                list(payload.keys()),
+            )
+            return []
+
+        categories = list(payload.get(item_key) or [])
+        page_number = 1
+        while (payload.get("meta", {}).get("page", {}) or {}).get("hasMore", False):
+            page_number += 1
+            payload = self._get(PROJECT_CATEGORIES_PATH, {"page": page_number, "pageSize": PAGE_SIZE})
+            categories.extend(payload.get(item_key) or [])
+            if page_number > MAX_PAGES:
+                raise PaginationLimitExceeded(PROJECT_CATEGORIES_PATH, MAX_PAGES)
+        return categories
 
     def get_task_custom_field_values(self, task_id):
         """The custom field values set on one specific task. There is no

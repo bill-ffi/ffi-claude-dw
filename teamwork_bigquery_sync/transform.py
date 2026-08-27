@@ -298,12 +298,13 @@ def extract_activity_map_from_sideload(tasks_included, activity_field_id, option
     return activity_by_task_id
 
 
-def build_category_name_map(projects_included):
-    """`included.projectCategories` from the projects list response, keyed
-    by category id -> name.
+def build_category_name_map(categories):
+    """Maps category id -> name from list_project_categories()'s result
+    (a flat list of category dicts from the dedicated projectcategories.json
+    endpoint — NOT the projects.json sideload, which proved unreliable in
+    production; see teamwork_client.py).
     """
-    categories = (projects_included or {}).get("projectCategories", {})
-    return {int(k): v.get("name") for k, v in categories.items()}
+    return {cat["id"]: cat.get("name") for cat in categories if cat.get("id") is not None}
 
 
 def build_budgets_by_project(budgets):

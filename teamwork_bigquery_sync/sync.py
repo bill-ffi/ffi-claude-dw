@@ -33,6 +33,7 @@ from config import load_config
 from teamwork_client import (
     CUSTOM_FIELDS_PATH,
     PROJECT_BUDGETS_PATH,
+    PROJECT_CATEGORIES_PATH,
     PROJECTS_PATH,
     TASKS_PATH,
     TIMELOGS_PATH,
@@ -228,6 +229,26 @@ def run_dry_run(client):
         any_failed = True
         print(f"[FAIL] custom field diagnostic — {exc}")
 
+    # Project category diagnostic — replaces the old approach of relying on
+    # projects.json's included["projectCategories"] sideload, which was
+    # confirmed empty on every page of every real production run despite
+    # working fine in direct sampling. Uses the dedicated endpoint instead.
+    print("\n--- Project category diagnostic ---")
+    try:
+        categories = client.list_project_categories()
+        print(f"[OK] projectcategories.json ({PROJECT_CATEGORIES_PATH}) — {len(categories)} categories")
+        if categories:
+            print(f"     sample: {json.dumps(categories[0], default=str)}")
+        else:
+            print(
+                "     WARNING: 0 categories returned. Either this account genuinely has none, "
+                "or the item-key guess in list_project_categories() is wrong for this account — "
+                "check the logged 'top-level keys were' warning if this looks unexpected."
+            )
+    except Exception as exc:
+        any_failed = True
+        print(f"[FAIL] project category diagnostic — {exc}")
+
     print()
     if any_failed:
         print("One or more checks failed. Fix TEAMWORK_BASE_URL/API key or the")
@@ -240,17 +261,18 @@ def run_dry_run(client):
 def sync_projects(tw_client, bq_client, dataset_ref):
     raw_projects, included = tw_client.list_projects()
     raw_budgets = tw_client.list_project_budgets()
-    category_names = transform.build_category_name_map(included)
+    raw_categories = tw_client.list_project_categories()
+    category_names = transform.build_category_name_map(raw_categories)
     budgets_by_project = transform.build_budgets_by_project(raw_budgets)
 
-    # Diagnostic: this table has a real bug report (category_name always
-    # NULL despite category_id being populated) that offline testing and a
-    # live API sample couldn't reproduce — so log hard numbers from the
-    # actual production call itself rather than guessing further.
-    included_types = list(included.keys())
+    # Diagnostic kept from the original bug investigation: confirms
+    # projects.json's sideload really is empty in production (informational
+    # — no longer what category_name depends on) alongside the dedicated
+    # endpoint's real resolution numbers.
     logger.info(
-        "Category resolution: included types=%s, categories resolved=%d, sample=%s",
-        included_types,
+        "Category resolution: projects.json included types=%s (sideload, unused), "
+        "categories from dedicated endpoint=%d, resolved sample=%s",
+        list(included.keys()),
         len(category_names),
         dict(list(category_names.items())[:3]),
     )
