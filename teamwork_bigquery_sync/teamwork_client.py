@@ -9,6 +9,13 @@ Endpoint status as of the last real full sync against this account:
   per-task custom field values endpoint returns "customfieldTasks", while
   most other list endpoints use camelCase ("projects", "tasks", "people").
   Confirmed live rather than assumed; don't "fix" the casing below.
+- includeCustomFields=true on tasks.json (and projects.json) sideloads
+  custom field values in bulk under included["customfieldTasks"] (or
+  included["customfieldProjects"]) — confirmed via Teamwork's own public
+  github.com/Teamwork/Teamwork.com-API-Request-Examples repo, NOT a guess.
+  This means the per-task fetching in get_task_custom_field_values_bulk()
+  is a fallback, not the primary path — see sync.py's
+  enrich_tasks_with_activity() for which one actually ran.
 """
 
 import logging
@@ -161,9 +168,37 @@ class TeamworkClient:
     def list_tasks(self):
         """All tasks site-wide, including completed ones. Filtered down to
         tasks belonging to in-scope projects by the caller.
+
+        Also requests includeCustomFields=true — confirmed real via
+        Teamwork's own public API-Request-Examples repo (not guessed) — so
+        the per-task custom field values come back sideloaded under
+        included["customfieldTasks"] in the SAME response, no per-task call
+        needed. Returns (tasks, included) like list_projects().
         """
-        params = {"includeCompletedTasks": "true"}
-        return list(self._paginate(TASKS_PATH, params, "tasks"))
+        params = {"includeCompletedTasks": "true", "includeCustomFields": "true"}
+        tasks = []
+        included = {}
+        page_number = 1
+        while True:
+            page_params = dict(params)
+            page_params["page"] = page_number
+            page_params["pageSize"] = PAGE_SIZE
+            payload = self._get(TASKS_PATH, page_params)
+            items = payload.get("tasks", [])
+            logger.info("Fetched tasks page %d: %d items", page_number, len(items))
+            tasks.extend(items)
+            for included_type, records in (payload.get("included") or {}).items():
+                if isinstance(records, dict):
+                    included.setdefault(included_type, {}).update(records)
+                elif isinstance(records, list):
+                    included.setdefault(included_type, []).extend(records)
+            page_meta = payload.get("meta", {}).get("page", {})
+            if not page_meta.get("hasMore", False) or not items:
+                break
+            page_number += 1
+            if page_number > MAX_PAGES:
+                raise PaginationLimitExceeded(TASKS_PATH, MAX_PAGES)
+        return tasks, included
 
     def list_timelogs(self, start_date, end_date):
         """Timelogs with a log date in [start_date, end_date], both

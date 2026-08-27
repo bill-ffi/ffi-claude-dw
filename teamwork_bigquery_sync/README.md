@@ -21,13 +21,16 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
   historical timelogs/tasks referencing them still resolve to a name instead
   of a dangling ID.
 - **`tasks.activity`**: the "Activity" preset-list custom field, resolved to
-  its option label. Teamwork doesn't include custom field values on the
-  bulk tasks list, so this requires one extra API call *per task* (no bulk
-  endpoint exists) — done concurrently (8 at a time) after the main tasks
-  pull. This is why a full sync now takes noticeably longer than before. A
-  failure to resolve a given task's activity (or to find the field at all)
-  is non-fatal: that row's `activity` just stays `NULL` and everything else
-  still loads.
+  its option label. Pulled in bulk at zero extra API cost via
+  `tasks.json?includeCustomFields=true` (confirmed real via Teamwork's own
+  [public API-Request-Examples repo](https://github.com/Teamwork/Teamwork.com-API-Request-Examples),
+  not a guess) — the values ride along on the same tasks pull already
+  happening, in `included.customfieldTasks`. If that sideload is ever
+  missing on a given account/response, the code automatically falls back to
+  one API call per task (concurrent, throttled) — slower but functionally
+  equivalent. A failure to resolve a given task's activity (or to find the
+  field at all) is non-fatal either way: that row's `activity` just stays
+  `NULL` and everything else still loads.
 - Logs a `RUN_SUMMARY` JSON line at the end of every run with rows
   pulled/written per table and any errors, for auditability.
 
@@ -150,16 +153,23 @@ I'll wire up whichever one you pick.
   GL, BANK RECS, A/P & EXP, A/R & INV, REVnCOGS, CONTROLLING, PAYROLL, HR,
   ADVISORY, CLIENT MNGMT, FP&A, PROJECTS, COMPLIANCE — pulled from Teamwork
   at sync time, not hardcoded, so this list updates itself if the options
-  ever change). Two casing quirks worth knowing if touching this code:
+  ever change). Casing quirks worth knowing if touching this code:
   `customfields.json` returns items under `"customfields"` (lowercase f),
-  and the per-task values endpoint returns `"customfieldTasks"` — both
-  different from the camelCase used by every other endpoint in this repo.
-  A resolution failure for any individual task is still non-fatal (that
-  row's `activity` just stays `NULL`).
-- **Per-task fetching is slow.** There's no bulk endpoint for task custom
-  field values, so this is ~7,400+ individual API calls (8 concurrent),
-  meaningfully increasing run time. Accepted tradeoff per your confirmation
-  that a few extra minutes twice a day is fine.
+  and both the per-task and bulk-sideload values come back under
+  `"customfieldTasks"` — different from the camelCase used by every other
+  endpoint in this repo. A resolution failure for any individual task is
+  non-fatal (that row's `activity` just stays `NULL`).
+- **Bulk vs. per-task fetching for Activity.** Originally built as
+  ~7,400+ individual API calls (one per task, 8 concurrent) because no bulk
+  mechanism appeared documented. Teamwork's own
+  [public API-Request-Examples repo](https://github.com/Teamwork/Teamwork.com-API-Request-Examples)
+  showed `tasks.json?includeCustomFields=true` sideloads all values in bulk
+  under `included.customfieldTasks` — essentially free, since it rides on
+  the tasks pull that already happens. This is now the primary path; the
+  per-task method is kept as an automatic fallback (triggers only if that
+  sideload key is missing from the response) rather than removed, so a
+  quirk on this specific account can't silently lose the whole feature.
+  `--dry-run`'s diagnostic reports which path a real run would take.
 
 ## Files
 

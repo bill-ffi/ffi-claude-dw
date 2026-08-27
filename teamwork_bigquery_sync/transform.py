@@ -249,6 +249,55 @@ def extract_activity_value(raw_task_custom_field_values, activity_field_id, opti
     return None
 
 
+def extract_activity_map_from_sideload(tasks_included, activity_field_id, option_labels):
+    """Given the `included` block from a bulk tasks.json pull made with
+    includeCustomFields=true, builds {task_id: activity_label} for every
+    task that has the Activity field set.
+
+    Returns None if included["customfieldTasks"] is missing entirely —
+    that's the signal to the caller that the bulk sideload didn't work and
+    it should fall back to per-task fetching. Returns {} (not None) if the
+    key is present but nothing matched the activity field.
+
+    Confirmed-live entry shape (from a single-task pull, presumed to hold
+    for the bulk sideload too — see the "bulk_sideload_entry_shape" dry-run
+    diagnostic to confirm): {"customfield": {"id": ...}, "customfieldId":
+    ..., "taskId": ..., "value": "<label>"}. The examples in Teamwork's own
+    public API-Request-Examples repo iterate this as an object keyed by the
+    value's own id (`for key in customfieldTasks`), so this handles both a
+    dict-of-values and a plain list defensively.
+    """
+    customfield_tasks = tasks_included.get("customfieldTasks")
+    if customfield_tasks is None:
+        return None
+
+    entries = customfield_tasks.values() if isinstance(customfield_tasks, dict) else customfield_tasks
+
+    activity_by_task_id = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        field_ref = entry.get("customfield") or {}
+        field_id = field_ref.get("id") if isinstance(field_ref, dict) else None
+        if field_id is None:
+            field_id = entry.get("customfieldId")
+        if field_id != activity_field_id:
+            continue
+        task_id = entry.get("taskId")
+        if task_id is None:
+            task_ref = entry.get("task") or {}
+            task_id = task_ref.get("id") if isinstance(task_ref, dict) else None
+        if task_id is None:
+            continue
+        value = entry.get("value")
+        if isinstance(value, dict):
+            value = value.get("label") or value.get("name") or value.get("value")
+        elif value in option_labels:
+            value = option_labels[value]
+        activity_by_task_id[task_id] = value
+    return activity_by_task_id
+
+
 def build_category_name_map(projects_included):
     """`included.projectCategories` from the projects list response, keyed
     by category id -> name.

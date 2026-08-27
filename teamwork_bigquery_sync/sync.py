@@ -182,16 +182,39 @@ def run_dry_run(client):
             option_labels = transform.build_option_label_map(activity_field)
             print(f"     parsed options: {option_labels}")
 
+            # Bulk sideload check (the fast, cheap path — confirmed real via
+            # Teamwork's own public examples repo, but not yet verified live
+            # on this account's tasks.json response).
+            bulk_payload = client._get(
+                TASKS_PATH,
+                {"page": 1, "pageSize": 20, "includeCompletedTasks": "true", "includeCustomFields": "true"},
+            )
+            bulk_included = bulk_payload.get("included") or {}
+            print(f"     bulk pull 'included' top-level keys: {list(bulk_included.keys())}")
+            activity_map = transform.extract_activity_map_from_sideload(
+                bulk_included, activity_field["id"], option_labels
+            )
+            if activity_map is None:
+                print(
+                    "     [FAIL] included.customfieldTasks is missing from a "
+                    "tasks.json?includeCustomFields=true response — the bulk path won't "
+                    "work on this account; the code will automatically fall back to the "
+                    "slower per-task method (still verified working below)."
+                )
+            else:
+                print(f"     [OK] bulk sideload present, {len(activity_map)} activity value(s) "
+                      f"resolved from this 20-task sample: {activity_map}")
+
             sample_tasks = client._get(TASKS_PATH, {"page": 1, "pageSize": 1}).get("tasks", [])
             if sample_tasks:
                 sample_task_id = sample_tasks[0]["id"]
                 raw_values = client.get_task_custom_field_values(sample_task_id)
-                print(f"     sample task {sample_task_id} raw custom field values: "
-                      f"{json.dumps(raw_values, default=str)}")
+                print(f"     [per-task fallback check] sample task {sample_task_id} raw "
+                      f"custom field values: {json.dumps(raw_values, default=str)}")
                 resolved = transform.extract_activity_value(
                     raw_values, activity_field["id"], option_labels
                 )
-                print(f"     parsed activity value for that task: {resolved!r}")
+                print(f"     parsed activity value for that task (per-task method): {resolved!r}")
                 if raw_values and resolved is None:
                     print(
                         "     note: this task has other custom field values set but none for "
@@ -267,12 +290,19 @@ def sync_projects(tw_client, bq_client, dataset_ref):
 ACTIVITY_FIELD_NAME = "Activity"
 
 
-def enrich_tasks_with_activity(tw_client, rows):
+def enrich_tasks_with_activity(tw_client, rows, tasks_included):
     """Mutates each row's "activity" in place. Non-fatal on any failure —
-    the "Activity" field not being found, or individual task fetches
-    failing, just leaves those rows' activity as None rather than failing
-    the whole tasks sync (which would also lose everything else).
-    Returns a small dict of stats for the run summary / dry-run visibility.
+    the "Activity" field not being found, or values not resolving, just
+    leaves those rows' activity as None rather than failing the whole
+    tasks sync. Returns a small dict of stats for the run summary / dry-run
+    visibility.
+
+    Tries the bulk sideload first (included["customfieldTasks"], from
+    tasks.json?includeCustomFields=true — confirmed real via Teamwork's own
+    public API-Request-Examples repo, costs zero extra API calls since it
+    rides along on the tasks pull already happening). Falls back to the
+    slower one-request-per-task method only if that sideload is entirely
+    missing from the response.
     """
     custom_fields = tw_client.list_custom_fields()
     activity_field = transform.find_custom_field_by_name(custom_fields, ACTIVITY_FIELD_NAME)
@@ -285,33 +315,60 @@ def enrich_tasks_with_activity(tw_client, rows):
         )
         return {"field_found": False, "available_fields": [cf.get("name") for cf in custom_fields]}
 
+    activity_field_id = activity_field["id"]
     option_labels = transform.build_option_label_map(activity_field)
-    task_ids = [row["task_id"] for row in rows]
-    logger.info("Fetching Activity values for %d tasks...", len(task_ids))
-    values_by_task = tw_client.get_task_custom_field_values_bulk(
-        task_ids,
-        on_progress=lambda done, total: logger.info("Activity fetch: %d/%d", done, total),
+
+    activity_by_task_id = transform.extract_activity_map_from_sideload(
+        tasks_included, activity_field_id, option_labels
     )
 
-    resolved = 0
     fetch_failed = 0
+    if activity_by_task_id is not None:
+        method = "bulk_sideload"
+        logger.info(
+            "Resolved Activity via bulk sideload: %d task values found in "
+            "included.customfieldTasks (no extra API calls needed)",
+            len(activity_by_task_id),
+        )
+    else:
+        method = "per_task_fallback"
+        logger.warning(
+            "included.customfieldTasks missing from the tasks pull — bulk sideload "
+            "isn't working as expected on this account, falling back to one request "
+            "per task (slower, ~%d extra API calls).",
+            len(rows),
+        )
+        task_ids = [row["task_id"] for row in rows]
+        values_by_task = tw_client.get_task_custom_field_values_bulk(
+            task_ids,
+            on_progress=lambda done, total: logger.info("Activity fetch: %d/%d", done, total),
+        )
+        activity_by_task_id = {}
+        for task_id, raw_values in values_by_task.items():
+            if raw_values is None:
+                fetch_failed += 1
+                continue
+            activity_by_task_id[task_id] = transform.extract_activity_value(
+                raw_values, activity_field_id, option_labels
+            )
+
+    resolved = 0
     for row in rows:
-        raw_values = values_by_task.get(row["task_id"])
-        if raw_values is None:
-            fetch_failed += 1
-            continue
-        activity = transform.extract_activity_value(raw_values, activity_field["id"], option_labels)
-        row["activity"] = activity
+        activity = activity_by_task_id.get(row["task_id"])
         if activity is not None:
+            row["activity"] = activity
             resolved += 1
 
-    return {
+    stats = {
         "field_found": True,
-        "field_id": activity_field.get("id"),
+        "field_id": activity_field_id,
+        "method": method,
         "options": list(option_labels.values()),
         "tasks_resolved": resolved,
-        "tasks_fetch_failed": fetch_failed,
     }
+    if method == "per_task_fallback":
+        stats["tasks_fetch_failed"] = fetch_failed
+    return stats
 
 
 def sync_tasks(tw_client, bq_client, dataset_ref, valid_project_ids):
@@ -322,7 +379,7 @@ def sync_tasks(tw_client, bq_client, dataset_ref, valid_project_ids):
         )
         return {"status": "skipped", "reason": "projects sync failed"}
 
-    raw_tasks = tw_client.list_tasks()
+    raw_tasks, tasks_included = tw_client.list_tasks()
     rows = []
     for raw in raw_tasks:
         row = transform.normalize_task(raw, valid_project_ids)
@@ -330,7 +387,7 @@ def sync_tasks(tw_client, bq_client, dataset_ref, valid_project_ids):
             rows.append(row)
 
     try:
-        activity_stats = enrich_tasks_with_activity(tw_client, rows)
+        activity_stats = enrich_tasks_with_activity(tw_client, rows, tasks_included)
     except Exception:
         logger.error("Activity enrichment failed, continuing without it:\n%s", traceback.format_exc())
         activity_stats = {"field_found": False, "error": "enrichment raised an exception, see logs"}
