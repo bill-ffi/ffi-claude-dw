@@ -2,15 +2,15 @@ name: Teamwork -> BigQuery sync
 
 # Runs the Teamwork -> BigQuery sync script automatically, twice a day.
 #
-# Schedule below is 10:00 and 17:00 UTC, which is 5am / noon US Eastern
-# Standard Time. GitHub Actions cron does not know about daylight saving,
-# so during Eastern Daylight Time (roughly mid-March to early November)
-# this will actually run at 6am / 1pm Eastern instead. If exact clock-hour
-# timing matters year-round, ask to add DST-aware gating — for now this
-# keeps things simple.
+# Schedule below is 05:00 and 17:00 UTC, which is midnight / noon US
+# Eastern Standard Time. GitHub Actions cron does not know about daylight
+# saving, so during Eastern Daylight Time (roughly mid-March to early
+# November) this will actually run at 1am / 1pm Eastern instead. If exact
+# clock-hour timing matters year-round, ask to add DST-aware gating — for
+# now this keeps things simple.
 on:
   schedule:
-    - cron: '0 10,17 * * *'
+    - cron: '0 5,17 * * *'
   # Lets you trigger a run manually from the "Actions" tab in GitHub,
   # instead of waiting for the schedule — useful for testing.
   workflow_dispatch:
