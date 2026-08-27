@@ -10,6 +10,8 @@ from schemas import (
     TIMELOGS_SCHEMA,
     TIMELOGS_STAGING_TABLE,
     TIMELOGS_TABLE,
+    USERS_SCHEMA,
+    USERS_TABLE,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,7 @@ def ensure_all_tables(client, dataset_ref):
     ensure_table(client, dataset_ref, TASKS_TABLE, TASKS_SCHEMA)
     ensure_table(client, dataset_ref, TIMELOGS_TABLE, TIMELOGS_SCHEMA)
     ensure_table(client, dataset_ref, TIMELOGS_STAGING_TABLE, TIMELOGS_SCHEMA)
+    ensure_table(client, dataset_ref, USERS_TABLE, USERS_SCHEMA)
 
 
 def truncate_and_load(client, dataset_ref, table_name, schema, rows):

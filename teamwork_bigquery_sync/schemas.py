@@ -4,6 +4,7 @@ PROJECTS_TABLE = "projects"
 TASKS_TABLE = "tasks"
 TIMELOGS_TABLE = "timelogs"
 TIMELOGS_STAGING_TABLE = "timelogs__staging"
+USERS_TABLE = "users"
 
 PROJECTS_SCHEMA = [
     bigquery.SchemaField("project_id", "INT64", mode="REQUIRED"),
@@ -83,6 +84,32 @@ TIMELOGS_SCHEMA = [
     bigquery.SchemaField("cost_rate", "FLOAT64"),
     bigquery.SchemaField("description", "STRING"),
     bigquery.SchemaField("is_locked", "BOOL"),
+    bigquery.SchemaField("created_at", "TIMESTAMP"),
+    bigquery.SchemaField("updated_at", "TIMESTAMP"),
+    bigquery.SchemaField("synced_at", "TIMESTAMP", mode="REQUIRED"),
+]
+
+USERS_SCHEMA = [
+    bigquery.SchemaField("user_id", "INT64", mode="REQUIRED"),
+    bigquery.SchemaField("first_name", "STRING"),
+    bigquery.SchemaField("last_name", "STRING"),
+    bigquery.SchemaField("full_name", "STRING"),
+    bigquery.SchemaField("email", "STRING"),
+    bigquery.SchemaField("title", "STRING"),
+    bigquery.SchemaField("user_type", "STRING"),
+    bigquery.SchemaField("is_admin", "BOOL"),
+    bigquery.SchemaField("company_id", "INT64"),
+    # Deactivated/deleted users are kept (not filtered out) so historical
+    # timelogs/tasks referencing them still resolve to a name — flagged here
+    # instead.
+    bigquery.SchemaField("is_deleted", "BOOL"),
+    bigquery.SchemaField("last_login", "TIMESTAMP"),
+    bigquery.SchemaField("timezone", "STRING"),
+    # Internal cost rate and billing rate per hour. Included per explicit
+    # confirmation — this is compensation-adjacent data; consider restricting
+    # BigQuery read access to this table/these columns if that matters later.
+    bigquery.SchemaField("user_cost", "FLOAT64"),
+    bigquery.SchemaField("user_rate", "FLOAT64"),
     bigquery.SchemaField("created_at", "TIMESTAMP"),
     bigquery.SchemaField("updated_at", "TIMESTAMP"),
     bigquery.SchemaField("synced_at", "TIMESTAMP", mode="REQUIRED"),

@@ -1,12 +1,12 @@
 # Teamwork → BigQuery sync
 
-Pulls Projects, Tasks, and Time logs from Teamwork and loads them into
+Pulls Projects, Tasks, Users, and Time logs from Teamwork and loads them into
 BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
 (twice daily), not inside a chat session — see **Scheduling** below.
 
 ## What it does
 
-- **projects**, **tasks**: full truncate + reload every run.
+- **projects**, **tasks**, **users**: full truncate + reload every run.
 - **timelogs**: only the current calendar month's rows are deleted and
   reinserted each run (by `log_date`, derived from Teamwork's `timeLogged`
   field). Prior months are left untouched. The delete+insert is wrapped in a
@@ -16,6 +16,10 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
   late, upcoming, completed, and archived are all included, per your
   instruction to "pull everything but deleted"). Tasks are filtered to
   belong to one of those in-scope projects.
+- Users scope: everyone on the account, including deactivated/deleted users
+  — they're kept (flagged via `is_deleted`) rather than dropped, so
+  historical timelogs/tasks referencing them still resolve to a name instead
+  of a dangling ID.
 - Logs a `RUN_SUMMARY` JSON line at the end of every run with rows
   pulled/written per table and any errors, for auditability.
 
@@ -126,9 +130,12 @@ I'll wire up whichever one you pick.
   the numbers for.
 - **BigQuery dataset location** defaults to `US` (multi-region) — change
   `BQ_LOCATION` in `.env` if you need a specific region.
-- No `users` dimension table — `assignee_user_ids`/`user_id`/etc. are raw
-  Teamwork user IDs, not resolved names. Easy to add later (a `users` table
-  from Teamwork's people endpoint) if useful for reporting.
+- **`users` table includes `user_cost` and `user_rate`** (each person's
+  internal cost rate and billing rate, converted from Teamwork's cents to
+  dollars). This is compensation-adjacent data, included per explicit
+  confirmation — if BigQuery access to this project is ever opened up to a
+  wider audience, consider restricting read access to the `users` table (or
+  those two columns specifically) at that point.
 
 ## Files
 

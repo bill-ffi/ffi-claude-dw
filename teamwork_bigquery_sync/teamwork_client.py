@@ -1,13 +1,12 @@
 """Thin client for the Teamwork Projects REST API (v3).
 
-Endpoint status as of the last real dry-run against this account:
-- PROJECTS_PATH, TASKS_PATH: confirmed working (returned real data).
-- TIMELOGS_PATH, PROJECT_BUDGETS_PATH: the original guesses 404'd; these
-  were corrected using Teamwork's public API docs (found via search, since
-  apidocs.teamwork.com itself is unreachable from this environment's
-  network policy) but have NOT yet been live-tested against this account.
-  Re-run `python sync.py --dry-run` after any endpoint change and confirm
-  [OK] on all four checks before relying on this.
+Endpoint status as of the last real full sync against this account:
+- PROJECTS_PATH, TASKS_PATH, TIMELOGS_PATH, PROJECT_BUDGETS_PATH: confirmed
+  working end-to-end (real data loaded into BigQuery).
+- USERS_PATH: confirmed live via a direct sample call (16 people returned,
+  key "people") when this was added, but not yet exercised through a full
+  `python sync.py` run. Re-run `--dry-run` and confirm [OK] before relying
+  on it.
 """
 
 import logging
@@ -21,6 +20,7 @@ PROJECTS_PATH = "/projects/api/v3/projects.json"
 TASKS_PATH = "/projects/api/v3/tasks.json"
 TIMELOGS_PATH = "/projects/api/v3/time.json"
 PROJECT_BUDGETS_PATH = "/projects/api/v3/budgets.json"
+USERS_PATH = "/projects/api/v3/people.json"
 
 PAGE_SIZE = 250
 MAX_RETRIES = 4
@@ -164,3 +164,11 @@ class TeamworkClient:
 
     def list_project_budgets(self):
         return list(self._paginate(PROJECT_BUDGETS_PATH, {}, "budgets"))
+
+    def list_users(self):
+        """All people (Teamwork's term for users) on the account, including
+        deactivated ones — deleted/deactivated users can still be referenced
+        by historical timelogs and tasks, so we keep them (flagged via
+        is_deleted) rather than filtering them out.
+        """
+        return list(self._paginate(USERS_PATH, {}, "people"))

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Entrypoint: pulls Projects, Tasks, and Timelogs from Teamwork and syncs
-them into BigQuery. Meant to be triggered by an external scheduler (cron,
-GitHub Actions, or Cloud Scheduler + Cloud Run) — see README.md.
+"""Entrypoint: pulls Projects, Tasks, Users, and Timelogs from Teamwork and
+syncs them into BigQuery. Meant to be triggered by an external scheduler
+(cron, GitHub Actions, or Cloud Scheduler + Cloud Run) — see README.md.
 
 Usage:
-    python sync.py             # full sync (projects, tasks, current-month timelogs)
+    python sync.py             # full sync (projects, tasks, users, current-month timelogs)
     python sync.py --dry-run   # connectivity + payload-shape check only,
                                 # does not touch BigQuery or write anything
     python sync.py --backfill-months 2026-01,2026-02,2026-03
@@ -35,6 +35,7 @@ from teamwork_client import (
     PROJECTS_PATH,
     TASKS_PATH,
     TIMELOGS_PATH,
+    USERS_PATH,
     TeamworkClient,
 )
 
@@ -109,6 +110,7 @@ def run_dry_run(client):
             {"page": 1, "pageSize": 1},
             "budgets",
         ),
+        ("users", USERS_PATH, {"page": 1, "pageSize": 1}, "people"),
     ]
     any_failed = False
     for label, path, params, item_key in checks:
@@ -214,6 +216,20 @@ def sync_tasks(tw_client, bq_client, dataset_ref, valid_project_ids):
     }
 
 
+def sync_users(tw_client, bq_client, dataset_ref):
+    raw_users = tw_client.list_users()
+    rows = [transform.normalize_user(raw) for raw in raw_users]
+
+    written = bigquery_sync.truncate_and_load(
+        bq_client, dataset_ref, schemas.USERS_TABLE, schemas.USERS_SCHEMA, rows
+    )
+    return {
+        "status": "success",
+        "rows_pulled": len(raw_users),
+        "rows_written": written,
+    }
+
+
 def sync_timelogs_for_month(tw_client, bq_client, gcp_project_id, dataset_id, month_start, month_end_exclusive):
     """Deletes+reinserts the timelogs rows for exactly [month_start,
     month_end_exclusive). Used both for "this calendar month" (the normal
@@ -271,6 +287,12 @@ def run_full_sync(cfg):
     except Exception:
         logger.error("Tasks sync failed:\n%s", traceback.format_exc())
         stages["tasks"] = {"status": "failed", "error": traceback.format_exc()}
+
+    try:
+        stages["users"] = sync_users(tw_client, bq_client, dataset_ref)
+    except Exception:
+        logger.error("Users sync failed:\n%s", traceback.format_exc())
+        stages["users"] = {"status": "failed", "error": traceback.format_exc()}
 
     try:
         month_start, month_end_exclusive = month_window(cfg.sync_timezone)

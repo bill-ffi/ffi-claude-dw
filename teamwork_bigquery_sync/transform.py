@@ -143,6 +143,35 @@ def normalize_timelog(raw):
     }
 
 
+def normalize_user(raw):
+    first_name = raw.get("firstName") or ""
+    last_name = raw.get("lastName") or ""
+    full_name = f"{first_name} {last_name}".strip() or None
+
+    return {
+        "user_id": raw["id"],
+        "first_name": raw.get("firstName"),
+        "last_name": raw.get("lastName"),
+        "full_name": full_name,
+        "email": raw.get("email"),
+        "title": raw.get("title"),
+        "user_type": raw.get("type"),
+        "is_admin": raw.get("isAdmin"),
+        "company_id": raw.get("companyId") or _ref_id(raw.get("company")),
+        "is_deleted": raw.get("deleted"),
+        "last_login": raw.get("lastLogin"),
+        "timezone": raw.get("timezone"),
+        # userCost/userRate come back from Teamwork in cents (confirmed by
+        # cross-checking against userRates[...].amount, which is in dollars,
+        # on a live sample) — divide down to actual currency units.
+        "user_cost": raw.get("userCost") / 100.0 if raw.get("userCost") is not None else None,
+        "user_rate": raw.get("userRate") / 100.0 if raw.get("userRate") is not None else None,
+        "created_at": raw.get("createdAt"),
+        "updated_at": raw.get("updatedAt"),
+        "synced_at": utc_now_iso(),
+    }
+
+
 def build_category_name_map(projects_included):
     """`included.projectCategories` from the projects list response, keyed
     by category id -> name.
