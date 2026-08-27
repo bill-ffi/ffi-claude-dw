@@ -20,6 +20,14 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
   — they're kept (flagged via `is_deleted`) rather than dropped, so
   historical timelogs/tasks referencing them still resolve to a name instead
   of a dangling ID.
+- **`tasks.activity`**: the "Activity" preset-list custom field, resolved to
+  its option label. Teamwork doesn't include custom field values on the
+  bulk tasks list, so this requires one extra API call *per task* (no bulk
+  endpoint exists) — done concurrently (8 at a time) after the main tasks
+  pull. This is why a full sync now takes noticeably longer than before. A
+  failure to resolve a given task's activity (or to find the field at all)
+  is non-fatal: that row's `activity` just stays `NULL` and everything else
+  still loads.
 - Logs a `RUN_SUMMARY` JSON line at the end of every run with rows
   pulled/written per table and any errors, for auditability.
 
@@ -136,6 +144,22 @@ I'll wire up whichever one you pick.
   confirmation — if BigQuery access to this project is ever opened up to a
   wider audience, consider restricting read access to the `users` table (or
   those two columns specifically) at that point.
+- **`tasks.activity` (unverified shape).** The custom-fields endpoints
+  (`customfields.json` and `tasks/{id}/customfields.json`) are documented to
+  exist, but their exact response shape (how a value links back to its
+  field, how an option's label is represented) hasn't been observed against
+  this account — the parsing in `transform.py`'s `extract_activity_value()`
+  / `build_option_label_map()` is a best-effort guess covering a few
+  plausible layouts. **Run `--dry-run` and read the "Activity custom field
+  diagnostic" section of its output** — it prints the raw field definition,
+  raw per-task values, and what got parsed out of them, so it's obvious
+  whether the parsing needs adjusting before trusting this column. A
+  parsing miss is non-fatal (the column just stays `NULL`), so it's safe to
+  iterate on.
+- **Per-task fetching is slow.** There's no bulk endpoint for task custom
+  field values, so this is ~7,400+ individual API calls (8 concurrent),
+  meaningfully increasing run time. Accepted tradeoff per your confirmation
+  that a few extra minutes twice a day is fine.
 
 ## Files
 

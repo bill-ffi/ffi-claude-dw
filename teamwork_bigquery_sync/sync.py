@@ -31,6 +31,7 @@ import schemas
 import transform
 from config import load_config
 from teamwork_client import (
+    CUSTOM_FIELDS_PATH,
     PROJECT_BUDGETS_PATH,
     PROJECTS_PATH,
     TASKS_PATH,
@@ -111,6 +112,7 @@ def run_dry_run(client):
             "budgets",
         ),
         ("users", USERS_PATH, {"page": 1, "pageSize": 1}, "people"),
+        ("custom fields", CUSTOM_FIELDS_PATH, {"page": 1, "pageSize": 50}, "customFields"),
     ]
     any_failed = False
     for label, path, params, item_key in checks:
@@ -159,6 +161,48 @@ def run_dry_run(client):
         any_failed = True
         print(f"\n[FAIL] pagination sanity check — {exc}")
 
+    # Activity custom field diagnostic: this whole area (custom field
+    # definitions/values) is unverified — print the raw shapes so it's easy
+    # to fix transform.py's parsing if it's wrong, without needing another
+    # round trip through a full run.
+    print("\n--- 'Activity' custom field diagnostic (unverified endpoint) ---")
+    try:
+        custom_fields = client._get(CUSTOM_FIELDS_PATH, {"page": 1, "pageSize": 250}).get(
+            "customFields", []
+        )
+        activity_field = transform.find_custom_field_by_name(custom_fields, ACTIVITY_FIELD_NAME)
+        if activity_field is None:
+            any_failed = True
+            names = [cf.get("name") for cf in custom_fields]
+            print(f"[FAIL] No custom field named '{ACTIVITY_FIELD_NAME}' found. Available: {names}")
+        else:
+            print(f"[OK] Found '{ACTIVITY_FIELD_NAME}' field, id={activity_field.get('id')}")
+            print(f"     raw field definition: {json.dumps(activity_field, default=str)}")
+            option_labels = transform.build_option_label_map(activity_field)
+            print(f"     parsed options: {option_labels}")
+
+            sample_tasks = client._get(TASKS_PATH, {"page": 1, "pageSize": 1}).get("tasks", [])
+            if sample_tasks:
+                sample_task_id = sample_tasks[0]["id"]
+                raw_values = client.get_task_custom_field_values(sample_task_id)
+                print(f"     sample task {sample_task_id} raw custom field values: "
+                      f"{json.dumps(raw_values, default=str)}")
+                resolved = transform.extract_activity_value(
+                    raw_values, activity_field["id"], option_labels
+                )
+                print(f"     parsed activity value for that task: {resolved!r}")
+                if raw_values and resolved is None:
+                    print(
+                        "     WARNING: got raw values back but couldn't resolve an activity "
+                        "label from them — transform.extract_activity_value() likely needs "
+                        "adjusting to match the shape printed above."
+                    )
+            else:
+                print("     no tasks available to sample a custom field value from")
+    except Exception as exc:
+        any_failed = True
+        print(f"[FAIL] custom field diagnostic — {exc}")
+
     print()
     if any_failed:
         print("One or more checks failed. Fix TEAMWORK_BASE_URL/API key or the")
@@ -191,6 +235,56 @@ def sync_projects(tw_client, bq_client, dataset_ref):
     }, valid_project_ids
 
 
+ACTIVITY_FIELD_NAME = "Activity"
+
+
+def enrich_tasks_with_activity(tw_client, rows):
+    """Mutates each row's "activity" in place. Non-fatal on any failure —
+    the "Activity" field not being found, or individual task fetches
+    failing, just leaves those rows' activity as None rather than failing
+    the whole tasks sync (which would also lose everything else).
+    Returns a small dict of stats for the run summary / dry-run visibility.
+    """
+    custom_fields = tw_client.list_custom_fields()
+    activity_field = transform.find_custom_field_by_name(custom_fields, ACTIVITY_FIELD_NAME)
+    if activity_field is None:
+        logger.warning(
+            "'%s' custom field not found (found: %s) — leaving activity as NULL "
+            "for all tasks this run.",
+            ACTIVITY_FIELD_NAME,
+            [cf.get("name") for cf in custom_fields],
+        )
+        return {"field_found": False, "available_fields": [cf.get("name") for cf in custom_fields]}
+
+    option_labels = transform.build_option_label_map(activity_field)
+    task_ids = [row["task_id"] for row in rows]
+    logger.info("Fetching Activity values for %d tasks...", len(task_ids))
+    values_by_task = tw_client.get_task_custom_field_values_bulk(
+        task_ids,
+        on_progress=lambda done, total: logger.info("Activity fetch: %d/%d", done, total),
+    )
+
+    resolved = 0
+    fetch_failed = 0
+    for row in rows:
+        raw_values = values_by_task.get(row["task_id"])
+        if raw_values is None:
+            fetch_failed += 1
+            continue
+        activity = transform.extract_activity_value(raw_values, activity_field["id"], option_labels)
+        row["activity"] = activity
+        if activity is not None:
+            resolved += 1
+
+    return {
+        "field_found": True,
+        "field_id": activity_field.get("id"),
+        "options": list(option_labels.values()),
+        "tasks_resolved": resolved,
+        "tasks_fetch_failed": fetch_failed,
+    }
+
+
 def sync_tasks(tw_client, bq_client, dataset_ref, valid_project_ids):
     if valid_project_ids is None:
         logger.warning(
@@ -206,6 +300,12 @@ def sync_tasks(tw_client, bq_client, dataset_ref, valid_project_ids):
         if row is not None:
             rows.append(row)
 
+    try:
+        activity_stats = enrich_tasks_with_activity(tw_client, rows)
+    except Exception:
+        logger.error("Activity enrichment failed, continuing without it:\n%s", traceback.format_exc())
+        activity_stats = {"field_found": False, "error": "enrichment raised an exception, see logs"}
+
     written = bigquery_sync.truncate_and_load(
         bq_client, dataset_ref, schemas.TASKS_TABLE, schemas.TASKS_SCHEMA, rows
     )
@@ -213,6 +313,7 @@ def sync_tasks(tw_client, bq_client, dataset_ref, valid_project_ids):
         "status": "success",
         "rows_pulled": len(raw_tasks),
         "rows_written": written,
+        "activity": activity_stats,
     }
 
 

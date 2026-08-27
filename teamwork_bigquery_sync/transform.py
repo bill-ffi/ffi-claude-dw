@@ -106,6 +106,11 @@ def normalize_task(raw, in_scope_project_ids):
         "tag_ids": raw.get("tagIds") or [],
         "is_private": bool(raw.get("isPrivate")),
         "is_archived": raw.get("isArchived"),
+        # Filled in separately by sync.py after this row is built — Teamwork
+        # doesn't include custom field values on the task list payload, so
+        # this needs a follow-up call per task. Defaults to None so the
+        # column always exists even if that enrichment step fails/is skipped.
+        "activity": None,
         "web_link": (raw.get("meta") or {}).get("webLink"),
         "created_at": raw.get("createdAt"),
         "created_by": raw.get("createdByUserId") or raw.get("createdBy"),
@@ -170,6 +175,68 @@ def normalize_user(raw):
         "updated_at": raw.get("updatedAt"),
         "synced_at": utc_now_iso(),
     }
+
+
+def find_custom_field_by_name(custom_fields, name):
+    """Case-insensitive match on a custom field's display name. Returns the
+    raw custom field dict, or None if nothing matches.
+    """
+    target = name.strip().lower()
+    for cf in custom_fields:
+        if (cf.get("name") or "").strip().lower() == target:
+            return cf
+    return None
+
+
+def build_option_label_map(custom_field):
+    """Maps a preset-list custom field's option id -> display label.
+
+    UNVERIFIED shape (see teamwork_client.py docstring) — written
+    defensively against a few plausible option-list layouts. Check this
+    against real output from --dry-run and adjust if the printed options
+    don't look right.
+    """
+    options = custom_field.get("options") or []
+    label_by_id = {}
+    for opt in options:
+        if not isinstance(opt, dict):
+            continue
+        opt_id = opt.get("id")
+        if opt_id is None:
+            opt_id = opt.get("value")
+        label = opt.get("label") or opt.get("name") or opt.get("value")
+        if opt_id is not None:
+            label_by_id[opt_id] = label
+    return label_by_id
+
+
+def extract_activity_value(raw_task_custom_field_values, activity_field_id, option_labels):
+    """Given the raw list returned by get_task_custom_field_values() for one
+    task, finds the value set for `activity_field_id` and resolves it to a
+    human-readable label.
+
+    UNVERIFIED shape — see teamwork_client.py docstring. Tries a few
+    plausible layouts for how a value links back to its field (`customfield`
+    vs `customField` vs a flat `customFieldId`) and for how the value itself
+    is represented (a raw label string, an option id needing a lookup via
+    `option_labels`, or a nested dict).
+    """
+    if not raw_task_custom_field_values:
+        return None
+    for entry in raw_task_custom_field_values:
+        field_ref = entry.get("customfield") or entry.get("customField") or {}
+        field_id = field_ref.get("id") if isinstance(field_ref, dict) else None
+        if field_id is None:
+            field_id = entry.get("customFieldId")
+        if field_id != activity_field_id:
+            continue
+        value = entry.get("value")
+        if isinstance(value, dict):
+            return value.get("label") or value.get("name") or value.get("value")
+        if value in option_labels:
+            return option_labels[value]
+        return value
+    return None
 
 
 def build_category_name_map(projects_included):

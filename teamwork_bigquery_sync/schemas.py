@@ -59,6 +59,11 @@ TASKS_SCHEMA = [
     bigquery.SchemaField("tag_ids", "INT64", mode="REPEATED"),
     bigquery.SchemaField("is_private", "BOOL"),
     bigquery.SchemaField("is_archived", "BOOL"),
+    # The "Activity" preset-list custom field, resolved to its option label.
+    # See transform.extract_activity_value() — unverified shape as of when
+    # this was added; NULL if the field wasn't found or a task's value
+    # couldn't be resolved.
+    bigquery.SchemaField("activity", "STRING"),
     bigquery.SchemaField("web_link", "STRING"),
     bigquery.SchemaField("created_at", "TIMESTAMP"),
     bigquery.SchemaField("created_by", "INT64"),

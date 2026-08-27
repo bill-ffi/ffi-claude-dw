@@ -1,16 +1,21 @@
 """Thin client for the Teamwork Projects REST API (v3).
 
 Endpoint status as of the last real full sync against this account:
-- PROJECTS_PATH, TASKS_PATH, TIMELOGS_PATH, PROJECT_BUDGETS_PATH: confirmed
-  working end-to-end (real data loaded into BigQuery).
-- USERS_PATH: confirmed live via a direct sample call (16 people returned,
-  key "people") when this was added, but not yet exercised through a full
-  `python sync.py` run. Re-run `--dry-run` and confirm [OK] before relying
-  on it.
+- PROJECTS_PATH, TASKS_PATH, TIMELOGS_PATH, PROJECT_BUDGETS_PATH, USERS_PATH:
+  confirmed working end-to-end (real data loaded into BigQuery).
+- CUSTOM_FIELDS_PATH, TASK_CUSTOM_FIELDS_PATH_TEMPLATE: NOT yet live-tested.
+  Endpoints themselves are documented (apidocs.teamwork.com), but the exact
+  response shape (item key, how a value links back to its field, how an
+  option's label is represented) was not observable from this environment
+  when added. Run `--dry-run` and read its "custom fields" diagnostic
+  output carefully before trusting the `activity` column on tasks — the
+  parsing in transform.py's extract_activity_value()/build_option_label_map()
+  is a best-effort guess that may need adjusting once real output is seen.
 """
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -21,6 +26,13 @@ TASKS_PATH = "/projects/api/v3/tasks.json"
 TIMELOGS_PATH = "/projects/api/v3/time.json"
 PROJECT_BUDGETS_PATH = "/projects/api/v3/budgets.json"
 USERS_PATH = "/projects/api/v3/people.json"
+CUSTOM_FIELDS_PATH = "/projects/api/v3/customfields.json"
+TASK_CUSTOM_FIELDS_PATH_TEMPLATE = "/projects/api/v3/tasks/{task_id}/customfields.json"
+
+# How many task-custom-field-value requests to have in flight at once when
+# fetching per-task (no bulk endpoint exists for this). Kept modest given
+# we've already been rate-limited once by this API.
+CUSTOM_FIELD_FETCH_WORKERS = 8
 
 PAGE_SIZE = 250
 MAX_RETRIES = 4
@@ -172,3 +184,47 @@ class TeamworkClient:
         is_deleted) rather than filtering them out.
         """
         return list(self._paginate(USERS_PATH, {}, "people"))
+
+    def list_custom_fields(self):
+        """All custom field *definitions* (not values) site-wide. No filter
+        params are sent since the exact accepted filter syntax wasn't
+        verifiable — callers should filter the (small) result client-side.
+        """
+        return list(self._paginate(CUSTOM_FIELDS_PATH, {}, "customFields"))
+
+    def get_task_custom_field_values(self, task_id):
+        """The custom field values set on one specific task. There is no
+        documented bulk/site-wide equivalent — this is a single-task call.
+        """
+        path = TASK_CUSTOM_FIELDS_PATH_TEMPLATE.format(task_id=task_id)
+        payload = self._get(path, {})
+        return payload.get("customFields", [])
+
+    def get_task_custom_field_values_bulk(self, task_ids, on_progress=None):
+        """Fetches custom field values for many tasks concurrently (there's
+        no bulk endpoint, so this is many single-task requests in parallel).
+        Returns {task_id: values_list_or_None}; a None value means that
+        task's fetch failed after retries — logged but not fatal, so one
+        bad task doesn't sink the whole run.
+        """
+        results = {}
+        completed = 0
+        with ThreadPoolExecutor(max_workers=CUSTOM_FIELD_FETCH_WORKERS) as executor:
+            future_to_task_id = {
+                executor.submit(self.get_task_custom_field_values, task_id): task_id
+                for task_id in task_ids
+            }
+            for future in as_completed(future_to_task_id):
+                task_id = future_to_task_id[future]
+                try:
+                    results[task_id] = future.result()
+                except Exception:
+                    logger.warning(
+                        "Failed to fetch custom field values for task %d", task_id,
+                        exc_info=True,
+                    )
+                    results[task_id] = None
+                completed += 1
+                if on_progress and completed % 500 == 0:
+                    on_progress(completed, len(task_ids))
+        return results
