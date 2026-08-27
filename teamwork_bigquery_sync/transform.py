@@ -189,25 +189,34 @@ def find_custom_field_by_name(custom_fields, name):
 
 
 def build_option_label_map(custom_field):
-    """Maps a preset-list custom field's option id -> display label.
+    """Maps a dropdown custom field's option key -> display label.
 
-    UNVERIFIED shape (see teamwork_client.py docstring) — written
-    defensively against a few plausible option-list layouts. Check this
-    against real output from --dry-run and adjust if the printed options
-    don't look right.
+    Confirmed live shape: `options` is a dict `{"choices": [{"value": "...",
+    "color": "..."}, ...]}` — there's no separate numeric option id, the
+    "value" string IS the label (e.g. "REVnCOGS"). This map ends up as an
+    effectively-identity mapping for this field, but is kept generic (and
+    still accepts a bare list of option dicts) in case another dropdown
+    field is ever wired up with a genuine id/label split.
     """
-    options = custom_field.get("options") or []
-    label_by_id = {}
-    for opt in options:
+    options = custom_field.get("options")
+    if isinstance(options, dict):
+        choices = options.get("choices") or []
+    elif isinstance(options, list):
+        choices = options
+    else:
+        choices = []
+
+    label_by_key = {}
+    for opt in choices:
         if not isinstance(opt, dict):
             continue
-        opt_id = opt.get("id")
-        if opt_id is None:
-            opt_id = opt.get("value")
+        key = opt.get("id")
+        if key is None:
+            key = opt.get("value")
         label = opt.get("label") or opt.get("name") or opt.get("value")
-        if opt_id is not None:
-            label_by_id[opt_id] = label
-    return label_by_id
+        if key is not None:
+            label_by_key[key] = label
+    return label_by_key
 
 
 def extract_activity_value(raw_task_custom_field_values, activity_field_id, option_labels):
@@ -215,19 +224,20 @@ def extract_activity_value(raw_task_custom_field_values, activity_field_id, opti
     task, finds the value set for `activity_field_id` and resolves it to a
     human-readable label.
 
-    UNVERIFIED shape — see teamwork_client.py docstring. Tries a few
-    plausible layouts for how a value links back to its field (`customfield`
-    vs `customField` vs a flat `customFieldId`) and for how the value itself
-    is represented (a raw label string, an option id needing a lookup via
-    `option_labels`, or a nested dict).
+    Confirmed live shape: each entry looks like {"customfield": {"id":
+    98742, ...}, "customfieldId": 98742, "value": "REVnCOGS", ...} — value
+    is already the raw label string directly (option_labels lookup is a
+    no-op for this field, but kept for any field that does use an id/label
+    split). A task with no value set for this field simply has no matching
+    entry in the list.
     """
     if not raw_task_custom_field_values:
         return None
     for entry in raw_task_custom_field_values:
-        field_ref = entry.get("customfield") or entry.get("customField") or {}
+        field_ref = entry.get("customfield") or {}
         field_id = field_ref.get("id") if isinstance(field_ref, dict) else None
         if field_id is None:
-            field_id = entry.get("customFieldId")
+            field_id = entry.get("customfieldId")
         if field_id != activity_field_id:
             continue
         value = entry.get("value")

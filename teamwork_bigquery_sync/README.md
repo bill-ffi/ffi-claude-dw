@@ -144,18 +144,18 @@ I'll wire up whichever one you pick.
   confirmation — if BigQuery access to this project is ever opened up to a
   wider audience, consider restricting read access to the `users` table (or
   those two columns specifically) at that point.
-- **`tasks.activity` (unverified shape).** The custom-fields endpoints
-  (`customfields.json` and `tasks/{id}/customfields.json`) are documented to
-  exist, but their exact response shape (how a value links back to its
-  field, how an option's label is represented) hasn't been observed against
-  this account — the parsing in `transform.py`'s `extract_activity_value()`
-  / `build_option_label_map()` is a best-effort guess covering a few
-  plausible layouts. **Run `--dry-run` and read the "Activity custom field
-  diagnostic" section of its output** — it prints the raw field definition,
-  raw per-task values, and what got parsed out of them, so it's obvious
-  whether the parsing needs adjusting before trusting this column. A
-  parsing miss is non-fatal (the column just stays `NULL`), so it's safe to
-  iterate on.
+- **`tasks.activity` — confirmed live.** The field is named `ACTIVITY`
+  (all caps) in Teamwork, id 98742, applies site-wide (not scoped to a
+  specific project), and is a dropdown with a fixed set of options (BOOKS /
+  GL, BANK RECS, A/P & EXP, A/R & INV, REVnCOGS, CONTROLLING, PAYROLL, HR,
+  ADVISORY, CLIENT MNGMT, FP&A, PROJECTS, COMPLIANCE — pulled from Teamwork
+  at sync time, not hardcoded, so this list updates itself if the options
+  ever change). Two casing quirks worth knowing if touching this code:
+  `customfields.json` returns items under `"customfields"` (lowercase f),
+  and the per-task values endpoint returns `"customfieldTasks"` — both
+  different from the camelCase used by every other endpoint in this repo.
+  A resolution failure for any individual task is still non-fatal (that
+  row's `activity` just stays `NULL`).
 - **Per-task fetching is slow.** There's no bulk endpoint for task custom
   field values, so this is ~7,400+ individual API calls (8 concurrent),
   meaningfully increasing run time. Accepted tradeoff per your confirmation

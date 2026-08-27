@@ -112,7 +112,7 @@ def run_dry_run(client):
             "budgets",
         ),
         ("users", USERS_PATH, {"page": 1, "pageSize": 1}, "people"),
-        ("custom fields", CUSTOM_FIELDS_PATH, {"page": 1, "pageSize": 50}, "customFields"),
+        ("custom fields", CUSTOM_FIELDS_PATH, {"page": 1, "pageSize": 50}, "customfields"),
     ]
     any_failed = False
     for label, path, params, item_key in checks:
@@ -161,14 +161,15 @@ def run_dry_run(client):
         any_failed = True
         print(f"\n[FAIL] pagination sanity check — {exc}")
 
-    # Activity custom field diagnostic: this whole area (custom field
-    # definitions/values) is unverified — print the raw shapes so it's easy
-    # to fix transform.py's parsing if it's wrong, without needing another
-    # round trip through a full run.
-    print("\n--- 'Activity' custom field diagnostic (unverified endpoint) ---")
+    # Activity custom field diagnostic — confirmed live 2026-08-27: field is
+    # named "ACTIVITY" (id 98742), site-wide (not project-scoped), items
+    # under "customfields"/"customfieldTasks" (see teamwork_client.py). Kept
+    # as a standing diagnostic (not just a one-time check) since it's cheap
+    # and catches the field ever being renamed/removed in Teamwork.
+    print("\n--- 'Activity' custom field diagnostic ---")
     try:
         custom_fields = client._get(CUSTOM_FIELDS_PATH, {"page": 1, "pageSize": 250}).get(
-            "customFields", []
+            "customfields", []
         )
         activity_field = transform.find_custom_field_by_name(custom_fields, ACTIVITY_FIELD_NAME)
         if activity_field is None:
@@ -193,9 +194,10 @@ def run_dry_run(client):
                 print(f"     parsed activity value for that task: {resolved!r}")
                 if raw_values and resolved is None:
                     print(
-                        "     WARNING: got raw values back but couldn't resolve an activity "
-                        "label from them — transform.extract_activity_value() likely needs "
-                        "adjusting to match the shape printed above."
+                        "     note: this task has other custom field values set but none for "
+                        "Activity specifically — that's likely just this task not having it "
+                        "set, not a parsing bug. Only worry if a task you KNOW has an Activity "
+                        "value set in the Teamwork UI resolves to None here."
                     )
             else:
                 print("     no tasks available to sample a custom field value from")

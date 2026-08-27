@@ -1,16 +1,14 @@
 """Thin client for the Teamwork Projects REST API (v3).
 
 Endpoint status as of the last real full sync against this account:
-- PROJECTS_PATH, TASKS_PATH, TIMELOGS_PATH, PROJECT_BUDGETS_PATH, USERS_PATH:
-  confirmed working end-to-end (real data loaded into BigQuery).
-- CUSTOM_FIELDS_PATH, TASK_CUSTOM_FIELDS_PATH_TEMPLATE: NOT yet live-tested.
-  Endpoints themselves are documented (apidocs.teamwork.com), but the exact
-  response shape (item key, how a value links back to its field, how an
-  option's label is represented) was not observable from this environment
-  when added. Run `--dry-run` and read its "custom fields" diagnostic
-  output carefully before trusting the `activity` column on tasks — the
-  parsing in transform.py's extract_activity_value()/build_option_label_map()
-  is a best-effort guess that may need adjusting once real output is seen.
+- PROJECTS_PATH, TASKS_PATH, TIMELOGS_PATH, PROJECT_BUDGETS_PATH, USERS_PATH,
+  CUSTOM_FIELDS_PATH, TASK_CUSTOM_FIELDS_PATH_TEMPLATE: all confirmed
+  working end-to-end against this account (real data pulled/loaded).
+- Notable quirk: several v3 endpoints use inconsistent key casing —
+  customfields.json returns items under "customfields" (lowercase f), the
+  per-task custom field values endpoint returns "customfieldTasks", while
+  most other list endpoints use camelCase ("projects", "tasks", "people").
+  Confirmed live rather than assumed; don't "fix" the casing below.
 """
 
 import logging
@@ -189,16 +187,23 @@ class TeamworkClient:
         """All custom field *definitions* (not values) site-wide. No filter
         params are sent since the exact accepted filter syntax wasn't
         verifiable — callers should filter the (small) result client-side.
+
+        Confirmed live: response items are under "customfields" (all
+        lowercase) — NOT "customFields".
         """
-        return list(self._paginate(CUSTOM_FIELDS_PATH, {}, "customFields"))
+        return list(self._paginate(CUSTOM_FIELDS_PATH, {}, "customfields"))
 
     def get_task_custom_field_values(self, task_id):
         """The custom field values set on one specific task. There is no
         documented bulk/site-wide equivalent — this is a single-task call.
+
+        Confirmed live: response items are under "customfieldTasks", each
+        shaped like {"customfield": {"id": ...}, "customfieldId": ...,
+        "value": "<raw label string>", ...}.
         """
         path = TASK_CUSTOM_FIELDS_PATH_TEMPLATE.format(task_id=task_id)
         payload = self._get(path, {})
-        return payload.get("customFields", [])
+        return payload.get("customfieldTasks", [])
 
     def get_task_custom_field_values_bulk(self, task_ids, on_progress=None):
         """Fetches custom field values for many tasks concurrently (there's
