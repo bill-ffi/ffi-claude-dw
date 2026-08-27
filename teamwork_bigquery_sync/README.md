@@ -72,6 +72,54 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
    Exits 0 if all three datasets synced successfully, 1 if any stage failed
    (check the logged `RUN_SUMMARY` / stderr for which one and why).
 
+## Exception reporting views
+
+Five BigQuery views, one per quality-control rule, meant to be the direct
+data source for Looker Studio reports for leadership — each one is
+filterable by user / project / client / tasklist directly off its columns
+(no extra joins needed in Looker). Defined in `views.py`; created/updated
+via:
+
+```
+python sync.py --create-views
+```
+
+or from GitHub Actions: **Actions** tab → **Teamwork -> BigQuery sync** →
+**Run workflow** → check **"(Re)create the exception/QC reporting
+views"** → **Run workflow**. This doesn't pull from Teamwork or touch table
+data — it only (re)defines the views, so it's safe to run any time and
+independent of the normal sync schedule.
+
+| View | Flags | Scope |
+|---|---|---|
+| `v_exception_missing_activity` | Tasks with no "Activity" value set | Monitored categories only |
+| `v_exception_missing_estimate` | Tasks with `estimate_minutes` NULL or 0 | Monitored categories only, minus the Client Management / Client Management v2 / HR Advisory tasklist exception within Non-Monthly & Payroll |
+| `v_exception_billable_time_internal_projects` | Billable timelogs posted to a non-monitored-category (or uncategorized) project | All projects outside the monitored set |
+| `v_exception_long_time_entries` | Timelogs over 2 hours | All projects (not category-scoped) |
+| `v_exception_recurring_compliance` | Top-level tasks (no `parent_task_id`) in a "Books Maintenance"-category project with no `sequence_id` | Books Maintenance category only; sub-tasks excluded since they inherit recurrence from their parent and don't carry their own `sequence_id` |
+
+**"Monitored categories"** = the three project categories confirmed as "all
+of the billable projects we are monitoring": Books Maintenance, Monthly
+Close, Non-Monthly & Payroll. Defined once as `MONITORED_CATEGORIES` at the
+top of `views.py` — change it there (not in the SQL) if the set ever
+changes, and re-run `--create-views`.
+
+**Assumptions worth verifying against real data before trusting the
+numbers** (called out here per usual practice — these are judgment calls
+made to turn the rules as discussed into SQL, not confirmed facts):
+- Rules 1, 2, and 5 only look at tasks in a monitored-category project.
+  Tasks in an uncategorized or other-category project never show up in
+  those three views at all, by design.
+- Rule 3 ("billable time on internal projects") is defined as the
+  *inverse* of the monitored set — any project whose category isn't one of
+  the three, including projects with no category assigned. There's no
+  explicit "Internal" category value in Teamwork to key off directly, so
+  this is inferred rather than confirmed.
+- Rule 4 (long time entries) deliberately is **not** scoped to monitored
+  categories — it checks every billable and non-billable timelog site-wide,
+  since excess time logged anywhere seemed worth surfacing. Say the word if
+  this should be scoped down to match the other rules instead.
+
 ## Backfilling history
 
 The normal run only ever touches "this calendar month" for timelogs (see
@@ -212,3 +260,5 @@ I'll wire up whichever one you pick.
 - `transform.py` — raw Teamwork JSON → BigQuery row mapping
 - `bigquery_sync.py` — dataset/table creation, truncate+load, the
   transactional current-month replace for timelogs
+- `views.py` — the five exception/QC reporting views (see "Exception
+  reporting views" above)

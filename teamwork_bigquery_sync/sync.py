@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 import bigquery_sync
 import schemas
 import transform
+import views
 from config import load_config
 from teamwork_client import (
     COMPANIES_PATH,
@@ -570,6 +571,34 @@ def run_full_sync(cfg):
     return 0 if all_ok else 1
 
 
+def run_create_views(cfg):
+    """(Re)creates the five exception/QC reporting views. Safe to re-run —
+    views are just saved queries, this doesn't touch table data. Does not
+    require the full sync's tables to have just been refreshed; it only
+    needs them to exist (which ensure_all_tables() guarantees).
+    """
+    bq_client = bigquery_sync.get_client(cfg.gcp_project_id)
+    dataset_ref = bigquery_sync.ensure_dataset(
+        bq_client, cfg.gcp_project_id, cfg.bq_dataset, cfg.bq_location
+    )
+    bigquery_sync.ensure_all_tables(bq_client, dataset_ref)
+
+    results = views.create_or_replace_views(bq_client, cfg.gcp_project_id, cfg.bq_dataset)
+    for view_name, status in results.items():
+        print(f"  {view_name}: {status}")
+
+    summary = {
+        "mode": "create_views",
+        "gcp_project_id": cfg.gcp_project_id,
+        "bq_dataset": cfg.bq_dataset,
+        "views": results,
+    }
+    logger.info("RUN_SUMMARY %s", json.dumps(summary, default=str))
+
+    all_ok = all(status == "ok" for status in results.values())
+    return 0 if all_ok else 1
+
+
 def run_backfill(cfg, months):
     """Re-pulls and replaces timelogs for each (year, month) in `months`,
     one at a time. Projects/tasks are untouched — they're always a full
@@ -630,9 +659,18 @@ def main():
         help="Re-pull and replace ONLY the timelogs for these calendar months. "
              "Does not touch projects/tasks or any other month.",
     )
+    parser.add_argument(
+        "--create-views",
+        action="store_true",
+        help="(Re)create the exception/QC reporting views (see views.py). "
+             "Does not pull from Teamwork or touch table data.",
+    )
     args = parser.parse_args()
 
     cfg = load_config()
+
+    if args.create_views:
+        sys.exit(run_create_views(cfg))
 
     if args.backfill_months:
         try:

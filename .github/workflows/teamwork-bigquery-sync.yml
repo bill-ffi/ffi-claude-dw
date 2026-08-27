@@ -23,6 +23,10 @@ on:
         description: "Backfill months instead of a normal run, e.g. 2026-01,2026-02,2026-03 (leave blank for a normal run)"
         type: string
         default: ""
+      create_views:
+        description: "(Re)create the exception/QC reporting views only — no Teamwork pull, no table data touched"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -66,7 +70,9 @@ jobs:
           BQ_LOCATION: US
           SYNC_TIMEZONE: America/New_York
         run: |
-          if [ -n "${{ inputs.backfill_months }}" ]; then
+          if [ "${{ inputs.create_views }}" = "true" ]; then
+            python sync.py --create-views
+          elif [ -n "${{ inputs.backfill_months }}" ]; then
             python sync.py --backfill-months "${{ inputs.backfill_months }}"
           elif [ "${{ inputs.dry_run }}" = "true" ]; then
             python sync.py --dry-run
