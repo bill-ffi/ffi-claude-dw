@@ -94,7 +94,7 @@ independent of the normal sync schedule.
 |---|---|---|
 | `v_exception_missing_activity` | Tasks with no "Activity" value set | Monitored categories only |
 | `v_exception_missing_estimate` | Tasks with `estimate_minutes` NULL or 0 | Monitored categories only, minus the Client Management / Client Management v2 / HR Advisory tasklist exception within Non-Monthly |
-| `v_exception_billable_time_internal_projects` | Billable timelogs posted to a non-monitored-category (or uncategorized) project | All projects outside the monitored set |
+| `v_exception_billable_time_internal_projects` | Billable timelogs (`minutes > 0`) posted to an internal-category project | `FFI Internal Projects`, `Functional`, or `Individual` category only |
 | `v_exception_long_time_entries` | Timelogs over 2 hours | All projects (not category-scoped) |
 | `v_exception_recurring_compliance` | Top-level tasks (no `parent_task_id`) in a "Books Maintenance"-category project with no `sequence_id` | Books Maintenance category only; sub-tasks excluded since they inherit recurrence from their parent and don't carry their own `sequence_id` |
 
@@ -130,17 +130,28 @@ split out.) Defined once as `MONITORED_CATEGORIES` at the top of
 `views.py` — change it there (not in the SQL) if the set ever changes, and
 re-run `--create-views`.
 
+**"Internal categories"** (rule 3 only) = `FFI Internal Projects`,
+`Functional`, `Individual` — confirmed against real `category_name` values
+in production (`SELECT category_name, COUNT(*) FROM projects GROUP BY 1`).
+This is a deliberate, explicit whitelist, **not** the inverse of
+`MONITORED_CATEGORIES` — the account also has several sizable categories
+that are neither monitored nor internal (`Books` — 1,056 projects, by far
+the largest category in the account — plus `Advisory` [49],
+`Tax/Compliance` [253], `Onboarding` [27], `Legacy Projects` [4], and 5
+uncategorized projects). Billable time posted to any of those never shows
+up in `v_exception_billable_time_internal_projects` — confirmed as the
+intended behavior, not an oversight. Defined as `INTERNAL_CATEGORIES` at
+the top of `views.py`.
+
 **Assumptions worth verifying against real data before trusting the
 numbers** (called out here per usual practice — these are judgment calls
 made to turn the rules as discussed into SQL, not confirmed facts):
 - Rules 1, 2, and 5 only look at tasks in a monitored-category project.
   Tasks in an uncategorized or other-category project never show up in
   those three views at all, by design.
-- Rule 3 ("billable time on internal projects") is defined as the
-  *inverse* of the monitored set — any project whose category isn't one of
-  the three, including projects with no category assigned. There's no
-  explicit "Internal" category value in Teamwork to key off directly, so
-  this is inferred rather than confirmed.
+- Rule 3 ("billable time on internal projects") now uses a confirmed
+  explicit whitelist (`INTERNAL_CATEGORIES` — see above), not an inference.
+  This one's settled, not an open assumption.
 - Rule 4 (long time entries) deliberately is **not** scoped to monitored
   categories — it checks every billable and non-billable timelog site-wide,
   since excess time logged anywhere seemed worth surfacing. Say the word if

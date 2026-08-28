@@ -14,10 +14,14 @@ writeup):
     project categories confirmed as "all of the billable projects we are
     monitoring"). Un-categorized / other-category projects are excluded
     from those three rules entirely.
-  - Rule 3 ("internal projects") is defined as the inverse: any project
-    whose category is NOT in MONITORED_CATEGORIES (including projects with
-    no category at all). There's no explicit "Internal" category value to
-    key off of, so this is a judgment call, not a confirmed mapping.
+  - Rule 3 ("internal projects") is scoped to INTERNAL_CATEGORIES, an
+    explicit list confirmed against real category_name values in
+    production (not the inverse of MONITORED_CATEGORIES). This is a
+    deliberate narrowing: categories that are neither monitored nor
+    internal (Books, Advisory, Tax/Compliance, Onboarding, Legacy
+    Projects, and uncategorized projects — collectively far larger than
+    the monitored + internal sets combined) are excluded from rule 3
+    entirely, per your explicit confirmation.
   - Rule 4 (long time entries) is intentionally NOT scoped to monitored
     categories — it checks every timelog site-wide, since excess time on an
     internal task is arguably just as worth a look as on a billable one.
@@ -30,8 +34,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # The project categories that make up "all of the billable projects we are
-# monitoring" per your instruction. Rules 1, 2, and 5 are scoped to these;
-# rule 3 is defined as everything NOT in this list.
+# monitoring" per your instruction. Rules 1, 2, and 5 are scoped to these.
 #
 # "Non-Monthly & Payroll" was originally treated as one category here, but
 # turned out to be two distinct real Teamwork categories ("Non-Monthly" and
@@ -40,6 +43,17 @@ logger = logging.getLogger(__name__)
 # rules 1, 2, and 5 were silently skipping both categories entirely until
 # this was split out.
 MONITORED_CATEGORIES = ["Books Maintenance", "Monthly Close", "Non-Monthly", "Payroll"]
+
+# Categories that count as "internal" for rule 3 (billable time posted to
+# an internal project). An explicit list, not the inverse of
+# MONITORED_CATEGORIES — verified against real category_name values in
+# production (SELECT category_name, COUNT(*) FROM projects GROUP BY 1).
+# You confirmed this should be a strict whitelist: categories that are
+# neither monitored nor internal (Books [1056 projects — the single
+# largest category in the account], Advisory [49], Tax/Compliance [253],
+# Onboarding [27], Legacy Projects [4], and 5 uncategorized projects) are
+# deliberately excluded from rule 3 by this choice, not an oversight.
+INTERNAL_CATEGORIES = ["FFI Internal Projects", "Functional", "Individual"]
 
 # Tasklists exempt from the "must have an estimate" rule, but only within
 # projects categorized "Non-Monthly" — per your instruction ("non-monthly
@@ -79,6 +93,7 @@ def build_view_sql(project_id, dataset):
     users = fqn("users")
 
     monitored = _sql_string_array(MONITORED_CATEGORIES)
+    internal = _sql_string_array(INTERNAL_CATEGORIES)
     exempt_tasklists = _sql_string_array(ESTIMATE_EXEMPT_TASKLISTS)
 
     # A task can have multiple assignees (assignee_user_ids is repeated).
@@ -199,7 +214,7 @@ LEFT JOIN {users} u ON u.user_id = tl.user_id
 {proj_owner_join}
 WHERE tl.is_billable = TRUE
   AND tl.minutes > 0
-  AND (p.category_name IS NULL OR p.category_name NOT IN UNNEST({monitored}))
+  AND p.category_name IN UNNEST({internal})
 """
 
     views["v_exception_long_time_entries"] = f"""
