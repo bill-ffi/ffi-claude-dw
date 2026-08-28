@@ -93,16 +93,20 @@ independent of the normal sync schedule.
 | View | Flags | Scope |
 |---|---|---|
 | `v_exception_missing_activity` | Tasks with no "Activity" value set | Monitored categories only |
-| `v_exception_missing_estimate` | Tasks with `estimate_minutes` NULL or 0 | Monitored categories only, minus the Client Management / Client Management v2 / HR Advisory tasklist exception within Non-Monthly & Payroll |
+| `v_exception_missing_estimate` | Tasks with `estimate_minutes` NULL or 0 | Monitored categories only, minus the Client Management / Client Management v2 / HR Advisory tasklist exception within Non-Monthly |
 | `v_exception_billable_time_internal_projects` | Billable timelogs posted to a non-monitored-category (or uncategorized) project | All projects outside the monitored set |
 | `v_exception_long_time_entries` | Timelogs over 2 hours | All projects (not category-scoped) |
 | `v_exception_recurring_compliance` | Top-level tasks (no `parent_task_id`) in a "Books Maintenance"-category project with no `sequence_id` | Books Maintenance category only; sub-tasks excluded since they inherit recurrence from their parent and don't carry their own `sequence_id` |
 
-**"Monitored categories"** = the three project categories confirmed as "all
+**"Monitored categories"** = the four project categories confirmed as "all
 of the billable projects we are monitoring": Books Maintenance, Monthly
-Close, Non-Monthly & Payroll. Defined once as `MONITORED_CATEGORIES` at the
-top of `views.py` — change it there (not in the SQL) if the set ever
-changes, and re-run `--create-views`.
+Close, Non-Monthly, and Payroll. (Originally tracked as one combined
+"Non-Monthly & Payroll" category — turned out to be two distinct real
+Teamwork categories, so the combined string never matched anything and
+rules 1, 2, and 5 were silently skipping both entirely until this was
+split out.) Defined once as `MONITORED_CATEGORIES` at the top of
+`views.py` — change it there (not in the SQL) if the set ever changes, and
+re-run `--create-views`.
 
 **Assumptions worth verifying against real data before trusting the
 numbers** (called out here per usual practice — these are judgment calls

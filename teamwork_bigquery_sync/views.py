@@ -32,12 +32,20 @@ logger = logging.getLogger(__name__)
 # The project categories that make up "all of the billable projects we are
 # monitoring" per your instruction. Rules 1, 2, and 5 are scoped to these;
 # rule 3 is defined as everything NOT in this list.
-MONITORED_CATEGORIES = ["Books Maintenance", "Monthly Close", "Non-Monthly & Payroll"]
+#
+# "Non-Monthly & Payroll" was originally treated as one category here, but
+# turned out to be two distinct real Teamwork categories ("Non-Monthly" and
+# "Payroll") — confirmed via your direct edit of the missing_estimate view
+# in BigQuery. The combined string never matched any real project, so
+# rules 1, 2, and 5 were silently skipping both categories entirely until
+# this was split out.
+MONITORED_CATEGORIES = ["Books Maintenance", "Monthly Close", "Non-Monthly", "Payroll"]
 
 # Tasklists exempt from the "must have an estimate" rule, but only within
-# projects categorized "Non-Monthly & Payroll" — per your instruction.
+# projects categorized "Non-Monthly" — per your instruction ("non-monthly
+# projects"), not "Payroll".
 ESTIMATE_EXEMPT_TASKLISTS = ["Client Management", "Client Management v2", "HR Advisory"]
-ESTIMATE_EXEMPT_CATEGORY = "Non-Monthly & Payroll"
+ESTIMATE_EXEMPT_CATEGORY = "Non-Monthly"
 
 # Category whose tasks must all be recurring (have a sequence_id), except
 # sub-tasks — those inherit recurrence from their parent and don't carry
@@ -114,7 +122,10 @@ SELECT
   t.estimate_minutes,
   assignee.user_id AS assignee_user_id,
   assignee.full_name AS assignee_name,
-  t.web_link,
+  t.due_date,
+  t.start_date,
+  t.created_at,
+  t.updated_at,
   t.synced_at
 FROM {tasks} t
 JOIN {projects} p ON p.project_id = t.project_id
