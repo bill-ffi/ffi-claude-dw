@@ -111,7 +111,10 @@ SELECT
   t.name AS task_name,
   t.status,
   {assignee_names},
-  t.web_link,
+  t.due_date,
+  t.start_date,
+  t.created_at,
+  t.updated_at,
   t.synced_at
 FROM {tasks} t
 JOIN {projects} p ON p.project_id = t.project_id
@@ -218,7 +221,10 @@ SELECT
   t.sequence_id,
   t.parent_task_id,
   {assignee_names},
-  t.web_link,
+  t.due_date,
+  t.start_date,
+  t.created_at,
+  t.updated_at,
   t.synced_at
 FROM {tasks} t
 JOIN {projects} p ON p.project_id = t.project_id
