@@ -98,6 +98,18 @@ independent of the normal sync schedule.
 | `v_exception_long_time_entries` | Timelogs over 2 hours | All projects (not category-scoped) |
 | `v_exception_recurring_compliance` | Top-level tasks (no `parent_task_id`) in a "Books Maintenance"-category project with no `sequence_id` | Books Maintenance category only; sub-tasks excluded since they inherit recurrence from their parent and don't carry their own `sequence_id` |
 
+**Assignee names, not IDs.** The three task-based views (missing_activity,
+missing_estimate, recurring_compliance) surface a task's assignees as a
+single `assignee_names` string column (e.g. `"Bob, Jane, Mary"`), built via
+a `STRING_AGG` subquery over `tasks.assignee_user_ids` — not one row per
+assignee. This keeps these views at one row per task (a task with 3
+assignees used to show up as 3 duplicate rows before this). Trade-off: in
+Looker Studio, filtering this column by one person needs a **"Text
+contains"** filter condition rather than an exact-match dropdown, since
+it's a free-text concatenation, not a clean dimension value. The two
+timelog-based views (billable_time_internal_projects, long_time_entries)
+are unaffected — a timelog only ever has one `user_id`.
+
 **"Monitored categories"** = the four project categories confirmed as "all
 of the billable projects we are monitoring": Books Maintenance, Monthly
 Close, Non-Monthly, and Payroll. (Originally tracked as one combined

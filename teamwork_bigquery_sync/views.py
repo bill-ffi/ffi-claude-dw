@@ -81,6 +81,21 @@ def build_view_sql(project_id, dataset):
     monitored = _sql_string_array(MONITORED_CATEGORIES)
     exempt_tasklists = _sql_string_array(ESTIMATE_EXEMPT_TASKLISTS)
 
+    # A task can have multiple assignees (assignee_user_ids is repeated).
+    # Rather than fan out one row per assignee via UNNEST + JOIN (which
+    # duplicates every other column on the task and breaks "one row per
+    # task" for these views), this resolves all of a task's assignees to
+    # names and concatenates them into a single string, e.g. "Bob, Jane,
+    # Mary" — via a correlated subquery so the outer query stays one row
+    # per task. Trade-off: this column is no longer a clean exact-match
+    # filter dimension in Looker Studio — filtering by one assignee there
+    # needs a "Text contains" filter rather than an exact-value dropdown.
+    assignee_names = f"""(
+    SELECT STRING_AGG(u.full_name, ', ' ORDER BY u.full_name)
+    FROM UNNEST(t.assignee_user_ids) AS assignee_id
+    JOIN {users} u ON u.user_id = assignee_id
+  ) AS assignee_names"""
+
     views = {}
 
     views["v_exception_missing_activity"] = f"""
@@ -95,14 +110,11 @@ SELECT
   t.task_id,
   t.name AS task_name,
   t.status,
-  assignee.user_id AS assignee_user_id,
-  assignee.full_name AS assignee_name,
+  {assignee_names},
   t.web_link,
   t.synced_at
 FROM {tasks} t
 JOIN {projects} p ON p.project_id = t.project_id
-LEFT JOIN UNNEST(t.assignee_user_ids) AS assignee_user_id_raw
-LEFT JOIN {users} assignee ON assignee.user_id = assignee_user_id_raw
 WHERE t.activity IS NULL
   AND p.category_name IN UNNEST({monitored})
 """
@@ -120,8 +132,7 @@ SELECT
   t.name AS task_name,
   t.status,
   t.estimate_minutes,
-  assignee.user_id AS assignee_user_id,
-  assignee.full_name AS assignee_name,
+  {assignee_names},
   t.due_date,
   t.start_date,
   t.created_at,
@@ -129,8 +140,6 @@ SELECT
   t.synced_at
 FROM {tasks} t
 JOIN {projects} p ON p.project_id = t.project_id
-LEFT JOIN UNNEST(t.assignee_user_ids) AS assignee_user_id_raw
-LEFT JOIN {users} assignee ON assignee.user_id = assignee_user_id_raw
 WHERE (t.estimate_minutes IS NULL OR t.estimate_minutes = 0)
   AND p.category_name IN UNNEST({monitored})
   AND NOT (
@@ -208,14 +217,11 @@ SELECT
   t.status,
   t.sequence_id,
   t.parent_task_id,
-  assignee.user_id AS assignee_user_id,
-  assignee.full_name AS assignee_name,
+  {assignee_names},
   t.web_link,
   t.synced_at
 FROM {tasks} t
 JOIN {projects} p ON p.project_id = t.project_id
-LEFT JOIN UNNEST(t.assignee_user_ids) AS assignee_user_id_raw
-LEFT JOIN {users} assignee ON assignee.user_id = assignee_user_id_raw
 WHERE p.category_name = '{RECURRING_REQUIRED_CATEGORY}'
   AND t.parent_task_id IS NULL
   AND t.sequence_id IS NULL
