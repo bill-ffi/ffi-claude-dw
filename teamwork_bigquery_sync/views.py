@@ -198,6 +198,7 @@ LEFT JOIN {tasks} tk ON tk.task_id = tl.task_id
 LEFT JOIN {users} u ON u.user_id = tl.user_id
 {proj_owner_join}
 WHERE tl.is_billable = TRUE
+  AND tl.minutes > 0
   AND (p.category_name IS NULL OR p.category_name NOT IN UNNEST({monitored}))
 """
 
