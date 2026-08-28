@@ -96,6 +96,20 @@ def build_view_sql(project_id, dataset):
     JOIN {users} u ON u.user_id = assignee_id
   ) AS assignee_names"""
 
+    # The project's owner (projects.owner_id), resolved to a name. Relevant
+    # wherever project context is shown, so this is added to all five views.
+    proj_owner_join = f"LEFT JOIN {users} owner ON owner.user_id = p.owner_id"
+    proj_owner_col = "owner.full_name AS proj_owner"
+
+    # Whether ANY time (more than 0 minutes) has ever been logged against
+    # this task. Only meaningful on the task-based views — the timelog-based
+    # views (billable_time_internal_projects, long_time_entries) are already
+    # individual time entries, so "was time posted" is trivially true there.
+    has_time_logged_col = f"""EXISTS(
+    SELECT 1 FROM {timelogs} tl
+    WHERE tl.task_id = t.task_id AND tl.minutes > 0
+  ) AS has_time_logged"""
+
     views = {}
 
     views["v_exception_missing_activity"] = f"""
@@ -105,12 +119,14 @@ SELECT
   p.name AS project_name,
   p.category_name,
   p.client_name,
+  {proj_owner_col},
   t.tasklist_id,
   t.tasklist_name,
   t.task_id,
   t.name AS task_name,
   t.status,
   {assignee_names},
+  {has_time_logged_col},
   t.due_date,
   t.start_date,
   t.created_at,
@@ -118,6 +134,7 @@ SELECT
   t.synced_at
 FROM {tasks} t
 JOIN {projects} p ON p.project_id = t.project_id
+{proj_owner_join}
 WHERE t.activity IS NULL
   AND p.category_name IN UNNEST({monitored})
 """
@@ -129,6 +146,7 @@ SELECT
   p.name AS project_name,
   p.category_name,
   p.client_name,
+  {proj_owner_col},
   t.tasklist_id,
   t.tasklist_name,
   t.task_id,
@@ -136,6 +154,7 @@ SELECT
   t.status,
   t.estimate_minutes,
   {assignee_names},
+  {has_time_logged_col},
   t.due_date,
   t.start_date,
   t.created_at,
@@ -143,6 +162,7 @@ SELECT
   t.synced_at
 FROM {tasks} t
 JOIN {projects} p ON p.project_id = t.project_id
+{proj_owner_join}
 WHERE (t.estimate_minutes IS NULL OR t.estimate_minutes = 0)
   AND p.category_name IN UNNEST({monitored})
   AND NOT (
@@ -158,6 +178,7 @@ SELECT
   p.name AS project_name,
   p.category_name,
   p.client_name,
+  {proj_owner_col},
   tk.tasklist_id,
   tk.tasklist_name,
   tl.task_id,
@@ -175,6 +196,7 @@ FROM {timelogs} tl
 LEFT JOIN {projects} p ON p.project_id = tl.project_id
 LEFT JOIN {tasks} tk ON tk.task_id = tl.task_id
 LEFT JOIN {users} u ON u.user_id = tl.user_id
+{proj_owner_join}
 WHERE tl.is_billable = TRUE
   AND (p.category_name IS NULL OR p.category_name NOT IN UNNEST({monitored}))
 """
@@ -186,6 +208,7 @@ SELECT
   p.name AS project_name,
   p.category_name,
   p.client_name,
+  {proj_owner_col},
   tk.tasklist_id,
   tk.tasklist_name,
   tl.task_id,
@@ -203,6 +226,7 @@ FROM {timelogs} tl
 LEFT JOIN {projects} p ON p.project_id = tl.project_id
 LEFT JOIN {tasks} tk ON tk.task_id = tl.task_id
 LEFT JOIN {users} u ON u.user_id = tl.user_id
+{proj_owner_join}
 WHERE tl.hours > {LONG_ENTRY_THRESHOLD_HOURS}
 """
 
@@ -213,6 +237,7 @@ SELECT
   p.name AS project_name,
   p.category_name,
   p.client_name,
+  {proj_owner_col},
   t.tasklist_id,
   t.tasklist_name,
   t.task_id,
@@ -221,6 +246,7 @@ SELECT
   t.sequence_id,
   t.parent_task_id,
   {assignee_names},
+  {has_time_logged_col},
   t.due_date,
   t.start_date,
   t.created_at,
@@ -228,6 +254,7 @@ SELECT
   t.synced_at
 FROM {tasks} t
 JOIN {projects} p ON p.project_id = t.project_id
+{proj_owner_join}
 WHERE p.category_name = '{RECURRING_REQUIRED_CATEGORY}'
   AND t.parent_task_id IS NULL
   AND t.sequence_id IS NULL

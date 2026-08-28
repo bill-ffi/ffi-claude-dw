@@ -110,6 +110,16 @@ it's a free-text concatenation, not a clean dimension value. The two
 timelog-based views (billable_time_internal_projects, long_time_entries)
 are unaffected — a timelog only ever has one `user_id`.
 
+**`proj_owner`** — the project's owner (`projects.owner_id`) resolved to a
+name, on all five views (added anywhere project context already appears).
+
+**`has_time_logged`** — boolean, true if any timelog with `minutes > 0`
+exists against the task, via a correlated `EXISTS` subquery on `timelogs`.
+Only added to the three task-based views (missing_activity,
+missing_estimate, recurring_compliance) — on the two timelog-based views
+this would be trivially true for every row (the row itself is a posted
+time entry), so it wasn't added there.
+
 **"Monitored categories"** = the four project categories confirmed as "all
 of the billable projects we are monitoring": Books Maintenance, Monthly
 Close, Non-Monthly, and Payroll. (Originally tracked as one combined
