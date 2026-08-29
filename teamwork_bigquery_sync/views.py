@@ -92,6 +92,7 @@ VIEW_NAMES = [
     "v_exception_long_time_entries",
     "v_exception_recurring_compliance",
     "v_usermins",
+    "v_user_daily_billable_hours",
 ]
 
 
@@ -319,6 +320,91 @@ SELECT
   m.as_of
 FROM {users} u
 JOIN {fqn(ANCILLARY_USER_INFO_TABLE)} m ON u.user_id = m.tw_userid
+"""
+
+    # Per-user average daily billable hours, bucketed into 5 weekday
+    # columns for a bar chart: Sunday's hours fold into Monday, Saturday's
+    # fold into Friday (both within the SAME Mon-Sun week, via BigQuery's
+    # WEEK(MONDAY) truncation — a Sunday is grouped with the Monday that
+    # started its own week, not the next one). Two series per user/day:
+    # "Current Week" (this week so far, live) and "Prior 4-Week Avg" (the
+    # four full Mon-Sun weeks before this one, divided by 4 always — a
+    # day with zero logged hours counts as 0, not excluded from the
+    # average). Scoped to users present in v_usermins (i.e. who have a
+    # daily_min_bill target), via CROSS JOIN, so every user always has all
+    # 5 weekday buckets and both periods present, even at 0 hours — no
+    # gaps for Looker Studio's chart to render oddly.
+    views["v_user_daily_billable_hours"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_user_daily_billable_hours")} AS
+WITH day_buckets AS (
+  SELECT 'Monday' AS day_bucket, 1 AS day_order UNION ALL
+  SELECT 'Tuesday', 2 UNION ALL
+  SELECT 'Wednesday', 3 UNION ALL
+  SELECT 'Thursday', 4 UNION ALL
+  SELECT 'Friday', 5
+),
+billable AS (
+  SELECT
+    tl.user_id,
+    tl.hours,
+    DATE_TRUNC(tl.log_date, WEEK(MONDAY)) AS week_start,
+    CASE EXTRACT(DAYOFWEEK FROM tl.log_date)
+      WHEN 1 THEN 'Monday'    -- Sunday folds into Monday (same week)
+      WHEN 2 THEN 'Monday'
+      WHEN 3 THEN 'Tuesday'
+      WHEN 4 THEN 'Wednesday'
+      WHEN 5 THEN 'Thursday'
+      WHEN 6 THEN 'Friday'
+      WHEN 7 THEN 'Friday'    -- Saturday folds into Friday (same week)
+    END AS day_bucket
+  FROM {timelogs} tl
+  WHERE tl.is_billable = TRUE
+),
+this_week AS (
+  SELECT DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY)) AS week_start
+),
+current_week_hours AS (
+  SELECT b.user_id, b.day_bucket, SUM(b.hours) AS hours
+  FROM billable b, this_week w
+  WHERE b.week_start = w.week_start
+  GROUP BY b.user_id, b.day_bucket
+),
+prior_4wk_hours AS (
+  SELECT b.user_id, b.day_bucket, SUM(b.hours) / 4 AS hours
+  FROM billable b, this_week w
+  WHERE b.week_start BETWEEN DATE_SUB(w.week_start, INTERVAL 4 WEEK)
+                         AND DATE_SUB(w.week_start, INTERVAL 1 WEEK)
+  GROUP BY b.user_id, b.day_bucket
+),
+scaffold AS (
+  SELECT
+    m.user_id,
+    m.email AS user_email,
+    m.first_name,
+    m.last_name,
+    m.daily_min_bill,
+    db.day_bucket,
+    db.day_order
+  FROM {fqn("v_usermins")} m
+  CROSS JOIN day_buckets db
+)
+SELECT
+  s.user_id, s.user_email, s.first_name, s.last_name,
+  s.day_bucket, s.day_order, s.daily_min_bill,
+  'Current Week' AS period,
+  COALESCE(cw.hours, 0) AS hours
+FROM scaffold s
+LEFT JOIN current_week_hours cw
+  ON cw.user_id = s.user_id AND cw.day_bucket = s.day_bucket
+UNION ALL
+SELECT
+  s.user_id, s.user_email, s.first_name, s.last_name,
+  s.day_bucket, s.day_order, s.daily_min_bill,
+  'Prior 4-Week Avg' AS period,
+  COALESCE(p4.hours, 0) AS hours
+FROM scaffold s
+LEFT JOIN prior_4wk_hours p4
+  ON p4.user_id = s.user_id AND p4.day_bucket = s.day_bucket
 """
 
     return views

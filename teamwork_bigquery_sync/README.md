@@ -77,8 +77,9 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
 Five BigQuery views, one per quality-control rule, meant to be the direct
 data source for Looker Studio reports for leadership — each one is
 filterable by user / project / client / tasklist directly off its columns
-(no extra joins needed in Looker). Plus a sixth, `v_usermins`, which isn't
-an exception rule — see "External reference data" below. All six are
+(no extra joins needed in Looker). Plus two more that aren't exception
+rules — `v_usermins` (see "External reference data" below) and
+`v_user_daily_billable_hours` (see "User report" below). All seven are
 defined in `views.py`; created/updated via:
 
 ```
@@ -200,6 +201,42 @@ Budget", named range `mins4bq`).
   opened up more broadly.
 - If the named range, sheet, or external table is ever renamed, update
   `ANCILLARY_USER_INFO_TABLE` in `views.py` and re-run `--create-views`.
+
+### User report: `v_user_daily_billable_hours`
+
+A 7th view, also not an exception rule — feeds a per-user "billable hours
+by day of week" report (current week vs. a prior-4-week baseline vs. each
+person's daily minimum from `v_usermins`).
+
+- **Weekday buckets, not calendar days.** Every timelog's `log_date` is
+  bucketed into one of 5 weekdays: Sunday folds into Monday, Saturday
+  folds into Friday — both within the *same* Monday–Sunday week (via
+  BigQuery's `WEEK(MONDAY)` truncation, which groups a Sunday with the
+  Monday that started its own week). If the intent was actually a
+  Sunday–Saturday week (Sunday folding into the *next* Monday instead),
+  this needs to change — flag it if the numbers don't look right.
+- **Two series per user/weekday**: `Current Week` (this week so far —
+  live, so future weekdays in the current week naturally show 0 until
+  logged) and `Prior 4-Week Avg` (the four full Mon–Sun weeks immediately
+  before this one). The average always divides by 4, treating a
+  zero-hour day as a real 0 rather than excluding it — so a new hire's
+  first month, or an inactive stretch, will pull the average down rather
+  than being excluded from it. Say the word if that should change to
+  "divide by weeks actually worked" instead.
+- **`daily_min_bill`** rides along on every row (repeated per weekday/
+  period) as the reference target — confirmed to represent an hours
+  target, not a dollar figure (see `v_usermins` above; `daily_min_value`
+  is something else and isn't used here).
+- Scoped to users present in `v_usermins` (i.e. who have a minimum
+  defined) via `CROSS JOIN` against a 5-row weekday scaffold, so every
+  user always has all 5 weekdays × both periods present — even at 0
+  hours — rather than gaps a bar chart would render inconsistently.
+- **Two Looker Studio setups, same view, no SQL difference**: a "My
+  Hours" page uses this view as a data source with row-level security on
+  (restricted to the viewer's own `user_email`) for self-service viewing;
+  a "Team Hours" page uses the *same view added as a second data source*
+  without RLS, plus a user-picker filter control, for managers to look up
+  anyone.
 
 ## Backfilling history
 
@@ -342,4 +379,4 @@ I'll wire up whichever one you pick.
 - `bigquery_sync.py` — dataset/table creation, truncate+load, the
   transactional current-month replace for timelogs
 - `views.py` — the five exception/QC reporting views plus `v_usermins`
-  (see "Exception reporting views" above)
+  and `v_user_daily_billable_hours` (see "Exception reporting views" above)
