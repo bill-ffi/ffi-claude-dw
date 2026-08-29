@@ -94,7 +94,8 @@ VIEW_NAMES = [
     "v_usermins",
     "v_user_daily_billable_hours_long",
     "v_user_daily_billable_hours_wide",
-    "v_user_daily_billable_hours_trend",
+    "v_user_daily_billable_hours_trend_long",
+    "v_user_daily_billable_hours_trend_wide",
 ]
 
 
@@ -505,8 +506,14 @@ LEFT JOIN prior_4wk_hours p4
     # Same weekday-bucketing rule (Sunday -> Monday, Saturday -> Friday,
     # same Mon-Sun week) and the same user scaffold, but keyed by
     # week_start/weeks_ago instead of a single averaged period.
-    views["v_user_daily_billable_hours_trend"] = f"""
-CREATE OR REPLACE VIEW {fqn("v_user_daily_billable_hours_trend")} AS
+    #
+    # "_long" = one row per (user, day_bucket, weeks_ago) — same
+    # long/tidy shape as v_user_daily_billable_hours_long, and the same
+    # limitation: a chart using weeks_ago as a Breakdown Dimension to
+    # create the 4 weekly bars can't also add daily_min_bill as a real
+    # second Metric for a reference line. See "_wide" below.
+    views["v_user_daily_billable_hours_trend_long"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_user_daily_billable_hours_trend_long")} AS
 WITH day_buckets AS (
   SELECT 'Monday' AS day_bucket, 1 AS day_order UNION ALL
   SELECT 'Tuesday', 2 UNION ALL
@@ -571,6 +578,87 @@ LEFT JOIN weekly_hours wh
   ON wh.user_id = s.user_id
  AND wh.day_bucket = s.day_bucket
  AND wh.week_start = s.week_start
+"""
+
+    # "_wide" = one row per (user, day_bucket), with each of the 4 prior
+    # weeks as its own column (hours_1_week_ago .. hours_4_weeks_ago)
+    # instead of a weeks_ago dimension. Built for the same reason as
+    # v_user_daily_billable_hours_wide: real Metrics (no Breakdown
+    # Dimension) leave a free Metric slot for daily_min_bill, so a Combo
+    # chart (bars for each week, line for daily_min_bill) works the same
+    # way that already worked for the main daily chart. Labels are
+    # relative ("N weeks ago"), not fixed calendar dates, so the columns'
+    # meaning stays correct automatically as weeks roll forward — no
+    # yearly/weekly relabeling needed.
+    views["v_user_daily_billable_hours_trend_wide"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_user_daily_billable_hours_trend_wide")} AS
+WITH day_buckets AS (
+  SELECT 'Monday' AS day_bucket, 1 AS day_order UNION ALL
+  SELECT 'Tuesday', 2 UNION ALL
+  SELECT 'Wednesday', 3 UNION ALL
+  SELECT 'Thursday', 4 UNION ALL
+  SELECT 'Friday', 5
+),
+billable AS (
+  SELECT
+    tl.user_id,
+    tl.hours,
+    DATE_TRUNC(tl.log_date, WEEK(MONDAY)) AS week_start,
+    CASE EXTRACT(DAYOFWEEK FROM tl.log_date)
+      WHEN 1 THEN 'Monday'    -- Sunday folds into Monday (same week)
+      WHEN 2 THEN 'Monday'
+      WHEN 3 THEN 'Tuesday'
+      WHEN 4 THEN 'Wednesday'
+      WHEN 5 THEN 'Thursday'
+      WHEN 6 THEN 'Friday'
+      WHEN 7 THEN 'Friday'    -- Saturday folds into Friday (same week)
+    END AS day_bucket
+  FROM {timelogs} tl
+  WHERE tl.is_billable = TRUE
+),
+this_week AS (
+  SELECT DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY)) AS week_start
+),
+weekly_hours AS (
+  SELECT b.user_id, b.day_bucket, b.week_start, SUM(b.hours) AS hours
+  FROM billable b, this_week w
+  WHERE b.week_start BETWEEN DATE_SUB(w.week_start, INTERVAL 4 WEEK)
+                         AND DATE_SUB(w.week_start, INTERVAL 1 WEEK)
+  GROUP BY b.user_id, b.day_bucket, b.week_start
+),
+scaffold AS (
+  SELECT
+    m.user_id,
+    m.email AS user_email,
+    m.first_name,
+    m.last_name,
+    m.daily_min_bill,
+    db.day_bucket,
+    db.day_order
+  FROM {fqn("v_usermins")} m
+  CROSS JOIN day_buckets db
+)
+SELECT
+  s.user_id, s.user_email, s.first_name, s.last_name,
+  s.day_bucket, s.day_order, s.daily_min_bill,
+  COALESCE(w1.hours, 0) AS hours_1_week_ago,
+  COALESCE(w2.hours, 0) AS hours_2_weeks_ago,
+  COALESCE(w3.hours, 0) AS hours_3_weeks_ago,
+  COALESCE(w4.hours, 0) AS hours_4_weeks_ago
+FROM scaffold s
+CROSS JOIN this_week w
+LEFT JOIN weekly_hours w1
+  ON w1.user_id = s.user_id AND w1.day_bucket = s.day_bucket
+ AND w1.week_start = DATE_SUB(w.week_start, INTERVAL 1 WEEK)
+LEFT JOIN weekly_hours w2
+  ON w2.user_id = s.user_id AND w2.day_bucket = s.day_bucket
+ AND w2.week_start = DATE_SUB(w.week_start, INTERVAL 2 WEEK)
+LEFT JOIN weekly_hours w3
+  ON w3.user_id = s.user_id AND w3.day_bucket = s.day_bucket
+ AND w3.week_start = DATE_SUB(w.week_start, INTERVAL 3 WEEK)
+LEFT JOIN weekly_hours w4
+  ON w4.user_id = s.user_id AND w4.day_bucket = s.day_bucket
+ AND w4.week_start = DATE_SUB(w.week_start, INTERVAL 4 WEEK)
 """
 
     return views

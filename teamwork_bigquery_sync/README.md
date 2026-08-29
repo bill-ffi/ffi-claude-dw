@@ -77,11 +77,11 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
 Five BigQuery views, one per quality-control rule, meant to be the direct
 data source for Looker Studio reports for leadership — each one is
 filterable by user / project / client / tasklist directly off its columns
-(no extra joins needed in Looker). Plus four more that aren't exception
+(no extra joins needed in Looker). Plus five more that aren't exception
 rules — `v_usermins` (see "External reference data" below) and the user
 report's `v_user_daily_billable_hours_long` / `_wide` plus their trend
-companion `v_user_daily_billable_hours_trend` (see "User report" below).
-All nine are defined in `views.py`; created/updated via:
+companions `v_user_daily_billable_hours_trend_long` / `_wide` (see "User
+report" below). All ten are defined in `views.py`; created/updated via:
 
 ```
 python sync.py --create-views
@@ -272,17 +272,32 @@ Both views share:
   without RLS, plus a user-picker filter control, for managers to look up
   anyone.
 
-### Trend companion: `v_user_daily_billable_hours_trend`
+### Trend companion: `v_user_daily_billable_hours_trend_long` / `_wide`
 
-A 9th view — same weekday-bucketing rule and user scaffold as the two
-above, but unpacks `Prior 4-Week Avg` into its 4 individual weeks instead
-of averaging them together, so a
+Two more views (9th and 10th) — same weekday-bucketing rule and user
+scaffold as the pair above, but unpack `Prior 4-Week Avg` into its 4
+individual weeks instead of averaging them together, so a
 declining/improving pattern is visible rather than smoothed away by the
-average. Adds `week_start` (the Monday of that week) and `weeks_ago`
-(1 = most recent complete week, 4 = oldest of the 4) in place of the
-`period` column; carries `hours`, `pct_of_min`, and `daily_min_bill` the
-same way. Meant for a small-multiples / line-per-weekday chart alongside
-the main report, not a replacement for it.
+average. Same `_long`/`_wide` split and the same reason for it:
+
+- **`_long`** — one row per `(user, day_bucket, weeks_ago)`. Adds
+  `week_start` (the Monday of that week) and `weeks_ago` (1 = most recent
+  complete week, 4 = oldest of the 4) in place of `period`; carries
+  `hours`, `pct_of_min`, and `daily_min_bill` the same way as the main
+  `_long` view. A chart using `weeks_ago` as a Breakdown Dimension to
+  create the 4 weekly bars hits the same "can't also add a real second
+  Metric" wall as the main view did — use `_wide` instead if the chart
+  needs `daily_min_bill` as a working reference (a Combo chart with the
+  weekly bars plus `daily_min_bill` as a Line, exactly like the main
+  chart's fix).
+- **`_wide`** — one row per `(user, day_bucket)`, with each of the 4
+  prior weeks as its own column: `hours_1_week_ago` (most recent complete
+  week) through `hours_4_weeks_ago` (oldest). Labels are relative ("N
+  weeks ago"), not fixed calendar dates, so they stay correct
+  automatically as weeks roll forward — no weekly relabeling needed.
+
+Meant for a small-multiples-style chart alongside the main report, not a
+replacement for it.
 
 ## Backfilling history
 
@@ -425,6 +440,6 @@ I'll wire up whichever one you pick.
 - `bigquery_sync.py` — dataset/table creation, truncate+load, the
   transactional current-month replace for timelogs
 - `views.py` — the five exception/QC reporting views plus `v_usermins`,
-  `v_user_daily_billable_hours_long`, `_wide`, and
-  `v_user_daily_billable_hours_trend` (see "Exception reporting views"
-  above)
+  `v_user_daily_billable_hours_long` / `_wide`, and
+  `v_user_daily_billable_hours_trend_long` / `_wide` (see "Exception
+  reporting views" above)
