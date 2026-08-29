@@ -77,10 +77,11 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
 Five BigQuery views, one per quality-control rule, meant to be the direct
 data source for Looker Studio reports for leadership — each one is
 filterable by user / project / client / tasklist directly off its columns
-(no extra joins needed in Looker). Plus two more that aren't exception
+(no extra joins needed in Looker). Plus three more that aren't exception
 rules — `v_usermins` (see "External reference data" below) and
-`v_user_daily_billable_hours` (see "User report" below). All seven are
-defined in `views.py`; created/updated via:
+`v_user_daily_billable_hours` plus its trend companion
+`v_user_daily_billable_hours_trend` (see "User report" below). All eight
+are defined in `views.py`; created/updated via:
 
 ```
 python sync.py --create-views
@@ -227,6 +228,10 @@ person's daily minimum from `v_usermins`).
   period) as the reference target — confirmed to represent an hours
   target, not a dollar figure (see `v_usermins` above; `daily_min_value`
   is something else and isn't used here).
+- **`pct_of_min`** = `hours / daily_min_bill` (via `SAFE_DIVIDE`, so a
+  0 or NULL `daily_min_bill` gives `NULL` rather than an error) — lets
+  Looker Studio color bars by threshold instead of requiring the viewer
+  to eyeball hours against the reference line.
 - Scoped to users present in `v_usermins` (i.e. who have a minimum
   defined) via `CROSS JOIN` against a 5-row weekday scaffold, so every
   user always has all 5 weekdays × both periods present — even at 0
@@ -237,6 +242,18 @@ person's daily minimum from `v_usermins`).
   a "Team Hours" page uses the *same view added as a second data source*
   without RLS, plus a user-picker filter control, for managers to look up
   anyone.
+
+### Trend companion: `v_user_daily_billable_hours_trend`
+
+An 8th view — same weekday-bucketing rule and user scaffold as
+`v_user_daily_billable_hours`, but unpacks `Prior 4-Week Avg` into its 4
+individual weeks instead of averaging them together, so a
+declining/improving pattern is visible rather than smoothed away by the
+average. Adds `week_start` (the Monday of that week) and `weeks_ago`
+(1 = most recent complete week, 4 = oldest of the 4) in place of the
+`period` column; carries `hours`, `pct_of_min`, and `daily_min_bill` the
+same way. Meant for a small-multiples / line-per-weekday chart alongside
+the main report, not a replacement for it.
 
 ## Backfilling history
 
@@ -378,5 +395,6 @@ I'll wire up whichever one you pick.
 - `transform.py` — raw Teamwork JSON → BigQuery row mapping
 - `bigquery_sync.py` — dataset/table creation, truncate+load, the
   transactional current-month replace for timelogs
-- `views.py` — the five exception/QC reporting views plus `v_usermins`
-  and `v_user_daily_billable_hours` (see "Exception reporting views" above)
+- `views.py` — the five exception/QC reporting views plus `v_usermins`,
+  `v_user_daily_billable_hours`, and `v_user_daily_billable_hours_trend`
+  (see "Exception reporting views" above)

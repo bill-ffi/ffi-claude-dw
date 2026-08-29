@@ -93,6 +93,7 @@ VIEW_NAMES = [
     "v_exception_recurring_compliance",
     "v_usermins",
     "v_user_daily_billable_hours",
+    "v_user_daily_billable_hours_trend",
 ]
 
 
@@ -392,7 +393,8 @@ SELECT
   s.user_id, s.user_email, s.first_name, s.last_name,
   s.day_bucket, s.day_order, s.daily_min_bill,
   'Current Week' AS period,
-  COALESCE(cw.hours, 0) AS hours
+  COALESCE(cw.hours, 0) AS hours,
+  SAFE_DIVIDE(COALESCE(cw.hours, 0), s.daily_min_bill) AS pct_of_min
 FROM scaffold s
 LEFT JOIN current_week_hours cw
   ON cw.user_id = s.user_id AND cw.day_bucket = s.day_bucket
@@ -401,10 +403,85 @@ SELECT
   s.user_id, s.user_email, s.first_name, s.last_name,
   s.day_bucket, s.day_order, s.daily_min_bill,
   'Prior 4-Week Avg' AS period,
-  COALESCE(p4.hours, 0) AS hours
+  COALESCE(p4.hours, 0) AS hours,
+  SAFE_DIVIDE(COALESCE(p4.hours, 0), s.daily_min_bill) AS pct_of_min
 FROM scaffold s
 LEFT JOIN prior_4wk_hours p4
   ON p4.user_id = s.user_id AND p4.day_bucket = s.day_bucket
+"""
+
+    # Trend companion to v_user_daily_billable_hours: unpacks the "Prior
+    # 4-Week Avg" single number into its 4 constituent weeks, so a
+    # declining/improving pattern is visible instead of averaged away.
+    # Same weekday-bucketing rule (Sunday -> Monday, Saturday -> Friday,
+    # same Mon-Sun week) and the same user scaffold, but keyed by
+    # week_start/weeks_ago instead of a single averaged period.
+    views["v_user_daily_billable_hours_trend"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_user_daily_billable_hours_trend")} AS
+WITH day_buckets AS (
+  SELECT 'Monday' AS day_bucket, 1 AS day_order UNION ALL
+  SELECT 'Tuesday', 2 UNION ALL
+  SELECT 'Wednesday', 3 UNION ALL
+  SELECT 'Thursday', 4 UNION ALL
+  SELECT 'Friday', 5
+),
+billable AS (
+  SELECT
+    tl.user_id,
+    tl.hours,
+    DATE_TRUNC(tl.log_date, WEEK(MONDAY)) AS week_start,
+    CASE EXTRACT(DAYOFWEEK FROM tl.log_date)
+      WHEN 1 THEN 'Monday'    -- Sunday folds into Monday (same week)
+      WHEN 2 THEN 'Monday'
+      WHEN 3 THEN 'Tuesday'
+      WHEN 4 THEN 'Wednesday'
+      WHEN 5 THEN 'Thursday'
+      WHEN 6 THEN 'Friday'
+      WHEN 7 THEN 'Friday'    -- Saturday folds into Friday (same week)
+    END AS day_bucket
+  FROM {timelogs} tl
+  WHERE tl.is_billable = TRUE
+),
+this_week AS (
+  SELECT DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY)) AS week_start
+),
+week_list AS (
+  -- weeks_ago: 1 = most recent complete week, 4 = oldest of the 4
+  SELECT DATE_SUB(w.week_start, INTERVAL n WEEK) AS week_start, n AS weeks_ago
+  FROM this_week w, UNNEST([1, 2, 3, 4]) AS n
+),
+weekly_hours AS (
+  SELECT b.user_id, b.day_bucket, b.week_start, SUM(b.hours) AS hours
+  FROM billable b
+  WHERE b.week_start IN (SELECT week_start FROM week_list)
+  GROUP BY b.user_id, b.day_bucket, b.week_start
+),
+scaffold AS (
+  SELECT
+    m.user_id,
+    m.email AS user_email,
+    m.first_name,
+    m.last_name,
+    m.daily_min_bill,
+    db.day_bucket,
+    db.day_order,
+    wl.week_start,
+    wl.weeks_ago
+  FROM {fqn("v_usermins")} m
+  CROSS JOIN day_buckets db
+  CROSS JOIN week_list wl
+)
+SELECT
+  s.user_id, s.user_email, s.first_name, s.last_name,
+  s.day_bucket, s.day_order, s.daily_min_bill,
+  s.week_start, s.weeks_ago,
+  COALESCE(wh.hours, 0) AS hours,
+  SAFE_DIVIDE(COALESCE(wh.hours, 0), s.daily_min_bill) AS pct_of_min
+FROM scaffold s
+LEFT JOIN weekly_hours wh
+  ON wh.user_id = s.user_id
+ AND wh.day_bucket = s.day_bucket
+ AND wh.week_start = s.week_start
 """
 
     return views
