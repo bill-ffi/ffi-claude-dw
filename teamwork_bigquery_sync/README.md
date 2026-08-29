@@ -77,8 +77,9 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
 Five BigQuery views, one per quality-control rule, meant to be the direct
 data source for Looker Studio reports for leadership — each one is
 filterable by user / project / client / tasklist directly off its columns
-(no extra joins needed in Looker). Defined in `views.py`; created/updated
-via:
+(no extra joins needed in Looker). Plus a sixth, `v_usermins`, which isn't
+an exception rule — see "External reference data" below. All six are
+defined in `views.py`; created/updated via:
 
 ```
 python sync.py --create-views
@@ -156,6 +157,35 @@ made to turn the rules as discussed into SQL, not confirmed facts):
   categories — it checks every billable and non-billable timelog site-wide,
   since excess time logged anywhere seemed worth surfacing. Say the word if
   this should be scoped down to match the other rules instead.
+
+### External reference data: `v_usermins`
+
+`v_usermins` is not an exception rule — it's a reference view joining
+Teamwork users to per-person weekly minimum billing figures maintained
+outside Teamwork, in a Google Sheet ("FFI Compensation Database and
+Budget", named range `mins4bq`).
+
+- The sheet is referenced via `gs_minimum_user_info`, a BigQuery **external
+  table** backed directly by that named range — created manually through
+  the BigQuery console (**Create table → Drive**), not by this pipeline.
+  It live-queries the Sheet on every read; nothing is copied or cached.
+- It was deliberately set up this way rather than through our GitHub
+  Actions service account: the table was created under your own Google
+  identity, and Looker Studio's "owner's credentials" mode (see below)
+  means reports also read it as you. The service account was NOT given
+  Drive access to the sheet, since it has no need to touch this table —
+  keeping this comp-adjacent data out of the automated pipeline entirely.
+- Join key: `gs_minimum_user_info.tw_userid` (INT64) ↔ `users.user_id`.
+  `v_usermins` uses an inner `JOIN`, so only users present in the sheet
+  show up — not every Teamwork user.
+- `min_bill`/`min_value` in the sheet are **weekly** figures; `v_usermins`
+  derives daily versions (`/ 5`) alongside them.
+- **Sensitivity note**: `min_bill`/`min_value` are comp-adjacent, same as
+  `users.user_cost`/`user_rate` (see "Known gaps" below) — worth
+  restricting read access to this view if BigQuery access here is ever
+  opened up more broadly.
+- If the named range, sheet, or external table is ever renamed, update
+  `ANCILLARY_USER_INFO_TABLE` in `views.py` and re-run `--create-views`.
 
 ## Backfilling history
 
@@ -297,5 +327,5 @@ I'll wire up whichever one you pick.
 - `transform.py` — raw Teamwork JSON → BigQuery row mapping
 - `bigquery_sync.py` — dataset/table creation, truncate+load, the
   transactional current-month replace for timelogs
-- `views.py` — the five exception/QC reporting views (see "Exception
-  reporting views" above)
+- `views.py` — the five exception/QC reporting views plus `v_usermins`
+  (see "Exception reporting views" above)

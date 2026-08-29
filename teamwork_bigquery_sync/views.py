@@ -68,12 +68,30 @@ RECURRING_REQUIRED_CATEGORY = "Books Maintenance"
 
 LONG_ENTRY_THRESHOLD_HOURS = 2
 
+# External table backed by a Google Sheet (named range "mins4bq" in "FFI
+# Compensation Database and Budget"), created manually via the BigQuery
+# console — NOT by this pipeline, and NOT managed by ensure_all_tables().
+# It's queried live off the Sheet at query time. Created under your own
+# Google identity, so only readers who themselves have Drive access to
+# that sheet (or who query through something running as you, like Looker
+# Studio's "owner's credentials" mode) can actually read it — our GitHub
+# Actions service account was deliberately NOT given access, since it has
+# no need to touch this table.
+#
+# Columns (per your confirmation): tw_userid (INT64, join key -> users.
+# user_id), first, last, email, as_of, min_bill, min_value. The last two
+# are comp-adjacent (a per-person minimum billing figure) — same caution
+# as users.user_cost/user_rate in schemas.py: worth restricting read
+# access if this ever gets shared beyond its current audience.
+ANCILLARY_USER_INFO_TABLE = "gs_minimum_user_info"
+
 VIEW_NAMES = [
     "v_exception_missing_activity",
     "v_exception_missing_estimate",
     "v_exception_billable_time_internal_projects",
     "v_exception_long_time_entries",
     "v_exception_recurring_compliance",
+    "v_usermins",
 ]
 
 
@@ -274,6 +292,31 @@ JOIN {projects} p ON p.project_id = t.project_id
 WHERE p.category_name = '{RECURRING_REQUIRED_CATEGORY}'
   AND t.parent_task_id IS NULL
   AND t.sequence_id IS NULL
+"""
+
+    # Not an exception rule — a reference view joining Teamwork users to
+    # the ancillary minimum-billing data from the "mins4bq" Google Sheet
+    # range (ANCILLARY_USER_INFO_TABLE, above). INNER JOIN is intentional
+    # (per your SQL): only users present in the sheet show up here, not
+    # every Teamwork user. min_bill/min_value are weekly figures in the
+    # sheet; daily versions are derived (/5) alongside them.
+    views["v_usermins"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_usermins")} AS
+SELECT
+  u.user_id,
+  u.email,
+  u.first_name,
+  u.last_name,
+  u.user_type,
+  u.user_rate,
+  u.user_cost,
+  m.min_bill AS wkly_min_bill,
+  (m.min_bill / 5) AS daily_min_bill,
+  m.min_value AS wkly_min_value,
+  (m.min_value / 5) AS daily_min_value,
+  m.as_of
+FROM {users} u
+JOIN {fqn(ANCILLARY_USER_INFO_TABLE)} m ON u.user_id = m.tw_userid
 """
 
     return views
