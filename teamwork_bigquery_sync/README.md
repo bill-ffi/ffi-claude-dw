@@ -121,6 +121,20 @@ missing_estimate, recurring_compliance) — on the two timelog-based views
 this would be trivially true for every row (the row itself is a posted
 time entry), so it wasn't added there.
 
+**`user_email`** — added to the two timelog-based views
+(billable_time_internal_projects, long_time_entries) alongside the existing
+`user_name`, specifically so Looker Studio's built-in per-viewer row-level
+security (data source setting: restrict rows by the viewer's login email)
+can be turned on for these two — each timelog has exactly one `user_id`,
+so this is a clean exact-match field. **Deliberately not added** to the
+three task-based views (missing_activity, missing_estimate,
+recurring_compliance): a task can have multiple assignees, and those views
+already collapse to one `assignee_names` string per task (see above) to
+avoid duplicate rows — a concatenated string can't satisfy Looker's
+exact-match email security. Confirmed with you: these three views stay
+one-row-per-task with no per-assignee security, rather than reverting to
+one row per assignee just to enable it.
+
 **"Monitored categories"** = the four project categories confirmed as "all
 of the billable projects we are monitoring": Books Maintenance, Monthly
 Close, Non-Monthly, and Payroll. (Originally tracked as one combined
