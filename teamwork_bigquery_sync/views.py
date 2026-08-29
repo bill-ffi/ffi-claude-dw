@@ -92,7 +92,8 @@ VIEW_NAMES = [
     "v_exception_long_time_entries",
     "v_exception_recurring_compliance",
     "v_usermins",
-    "v_user_daily_billable_hours",
+    "v_user_daily_billable_hours_long",
+    "v_user_daily_billable_hours_wide",
     "v_user_daily_billable_hours_trend",
 ]
 
@@ -335,8 +336,18 @@ JOIN {fqn(ANCILLARY_USER_INFO_TABLE)} m ON u.user_id = m.tw_userid
     # daily_min_bill target), via CROSS JOIN, so every user always has all
     # 5 weekday buckets and both periods present, even at 0 hours — no
     # gaps for Looker Studio's chart to render oddly.
-    views["v_user_daily_billable_hours"] = f"""
-CREATE OR REPLACE VIEW {fqn("v_user_daily_billable_hours")} AS
+    #
+    # "_long" = one row per (user, day_bucket, period) with hours/pct_of_min
+    # as a single pair of columns and `period` distinguishing the two
+    # series — the tidy/long format. See "_wide" below for the pivoted
+    # alternative, added because Looker Studio's reference lines need the
+    # reference field to be a real Metric on the chart, and a chart using
+    # a Breakdown Dimension (period) to split series can't also take a
+    # second real Metric — only this long-format shape supports a
+    # Breakdown Dimension at all, so the two shapes serve different chart
+    # designs, not one replacing the other.
+    views["v_user_daily_billable_hours_long"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_user_daily_billable_hours_long")} AS
 WITH day_buckets AS (
   SELECT 'Monday' AS day_bucket, 1 AS day_order UNION ALL
   SELECT 'Tuesday', 2 UNION ALL
@@ -410,7 +421,85 @@ LEFT JOIN prior_4wk_hours p4
   ON p4.user_id = s.user_id AND p4.day_bucket = s.day_bucket
 """
 
-    # Trend companion to v_user_daily_billable_hours: unpacks the "Prior
+    # "_wide" = one row per (user, day_bucket), with Current Week and
+    # Prior 4-Week Avg each as their OWN numeric columns
+    # (current_week_hours / prior_4wk_avg_hours, plus a pct_of_min pair)
+    # instead of two rows split by a `period` dimension. Built for a bar
+    # chart that uses two real Metrics (no Breakdown Dimension), which is
+    # what's needed to also add daily_min_bill as a third real Metric and
+    # get a working Looker Studio reference line — see "_long" above for
+    # why that combination doesn't work in the long/breakdown-dimension
+    # shape. Same underlying data and bucketing rule as "_long"; this is a
+    # different shape of the same numbers, not a different calculation.
+    views["v_user_daily_billable_hours_wide"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_user_daily_billable_hours_wide")} AS
+WITH day_buckets AS (
+  SELECT 'Monday' AS day_bucket, 1 AS day_order UNION ALL
+  SELECT 'Tuesday', 2 UNION ALL
+  SELECT 'Wednesday', 3 UNION ALL
+  SELECT 'Thursday', 4 UNION ALL
+  SELECT 'Friday', 5
+),
+billable AS (
+  SELECT
+    tl.user_id,
+    tl.hours,
+    DATE_TRUNC(tl.log_date, WEEK(MONDAY)) AS week_start,
+    CASE EXTRACT(DAYOFWEEK FROM tl.log_date)
+      WHEN 1 THEN 'Monday'    -- Sunday folds into Monday (same week)
+      WHEN 2 THEN 'Monday'
+      WHEN 3 THEN 'Tuesday'
+      WHEN 4 THEN 'Wednesday'
+      WHEN 5 THEN 'Thursday'
+      WHEN 6 THEN 'Friday'
+      WHEN 7 THEN 'Friday'    -- Saturday folds into Friday (same week)
+    END AS day_bucket
+  FROM {timelogs} tl
+  WHERE tl.is_billable = TRUE
+),
+this_week AS (
+  SELECT DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY)) AS week_start
+),
+current_week_hours AS (
+  SELECT b.user_id, b.day_bucket, SUM(b.hours) AS hours
+  FROM billable b, this_week w
+  WHERE b.week_start = w.week_start
+  GROUP BY b.user_id, b.day_bucket
+),
+prior_4wk_hours AS (
+  SELECT b.user_id, b.day_bucket, SUM(b.hours) / 4 AS hours
+  FROM billable b, this_week w
+  WHERE b.week_start BETWEEN DATE_SUB(w.week_start, INTERVAL 4 WEEK)
+                         AND DATE_SUB(w.week_start, INTERVAL 1 WEEK)
+  GROUP BY b.user_id, b.day_bucket
+),
+scaffold AS (
+  SELECT
+    m.user_id,
+    m.email AS user_email,
+    m.first_name,
+    m.last_name,
+    m.daily_min_bill,
+    db.day_bucket,
+    db.day_order
+  FROM {fqn("v_usermins")} m
+  CROSS JOIN day_buckets db
+)
+SELECT
+  s.user_id, s.user_email, s.first_name, s.last_name,
+  s.day_bucket, s.day_order, s.daily_min_bill,
+  COALESCE(cw.hours, 0) AS current_week_hours,
+  SAFE_DIVIDE(COALESCE(cw.hours, 0), s.daily_min_bill) AS current_week_pct_of_min,
+  COALESCE(p4.hours, 0) AS prior_4wk_avg_hours,
+  SAFE_DIVIDE(COALESCE(p4.hours, 0), s.daily_min_bill) AS prior_4wk_avg_pct_of_min
+FROM scaffold s
+LEFT JOIN current_week_hours cw
+  ON cw.user_id = s.user_id AND cw.day_bucket = s.day_bucket
+LEFT JOIN prior_4wk_hours p4
+  ON p4.user_id = s.user_id AND p4.day_bucket = s.day_bucket
+"""
+
+    # Trend companion to v_user_daily_billable_hours_long/_wide: unpacks the "Prior
     # 4-Week Avg" single number into its 4 constituent weeks, so a
     # declining/improving pattern is visible instead of averaged away.
     # Same weekday-bucketing rule (Sunday -> Monday, Saturday -> Friday,
