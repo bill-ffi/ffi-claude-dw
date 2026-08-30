@@ -92,11 +92,8 @@ VIEW_NAMES = [
     "v_exception_long_time_entries",
     "v_exception_recurring_compliance",
     "v_usermins",
-    "v_user_daily_billable_hours_long",
-    "v_user_daily_billable_hours_wide",
-    "v_user_daily_billable_hours_trend_long",
-    "v_user_daily_billable_hours_trend_wide",
-    "v_user_current_week_hybrid",
+    "v_user_daily_billable_hours_base",
+    "v_user_weekly_billable_hours",
 ]
 
 
@@ -105,7 +102,7 @@ def _sql_string_array(values):
 
 
 def build_view_sql(project_id, dataset):
-    """Returns {view_name: CREATE OR REPLACE VIEW sql} for all five views."""
+    """Returns {view_name: CREATE OR REPLACE VIEW sql} for every view in VIEW_NAMES."""
 
     def fqn(table):
         return f"`{project_id}.{dataset}.{table}`"
@@ -326,367 +323,104 @@ FROM {users} u
 JOIN {fqn(ANCILLARY_USER_INFO_TABLE)} m ON u.user_id = m.tw_userid
 """
 
-    # Per-user average daily billable hours, bucketed into 5 weekday
-    # columns for a bar chart: Sunday's hours fold into Monday, Saturday's
-    # fold into Friday (both within the SAME Mon-Sun week, via BigQuery's
-    # WEEK(MONDAY) truncation — a Sunday is grouped with the Monday that
-    # started its own week, not the next one). Two series per user/day:
-    # "Current Week" (this week so far, live) and "Prior 4-Week Avg" (the
-    # four full Mon-Sun weeks before this one, divided by 4 always — a
-    # day with zero logged hours counts as 0, not excluded from the
-    # average). Scoped to users present in v_usermins (i.e. who have a
-    # daily_min_bill target), via CROSS JOIN, so every user always has all
-    # 5 weekday buckets and both periods present, even at 0 hours — no
-    # gaps for Looker Studio's chart to render oddly.
+    # Layer 1 — the shared aggregation base. One row per (user, day_bucket,
+    # week_start): real, historical, aggregated SUM(hours) from billable
+    # timelogs, with the weekday-bucketing rule applied exactly once, here
+    # -- Sunday's hours fold into Monday, Saturday's into Friday, both
+    # within the SAME week. The week itself runs Sunday-through-Saturday
+    # (BigQuery's default WEEK truncation, i.e. WEEK(SUNDAY)) per your
+    # instruction: "week of" is always a Sunday, and the business week
+    # logically ends on Saturday. This also makes the fold direction
+    # unambiguous in a way the old Monday-Sunday week wasn't: Sunday (day
+    # 1 of its week) and Monday (day 2) are adjacent and both near the
+    # start; Friday (day 6) and Saturday (day 7) are adjacent and both
+    # near the end -- no more "hasn't happened yet" ambiguity about which
+    # week a Sunday belongs to.
     #
-    # "_long" = one row per (user, day_bucket, period) with hours/pct_of_min
-    # as a single pair of columns and `period` distinguishing the two
-    # series — the tidy/long format. See "_wide" below for the pivoted
-    # alternative, added because Looker Studio's reference lines need the
-    # reference field to be a real Metric on the chart, and a chart using
-    # a Breakdown Dimension (period) to split series can't also take a
-    # second real Metric — only this long-format shape supports a
-    # Breakdown Dimension at all, so the two shapes serve different chart
-    # designs, not one replacing the other.
-    views["v_user_daily_billable_hours_long"] = f"""
-CREATE OR REPLACE VIEW {fqn("v_user_daily_billable_hours_long")} AS
-WITH day_buckets AS (
-  SELECT 'Monday' AS day_bucket, 1 AS day_order UNION ALL
-  SELECT 'Tuesday', 2 UNION ALL
-  SELECT 'Wednesday', 3 UNION ALL
-  SELECT 'Thursday', 4 UNION ALL
-  SELECT 'Friday', 5
-),
-billable AS (
-  SELECT
-    tl.user_id,
-    tl.hours,
-    DATE_TRUNC(tl.log_date, WEEK(MONDAY)) AS week_start,
-    CASE EXTRACT(DAYOFWEEK FROM tl.log_date)
-      WHEN 1 THEN 'Monday'    -- Sunday folds into Monday (same week)
-      WHEN 2 THEN 'Monday'
-      WHEN 3 THEN 'Tuesday'
-      WHEN 4 THEN 'Wednesday'
-      WHEN 5 THEN 'Thursday'
-      WHEN 6 THEN 'Friday'
-      WHEN 7 THEN 'Friday'    -- Saturday folds into Friday (same week)
-    END AS day_bucket
-  FROM {timelogs} tl
-  WHERE tl.is_billable = TRUE
-),
-this_week AS (
-  SELECT DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY)) AS week_start
-),
-current_week_hours AS (
-  SELECT b.user_id, b.day_bucket, SUM(b.hours) AS hours
-  FROM billable b, this_week w
-  WHERE b.week_start = w.week_start
-  GROUP BY b.user_id, b.day_bucket
-),
-prior_4wk_hours AS (
-  SELECT b.user_id, b.day_bucket, SUM(b.hours) / 4 AS hours
-  FROM billable b, this_week w
-  WHERE b.week_start BETWEEN DATE_SUB(w.week_start, INTERVAL 4 WEEK)
-                         AND DATE_SUB(w.week_start, INTERVAL 1 WEEK)
-  GROUP BY b.user_id, b.day_bucket
-),
-scaffold AS (
-  SELECT
-    m.user_id,
-    m.email AS user_email,
-    m.first_name,
-    m.last_name,
-    m.daily_min_bill,
-    db.day_bucket,
-    db.day_order
-  FROM {fqn("v_usermins")} m
-  CROSS JOIN day_buckets db
-)
+    # Deliberately sparse: no user scaffold, no daily_min_bill, no
+    # zero-filling for missing combinations -- just the raw aggregation.
+    # Every downstream consumer applies its own scaffolding, since
+    # "which weeks/users need a guaranteed row" differs per report.
+    # Unbounded (all history) since this is a view, not a materialized
+    # table -- cost is incurred at query time, and the one current
+    # consumer (v_user_weekly_billable_hours) filters to whatever range
+    # it needs anyway.
+    views["v_user_daily_billable_hours_base"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_user_daily_billable_hours_base")} AS
 SELECT
-  s.user_id, s.user_email, s.first_name, s.last_name,
-  s.day_bucket, s.day_order, s.daily_min_bill,
-  'Current Week' AS period,
-  COALESCE(cw.hours, 0) AS hours,
-  SAFE_DIVIDE(COALESCE(cw.hours, 0), s.daily_min_bill) AS pct_of_min
-FROM scaffold s
-LEFT JOIN current_week_hours cw
-  ON cw.user_id = s.user_id AND cw.day_bucket = s.day_bucket
-UNION ALL
-SELECT
-  s.user_id, s.user_email, s.first_name, s.last_name,
-  s.day_bucket, s.day_order, s.daily_min_bill,
-  'Prior 4-Week Avg' AS period,
-  COALESCE(p4.hours, 0) AS hours,
-  SAFE_DIVIDE(COALESCE(p4.hours, 0), s.daily_min_bill) AS pct_of_min
-FROM scaffold s
-LEFT JOIN prior_4wk_hours p4
-  ON p4.user_id = s.user_id AND p4.day_bucket = s.day_bucket
+  tl.user_id,
+  CASE EXTRACT(DAYOFWEEK FROM tl.log_date)
+    WHEN 1 THEN 'Monday'    -- Sunday folds into Monday (same Sun-Sat week)
+    WHEN 2 THEN 'Monday'
+    WHEN 3 THEN 'Tuesday'
+    WHEN 4 THEN 'Wednesday'
+    WHEN 5 THEN 'Thursday'
+    WHEN 6 THEN 'Friday'
+    WHEN 7 THEN 'Friday'    -- Saturday folds into Friday (same Sun-Sat week)
+  END AS day_bucket,
+  CASE EXTRACT(DAYOFWEEK FROM tl.log_date)
+    WHEN 1 THEN 1 WHEN 2 THEN 1 WHEN 3 THEN 2 WHEN 4 THEN 3
+    WHEN 5 THEN 4 WHEN 6 THEN 5 WHEN 7 THEN 5
+  END AS day_order,
+  DATE_TRUNC(tl.log_date, WEEK) AS week_start,
+  SUM(tl.hours) AS hours
+FROM {timelogs} tl
+WHERE tl.is_billable = TRUE
+GROUP BY user_id, day_bucket, day_order, week_start
 """
 
-    # "_wide" = one row per (user, day_bucket), with Current Week and
-    # Prior 4-Week Avg each as their OWN numeric columns
-    # (current_week_hours / prior_4wk_avg_hours, plus a pct_of_min pair)
-    # instead of two rows split by a `period` dimension. Built for a bar
-    # chart that uses two real Metrics (no Breakdown Dimension), which is
-    # what's needed to also add daily_min_bill as a third real Metric and
-    # get a working Looker Studio reference line — see "_long" above for
-    # why that combination doesn't work in the long/breakdown-dimension
-    # shape. Same underlying data and bucketing rule as "_long"; this is a
-    # different shape of the same numbers, not a different calculation.
-    views["v_user_daily_billable_hours_wide"] = f"""
-CREATE OR REPLACE VIEW {fqn("v_user_daily_billable_hours_wide")} AS
-WITH day_buckets AS (
-  SELECT 'Monday' AS day_bucket, 1 AS day_order UNION ALL
-  SELECT 'Tuesday', 2 UNION ALL
-  SELECT 'Wednesday', 3 UNION ALL
-  SELECT 'Thursday', 4 UNION ALL
-  SELECT 'Friday', 5
-),
-billable AS (
-  SELECT
-    tl.user_id,
-    tl.hours,
-    DATE_TRUNC(tl.log_date, WEEK(MONDAY)) AS week_start,
-    CASE EXTRACT(DAYOFWEEK FROM tl.log_date)
-      WHEN 1 THEN 'Monday'    -- Sunday folds into Monday (same week)
-      WHEN 2 THEN 'Monday'
-      WHEN 3 THEN 'Tuesday'
-      WHEN 4 THEN 'Wednesday'
-      WHEN 5 THEN 'Thursday'
-      WHEN 6 THEN 'Friday'
-      WHEN 7 THEN 'Friday'    -- Saturday folds into Friday (same week)
-    END AS day_bucket
-  FROM {timelogs} tl
-  WHERE tl.is_billable = TRUE
-),
-this_week AS (
-  SELECT DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY)) AS week_start
-),
-current_week_hours AS (
-  SELECT b.user_id, b.day_bucket, SUM(b.hours) AS hours
-  FROM billable b, this_week w
-  WHERE b.week_start = w.week_start
-  GROUP BY b.user_id, b.day_bucket
-),
-prior_4wk_hours AS (
-  SELECT b.user_id, b.day_bucket, SUM(b.hours) / 4 AS hours
-  FROM billable b, this_week w
-  WHERE b.week_start BETWEEN DATE_SUB(w.week_start, INTERVAL 4 WEEK)
-                         AND DATE_SUB(w.week_start, INTERVAL 1 WEEK)
-  GROUP BY b.user_id, b.day_bucket
-),
-scaffold AS (
-  SELECT
-    m.user_id,
-    m.email AS user_email,
-    m.first_name,
-    m.last_name,
-    m.daily_min_bill,
-    db.day_bucket,
-    db.day_order
-  FROM {fqn("v_usermins")} m
-  CROSS JOIN day_buckets db
-)
-SELECT
-  s.user_id, s.user_email, s.first_name, s.last_name,
-  s.day_bucket, s.day_order, s.daily_min_bill,
-  COALESCE(cw.hours, 0) AS current_week_hours,
-  SAFE_DIVIDE(COALESCE(cw.hours, 0), s.daily_min_bill) AS current_week_pct_of_min,
-  COALESCE(p4.hours, 0) AS prior_4wk_avg_hours,
-  SAFE_DIVIDE(COALESCE(p4.hours, 0), s.daily_min_bill) AS prior_4wk_avg_pct_of_min
-FROM scaffold s
-LEFT JOIN current_week_hours cw
-  ON cw.user_id = s.user_id AND cw.day_bucket = s.day_bucket
-LEFT JOIN prior_4wk_hours p4
-  ON p4.user_id = s.user_id AND p4.day_bucket = s.day_bucket
-"""
-
-    # Trend companion to v_user_daily_billable_hours_long/_wide: unpacks the "Prior
-    # 4-Week Avg" single number into its 4 constituent weeks, so a
-    # declining/improving pattern is visible instead of averaged away.
-    # Same weekday-bucketing rule (Sunday -> Monday, Saturday -> Friday,
-    # same Mon-Sun week) and the same user scaffold, but keyed by
-    # week_start/weeks_ago instead of a single averaged period.
+    # Layer 2 — actual + projected, via UNION ALL (your preferred approach,
+    # so actuals and projections show up together in one report). Replaces
+    # v_user_daily_billable_hours_long/_wide, _trend_long/_wide, and
+    # v_user_current_week_hybrid entirely -- all five are retired by this
+    # one view. IMPORTANT MIGRATION NOTE: v_user_daily_billable_hours_wide
+    # was already wired into your live "Team Hours" Combo chart -- that
+    # chart will need to be rebuilt against this view once the old ones
+    # are dropped, since nothing here preserves the old view names.
     #
-    # "_long" = one row per (user, day_bucket, weeks_ago) — same
-    # long/tidy shape as v_user_daily_billable_hours_long, and the same
-    # limitation: a chart using weeks_ago as a Breakdown Dimension to
-    # create the 4 weekly bars can't also add daily_min_bill as a real
-    # second Metric for a reference line. See "_wide" below.
-    views["v_user_daily_billable_hours_trend_long"] = f"""
-CREATE OR REPLACE VIEW {fqn("v_user_daily_billable_hours_trend_long")} AS
-WITH day_buckets AS (
-  SELECT 'Monday' AS day_bucket, 1 AS day_order UNION ALL
-  SELECT 'Tuesday', 2 UNION ALL
-  SELECT 'Wednesday', 3 UNION ALL
-  SELECT 'Thursday', 4 UNION ALL
-  SELECT 'Friday', 5
-),
-billable AS (
-  SELECT
-    tl.user_id,
-    tl.hours,
-    DATE_TRUNC(tl.log_date, WEEK(MONDAY)) AS week_start,
-    CASE EXTRACT(DAYOFWEEK FROM tl.log_date)
-      WHEN 1 THEN 'Monday'    -- Sunday folds into Monday (same week)
-      WHEN 2 THEN 'Monday'
-      WHEN 3 THEN 'Tuesday'
-      WHEN 4 THEN 'Wednesday'
-      WHEN 5 THEN 'Thursday'
-      WHEN 6 THEN 'Friday'
-      WHEN 7 THEN 'Friday'    -- Saturday folds into Friday (same week)
-    END AS day_bucket
-  FROM {timelogs} tl
-  WHERE tl.is_billable = TRUE
-),
-this_week AS (
-  SELECT DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY)) AS week_start
-),
-week_list AS (
-  -- weeks_ago: 1 = most recent complete week, 4 = oldest of the 4
-  SELECT DATE_SUB(w.week_start, INTERVAL n WEEK) AS week_start, n AS weeks_ago
-  FROM this_week w, UNNEST([1, 2, 3, 4]) AS n
-),
-weekly_hours AS (
-  SELECT b.user_id, b.day_bucket, b.week_start, SUM(b.hours) AS hours
-  FROM billable b
-  WHERE b.week_start IN (SELECT week_start FROM week_list)
-  GROUP BY b.user_id, b.day_bucket, b.week_start
-),
-scaffold AS (
-  SELECT
-    m.user_id,
-    m.email AS user_email,
-    m.first_name,
-    m.last_name,
-    m.daily_min_bill,
-    db.day_bucket,
-    db.day_order,
-    wl.week_start,
-    wl.weeks_ago
-  FROM {fqn("v_usermins")} m
-  CROSS JOIN day_buckets db
-  CROSS JOIN week_list wl
-)
-SELECT
-  s.user_id, s.user_email, s.first_name, s.last_name,
-  s.day_bucket, s.day_order, s.daily_min_bill,
-  s.week_start, s.weeks_ago,
-  COALESCE(wh.hours, 0) AS hours,
-  SAFE_DIVIDE(COALESCE(wh.hours, 0), s.daily_min_bill) AS pct_of_min
-FROM scaffold s
-LEFT JOIN weekly_hours wh
-  ON wh.user_id = s.user_id
- AND wh.day_bucket = s.day_bucket
- AND wh.week_start = s.week_start
-"""
-
-    # "_wide" = one row per (user, day_bucket), with each of the 4 prior
-    # weeks as its own column (hours_1_week_ago .. hours_4_weeks_ago)
-    # instead of a weeks_ago dimension. Built for the same reason as
-    # v_user_daily_billable_hours_wide: real Metrics (no Breakdown
-    # Dimension) leave a free Metric slot for daily_min_bill, so a Combo
-    # chart (bars for each week, line for daily_min_bill) works the same
-    # way that already worked for the main daily chart. Labels are
-    # relative ("N weeks ago"), not fixed calendar dates, so the columns'
-    # meaning stays correct automatically as weeks roll forward — no
-    # yearly/weekly relabeling needed.
-    views["v_user_daily_billable_hours_trend_wide"] = f"""
-CREATE OR REPLACE VIEW {fqn("v_user_daily_billable_hours_trend_wide")} AS
-WITH day_buckets AS (
-  SELECT 'Monday' AS day_bucket, 1 AS day_order UNION ALL
-  SELECT 'Tuesday', 2 UNION ALL
-  SELECT 'Wednesday', 3 UNION ALL
-  SELECT 'Thursday', 4 UNION ALL
-  SELECT 'Friday', 5
-),
-billable AS (
-  SELECT
-    tl.user_id,
-    tl.hours,
-    DATE_TRUNC(tl.log_date, WEEK(MONDAY)) AS week_start,
-    CASE EXTRACT(DAYOFWEEK FROM tl.log_date)
-      WHEN 1 THEN 'Monday'    -- Sunday folds into Monday (same week)
-      WHEN 2 THEN 'Monday'
-      WHEN 3 THEN 'Tuesday'
-      WHEN 4 THEN 'Wednesday'
-      WHEN 5 THEN 'Thursday'
-      WHEN 6 THEN 'Friday'
-      WHEN 7 THEN 'Friday'    -- Saturday folds into Friday (same week)
-    END AS day_bucket
-  FROM {timelogs} tl
-  WHERE tl.is_billable = TRUE
-),
-this_week AS (
-  SELECT DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY)) AS week_start
-),
-weekly_hours AS (
-  SELECT b.user_id, b.day_bucket, b.week_start, SUM(b.hours) AS hours
-  FROM billable b, this_week w
-  WHERE b.week_start BETWEEN DATE_SUB(w.week_start, INTERVAL 4 WEEK)
-                         AND DATE_SUB(w.week_start, INTERVAL 1 WEEK)
-  GROUP BY b.user_id, b.day_bucket, b.week_start
-),
-scaffold AS (
-  SELECT
-    m.user_id,
-    m.email AS user_email,
-    m.first_name,
-    m.last_name,
-    m.daily_min_bill,
-    db.day_bucket,
-    db.day_order
-  FROM {fqn("v_usermins")} m
-  CROSS JOIN day_buckets db
-)
-SELECT
-  s.user_id, s.user_email, s.first_name, s.last_name,
-  s.day_bucket, s.day_order, s.daily_min_bill,
-  COALESCE(w1.hours, 0) AS hours_1_week_ago,
-  COALESCE(w2.hours, 0) AS hours_2_weeks_ago,
-  COALESCE(w3.hours, 0) AS hours_3_weeks_ago,
-  COALESCE(w4.hours, 0) AS hours_4_weeks_ago
-FROM scaffold s
-CROSS JOIN this_week w
-LEFT JOIN weekly_hours w1
-  ON w1.user_id = s.user_id AND w1.day_bucket = s.day_bucket
- AND w1.week_start = DATE_SUB(w.week_start, INTERVAL 1 WEEK)
-LEFT JOIN weekly_hours w2
-  ON w2.user_id = s.user_id AND w2.day_bucket = s.day_bucket
- AND w2.week_start = DATE_SUB(w.week_start, INTERVAL 2 WEEK)
-LEFT JOIN weekly_hours w3
-  ON w3.user_id = s.user_id AND w3.day_bucket = s.day_bucket
- AND w3.week_start = DATE_SUB(w.week_start, INTERVAL 3 WEEK)
-LEFT JOIN weekly_hours w4
-  ON w4.user_id = s.user_id AND w4.day_bucket = s.day_bucket
- AND w4.week_start = DATE_SUB(w.week_start, INTERVAL 4 WEEK)
-"""
-
-    # Live "hybrid" projection of the CURRENT (in-progress) week, per your
-    # instruction: a weekday bucket shows ACTUAL hours once it's already
-    # fully elapsed; a not-yet-elapsed weekday (today included, since
-    # today isn't complete either) shows the flat daily_min_bill as a
-    # placeholder; the LAST business-day bucket (Friday) is instead a
-    # "plug" -- (5 x daily_min_bill) minus whatever the other 4 buckets
-    # are currently showing -- so the week's running total stays on pace
-    # for the weekly minimum. Clamped at 0 rather than going negative if
-    # someone's already ahead of pace by Thursday.
+    # Grain: one row per (user, day_bucket, week_start), spanning from the
+    # start of the last COMPLETED calendar quarter through the current (
+    # possibly in-progress) week -- a rolling window that's ~13 weeks
+    # right after a quarter just turned over, growing to ~26 weeks right
+    # before the next one does (per your instruction: "max of
+    # approximately 26 weeks available at any time").
     #
-    # Edge cases decided here (not explicitly specified, flagged for
-    # review): if run on Saturday or Sunday, the whole business week is
-    # treated as already elapsed -- every bucket (Friday included) shows
-    # plain actuals, since there's no remaining week left to project into.
-    # This is a NEW, separate view rather than changing _long/_wide's
-    # "Current Week" -- those stay pure actuals, since other things may
-    # rely on that meaning; this hybrid number is specific to this one
-    # live-tracking use case.
+    # Two UNION ALL branches, mutually exclusive by construction (verified
+    # against every day of the week before building this):
+    #   - ACTUAL: every already-elapsed (week, day_bucket) combination,
+    #     scaffolded against v_usermins x day_buckets x a generated weekly
+    #     date spine, so a real 0-hour day still shows as an explicit 0
+    #     rather than a missing row. All of history before the current
+    #     week is unconditionally "actual"; within the current week, a
+    #     bucket is "actual" once its weekday has fully passed.
+    #   - PROJECTED: only the current week's NOT-yet-elapsed buckets --
+    #     flat daily_min_bill as a placeholder for today/future Mon-Thu
+    #     days, and a catch-up "plug" for Friday: (5 x daily_min_bill)
+    #     minus whatever the other 4 buckets are currently showing
+    #     (actual where already past, assumed-minimum otherwise), clamped
+    #     at 0 rather than going negative if someone's already ahead of
+    #     pace by Thursday.
     #
-    # `value_type` ('actual' / 'minimum' / 'plug') rides along so Looker
-    # Studio can visually distinguish real numbers from assumed/calculated
-    # ones (e.g. italicize or footnote non-actual cells) instead of
-    # silently blending them.
-    views["v_user_current_week_hybrid"] = f"""
-CREATE OR REPLACE VIEW {fqn("v_user_current_week_hybrid")} AS
+    # Per your explicit confirmation of these edge cases:
+    #   - Run on SUNDAY (the first day of its own week): the ENTIRE coming
+    #     week hasn't started yet, so Monday-Thursday all show `minimum`
+    #     and Friday shows the `plug` -- which works out to exactly one
+    #     day's minimum, since nothing else has happened yet. This is the
+    #     case you specifically asked to confirm: "Week of Aug 30" (a
+    #     Sunday) appearing as the last/current row, fully projected.
+    #   - Run on MONDAY: identical to Sunday -- nothing's happened yet
+    #     either way.
+    #   - Run on SATURDAY: the whole Mon-Fri business week has already
+    #     elapsed (Saturday is the LAST day of a Sun-Sat week), so every
+    #     bucket, Friday included, shows `actual` -- the PROJECTED branch
+    #     produces zero rows for that week in this case.
+    #
+    # `value_type` ('actual' / 'minimum' / 'plug') rides along on every
+    # row so Looker Studio can visually distinguish real numbers from
+    # assumed/calculated ones (e.g. italicize or footnote non-actual
+    # cells) instead of silently blending them.
+    views["v_user_weekly_billable_hours"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_user_weekly_billable_hours")} AS
 WITH day_buckets AS (
   SELECT 'Monday' AS day_bucket, 1 AS day_order UNION ALL
   SELECT 'Tuesday', 2 UNION ALL
@@ -694,31 +428,24 @@ WITH day_buckets AS (
   SELECT 'Thursday', 4 UNION ALL
   SELECT 'Friday', 5
 ),
-billable AS (
+bounds AS (
   SELECT
-    tl.user_id,
-    tl.hours,
-    DATE_TRUNC(tl.log_date, WEEK(MONDAY)) AS week_start,
-    CASE EXTRACT(DAYOFWEEK FROM tl.log_date)
-      WHEN 1 THEN 'Monday'    -- Sunday folds into Monday (same week)
-      WHEN 2 THEN 'Monday'
-      WHEN 3 THEN 'Tuesday'
-      WHEN 4 THEN 'Wednesday'
-      WHEN 5 THEN 'Thursday'
-      WHEN 6 THEN 'Friday'
-      WHEN 7 THEN 'Friday'    -- Saturday folds into Friday (same week)
-    END AS day_bucket
-  FROM {timelogs} tl
-  WHERE tl.is_billable = TRUE
-),
-this_week AS (
-  SELECT
-    DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY)) AS week_start,
-    -- Today's weekday mapped onto the same 1-5 scale as day_order;
-    -- Saturday/Sunday both map to 6 (past the last workday -> the whole
-    -- business week is treated as already elapsed).
+    -- Start of the last COMPLETED quarter: back up one quarter from the
+    -- start of the current (still in-progress) quarter, then snap to
+    -- that date's own Sunday-week so it lines up with real week_start
+    -- values below. Naturally rolls forward each time the current
+    -- quarter turns over.
+    DATE_TRUNC(
+      DATE_SUB(DATE_TRUNC(CURRENT_DATE(), QUARTER), INTERVAL 3 MONTH),
+      WEEK
+    ) AS earliest_week_start,
+    DATE_TRUNC(CURRENT_DATE(), WEEK) AS current_week_start,
+    -- Today's weekday mapped onto the same 1-5 scale as day_order.
+    -- Sunday -> 0 (the coming week hasn't started yet -- everything
+    -- through Friday is still ahead). Saturday -> 6 (past Friday --
+    -- the whole business week just finished).
     CASE EXTRACT(DAYOFWEEK FROM CURRENT_DATE())
-      WHEN 1 THEN 6   -- Sunday
+      WHEN 1 THEN 0   -- Sunday
       WHEN 2 THEN 1   -- Monday
       WHEN 3 THEN 2   -- Tuesday
       WHEN 4 THEN 3   -- Wednesday
@@ -727,69 +454,96 @@ this_week AS (
       WHEN 7 THEN 6   -- Saturday
     END AS today_order
 ),
-current_week_hours AS (
-  SELECT b.user_id, b.day_bucket, SUM(b.hours) AS hours
-  FROM billable b, this_week w
-  WHERE b.week_start = w.week_start
-  GROUP BY b.user_id, b.day_bucket
+week_spine AS (
+  SELECT week_start
+  FROM bounds,
+       UNNEST(GENERATE_DATE_ARRAY(
+         bounds.earliest_week_start, bounds.current_week_start, INTERVAL 7 DAY
+       )) AS week_start
 ),
-scaffold AS (
+actual_hours AS (
+  SELECT base.user_id, base.day_bucket, base.week_start, base.hours
+  FROM {fqn("v_user_daily_billable_hours_base")} base, bounds b
+  WHERE base.week_start >= b.earliest_week_start
+),
+-- What the current week's Mon-Thu buckets are showing right now (actual
+-- where already elapsed, assumed daily_min_bill otherwise) -- needed to
+-- size Friday's catch-up plug in the PROJECTED branch below. Computed
+-- independently of the two branches (a UNION's branches can't reference
+-- each other), using the same elapsed/not-elapsed test as the ACTUAL
+-- branch's WHERE clause.
+current_week_pace AS (
   SELECT
     m.user_id,
-    m.email AS user_email,
-    m.first_name,
-    m.last_name,
-    m.daily_min_bill,
-    db.day_bucket,
-    db.day_order,
-    w.today_order
+    SUM(
+      CASE
+        WHEN db.day_order < b.today_order OR b.today_order > 5
+          THEN COALESCE(ah.hours, 0)
+        ELSE m.daily_min_bill
+      END
+    ) AS non_friday_total
   FROM {fqn("v_usermins")} m
   CROSS JOIN day_buckets db
-  CROSS JOIN this_week w
-),
-classified AS (
-  SELECT
-    s.*,
-    COALESCE(cw.hours, 0) AS actual_hours,
-    CASE
-      WHEN s.today_order > 5 THEN 'actual'     -- Sat/Sun: week already over
-      WHEN s.day_order < s.today_order THEN 'actual'  -- this weekday already passed
-      WHEN s.day_order = 5 THEN 'plug'         -- Friday, week still in progress
-      ELSE 'minimum'                            -- today or a future Mon-Thu day
-    END AS value_type
-  FROM scaffold s
-  LEFT JOIN current_week_hours cw
-    ON cw.user_id = s.user_id AND cw.day_bucket = s.day_bucket
-),
-non_friday_totals AS (
-  -- What Mon-Thu are currently showing (actual where past, minimum
-  -- placeholder otherwise) -- needed to size Friday's catch-up plug.
-  SELECT
-    user_id,
-    SUM(CASE WHEN value_type = 'actual' THEN actual_hours ELSE daily_min_bill END) AS non_friday_total
-  FROM classified
-  WHERE day_order < 5
-  GROUP BY user_id
+  CROSS JOIN bounds b
+  LEFT JOIN actual_hours ah
+    ON ah.user_id = m.user_id AND ah.day_bucket = db.day_bucket
+   AND ah.week_start = b.current_week_start
+  WHERE db.day_order < 5
+  GROUP BY m.user_id
 )
+-- ACTUAL branch.
 SELECT
-  c.user_id, c.user_email, c.first_name, c.last_name,
-  c.day_bucket, c.day_order, c.daily_min_bill, c.value_type,
-  CASE c.value_type
-    WHEN 'actual' THEN c.actual_hours
-    WHEN 'minimum' THEN c.daily_min_bill
-    WHEN 'plug' THEN GREATEST(c.daily_min_bill * 5 - nft.non_friday_total, 0)
-  END AS hours
-FROM classified c
-LEFT JOIN non_friday_totals nft ON nft.user_id = c.user_id
+  m.user_id, m.email AS user_email, m.first_name, m.last_name,
+  ws.week_start, db.day_bucket, db.day_order, m.daily_min_bill,
+  'actual' AS value_type,
+  COALESCE(ah.hours, 0) AS hours,
+  SAFE_DIVIDE(COALESCE(ah.hours, 0), m.daily_min_bill) AS pct_of_min
+FROM {fqn("v_usermins")} m
+CROSS JOIN day_buckets db
+CROSS JOIN week_spine ws
+CROSS JOIN bounds b
+LEFT JOIN actual_hours ah
+  ON ah.user_id = m.user_id AND ah.day_bucket = db.day_bucket
+ AND ah.week_start = ws.week_start
+WHERE ws.week_start < b.current_week_start
+   OR b.today_order > 5
+   OR db.day_order < b.today_order
+
+UNION ALL
+
+-- PROJECTED branch: only the current week's not-yet-elapsed buckets.
+-- Produces zero rows once the whole week is already elapsed (Saturday),
+-- since the ACTUAL branch already covers that case.
+SELECT
+  m.user_id, m.email AS user_email, m.first_name, m.last_name,
+  b.current_week_start AS week_start, db.day_bucket, db.day_order, m.daily_min_bill,
+  CASE WHEN db.day_order = 5 THEN 'plug' ELSE 'minimum' END AS value_type,
+  CASE WHEN db.day_order = 5
+    THEN GREATEST(m.daily_min_bill * 5 - cwp.non_friday_total, 0)
+    ELSE m.daily_min_bill
+  END AS hours,
+  SAFE_DIVIDE(
+    CASE WHEN db.day_order = 5
+      THEN GREATEST(m.daily_min_bill * 5 - cwp.non_friday_total, 0)
+      ELSE m.daily_min_bill
+    END,
+    m.daily_min_bill
+  ) AS pct_of_min
+FROM {fqn("v_usermins")} m
+CROSS JOIN day_buckets db
+CROSS JOIN bounds b
+LEFT JOIN current_week_pace cwp ON cwp.user_id = m.user_id
+WHERE b.today_order <= 5
+  AND db.day_order >= b.today_order
 """
 
     return views
 
 
 def create_or_replace_views(bq_client, project_id, dataset):
-    """Creates (or updates) all five exception-reporting views. Views are
-    just saved queries — this is cheap and safe to re-run any time the
-    rule constants above change or the underlying tables' schema changes.
+    """Creates (or updates) every view in VIEW_NAMES. Views are just saved
+    queries — this is cheap and safe to re-run any time the rule constants
+    above change or the underlying tables' schema changes.
     """
     views = build_view_sql(project_id, dataset)
     results = {}

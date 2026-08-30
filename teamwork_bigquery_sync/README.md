@@ -77,12 +77,11 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
 Five BigQuery views, one per quality-control rule, meant to be the direct
 data source for Looker Studio reports for leadership — each one is
 filterable by user / project / client / tasklist directly off its columns
-(no extra joins needed in Looker). Plus six more that aren't exception
-rules — `v_usermins` (see "External reference data" below), the user
-report's `v_user_daily_billable_hours_long` / `_wide`, their trend
-companions `v_user_daily_billable_hours_trend_long` / `_wide`, and the
-live `v_user_current_week_hybrid` (see "User report" below). All eleven
-are defined in `views.py`; created/updated via:
+(no extra joins needed in Looker). Plus three more that aren't exception
+rules — `v_usermins` (see "External reference data" below) and the user
+report's `v_user_daily_billable_hours_base` / `v_user_weekly_billable_hours`
+(see "User report" below). All eight are defined in `views.py`;
+created/updated via:
 
 ```
 python sync.py --create-views
@@ -204,137 +203,89 @@ Budget", named range `mins4bq`).
 - If the named range, sheet, or external table is ever renamed, update
   `ANCILLARY_USER_INFO_TABLE` in `views.py` and re-run `--create-views`.
 
-### User report: `v_user_daily_billable_hours_long` / `_wide`
+### User report: `v_user_daily_billable_hours_base` / `v_user_weekly_billable_hours`
 
-Two views, also not exception rules — both feed the same per-user
-"billable hours by day of week" report (current week vs. a prior-4-week
-baseline vs. each person's daily minimum from `v_usermins`), just shaped
-differently for different Looker Studio chart needs:
+Two layered views replace what used to be five separate ones
+(`v_user_daily_billable_hours_long`/`_wide`,
+`v_user_daily_billable_hours_trend_long`/`_wide`, and
+`v_user_current_week_hybrid`) — consolidated for efficiency, since all of
+them were re-deriving the same "billable timelogs → weekday bucket → week"
+logic independently. **Migration note**: `v_user_daily_billable_hours_wide`
+was already wired into a live "Team Hours" Combo chart — that chart needs
+to be rebuilt against `v_user_weekly_billable_hours` once the old views
+are dropped (see "Known gaps" for the drop-order caveat).
 
-- **`_long`** (originally just `v_user_daily_billable_hours` — renamed
-  when `_wide` was added; if a Looker Studio data source still points at
-  the old name, repoint its connection to `_long` rather than rebuilding
-  the report) — one row per `(user, day_bucket, period)`, with a single
-  `hours`/`pct_of_min` pair and `period` (`'Current Week'` /
-  `'Prior 4-Week Avg'`) distinguishing the two series via a **Breakdown
-  Dimension** on the chart.
-- **`_wide`** — one row per `(user, day_bucket)`, with Current Week and
-  Prior 4-Week Avg as their own columns (`current_week_hours` /
-  `current_week_pct_of_min` and `prior_4wk_avg_hours` /
-  `prior_4wk_avg_pct_of_min`) instead of a `period` dimension.
+**Layer 1 — `v_user_daily_billable_hours_base`**: the shared aggregation.
+One row per `(user, day_bucket, week_start)` — real, historical
+`SUM(hours)` from billable timelogs, with the weekday-bucketing rule
+applied exactly once. Deliberately sparse (no user scaffold, no
+`daily_min_bill`, no zero-filling) and unbounded (all history, since it's
+a view — cost is incurred at query time, and the one consumer below
+filters to whatever range it needs).
 
-**Why both exist**: a chart using `_long`'s Breakdown Dimension to split
-into two series can't also take a second real Metric — so `daily_min_bill`
-can only be added as an "Optional metric," which doesn't pull data (and so
-won't drive a reference line) until a viewer manually toggles it on.
-`_wide` sidesteps this entirely: with Current Week and Prior 4-Week Avg
-each as their own real Metric (no Breakdown Dimension needed), there's a
-free Metric slot for `daily_min_bill` as a proper third Metric, which
-Looker Studio's reference lines require. Use `_wide` for the bar chart
-with the minimum reference line; `_long` remains useful wherever a
-Breakdown Dimension is the more natural fit and no reference line is
-needed.
+**The week now runs Sunday-through-Saturday**, not Monday-through-Sunday
+— `week_start` is always a Sunday (BigQuery's default `WEEK` truncation),
+per your instruction that "week of" should be a Sunday and the business
+week should logically end on Saturday. This also resolves an ambiguity
+the old Monday-Sunday week had: Sunday and Monday are now adjacent and
+both near the start of the same week, and Friday and Saturday are
+adjacent and both near the end — so "Sunday's hours fold into Monday,
+Saturday's fold into Friday" no longer has any "hasn't happened yet"
+ambiguity about which week a Sunday belongs to.
 
-Both views share:
+**Layer 2 — `v_user_weekly_billable_hours`**: actual + projected, combined
+via `UNION ALL` (your preferred approach, so a report can show both
+together). Grain: one row per `(user, day_bucket, week_start)`, spanning
+from the start of the **last completed calendar quarter** through the
+current (possibly in-progress) week — a rolling window that's ~13 weeks
+right after a quarter turns over, growing to ~26 weeks right before the
+next one does (confirmed against 2026-08-30: quarter boundary lands on
+2026-04-01, snapped to its Sunday-week of 2026-03-29, giving 23 weeks
+through the current week of 2026-08-30 — within the expected range).
 
-- **Weekday buckets, not calendar days.** Every timelog's `log_date` is
-  bucketed into one of 5 weekdays: Sunday folds into Monday, Saturday
-  folds into Friday — both within the *same* Monday–Sunday week (via
-  BigQuery's `WEEK(MONDAY)` truncation, which groups a Sunday with the
-  Monday that started its own week). If the intent was actually a
-  Sunday–Saturday week (Sunday folding into the *next* Monday instead),
-  this needs to change — flag it if the numbers don't look right.
-- **Current Week vs. Prior 4-Week Avg**: `Current Week` is this week so
-  far — live, so future weekdays in the current week naturally show 0
-  until logged. `Prior 4-Week Avg` is the four full Mon–Sun weeks
-  immediately before this one, always divided by 4 — a zero-hour day
-  counts as a real 0 rather than being excluded, so a new hire's first
-  month, or an inactive stretch, will pull the average down rather than
-  being excluded from it. Say the word if that should change to "divide
-  by weeks actually worked" instead.
-- **`daily_min_bill`** rides along on every row as the reference target —
-  confirmed to represent an hours target, not a dollar figure (see
-  `v_usermins` above; `daily_min_value` is something else and isn't used
-  here).
-- **`pct_of_min`** = hours ÷ `daily_min_bill` (via `SAFE_DIVIDE`, so a 0
-  or NULL `daily_min_bill` gives `NULL` rather than an error) — lets
-  Looker Studio color bars by threshold instead of requiring the viewer
-  to eyeball hours against the reference line. One column in `_long`
-  (applies to whichever `period` that row is); two columns in `_wide`
-  (`current_week_pct_of_min` / `prior_4wk_avg_pct_of_min`).
-- Scoped to users present in `v_usermins` (i.e. who have a minimum
-  defined) via `CROSS JOIN` against a 5-row weekday scaffold, so every
-  user always has all 5 weekdays present in both views — even at 0 hours
-  — rather than gaps a bar chart would render inconsistently.
-- **Two Looker Studio setups per view, no SQL difference**: a "My Hours"
-  page uses a view as a data source with row-level security on
-  (restricted to the viewer's own `user_email`) for self-service viewing;
-  a "Team Hours" page uses the *same view added as a second data source*
-  without RLS, plus a user-picker filter control, for managers to look up
-  anyone.
+Two `UNION ALL` branches, verified mutually exclusive and exhaustive for
+every day of the week before building this:
+- **`actual`** — every already-elapsed `(week, day_bucket)` combination,
+  scaffolded against `v_usermins` × the 5 weekdays × a generated weekly
+  date spine, so a real 0-hour day shows as an explicit 0 rather than a
+  missing row. All history before the current week is unconditionally
+  actual; within the current week, a bucket is actual once its weekday
+  has fully passed.
+- **`minimum` / `plug`** — only the current week's not-yet-elapsed
+  buckets. Monday–Thursday (today included, since today isn't complete
+  either) show the flat `daily_min_bill` as a placeholder
+  (`value_type = 'minimum'`). Friday shows a catch-up **plug**:
+  `(5 × daily_min_bill) − whatever Mon–Thu are currently showing` (actual
+  where already past, the minimum placeholder otherwise), clamped at 0
+  rather than going negative if someone's already ahead of pace by
+  Thursday.
 
-### Trend companion: `v_user_daily_billable_hours_trend_long` / `_wide`
+Confirmed for every day of the week, not just the original Wednesday
+example:
+- **Run on Sunday** (the case you specifically asked to confirm): the
+  coming week hasn't started yet, so Monday–Thursday all show `minimum`
+  and Friday's plug settles at exactly one day's minimum. "Week of Aug
+  30" (a Sunday) appears as the current/last row, fully projected — as
+  requested.
+- **Run on Monday**: identical to Sunday — nothing's happened yet either
+  way.
+- Wednesday, Thursday, Friday: progressively more of Mon–Thu becomes
+  `actual` as the week goes on; Friday's plug becomes a genuinely useful
+  "how much more do I need today" figure once it's actually Friday.
+- **Run on Saturday**: the whole Mon-Fri business week has already
+  elapsed (Saturday is the *last* day of a Sun-Sat week), so every
+  bucket, Friday included, shows `actual` — the projected branch produces
+  zero rows for that week.
 
-Two more views (9th and 10th) — same weekday-bucketing rule and user
-scaffold as the pair above, but unpack `Prior 4-Week Avg` into its 4
-individual weeks instead of averaging them together, so a
-declining/improving pattern is visible rather than smoothed away by the
-average. Same `_long`/`_wide` split and the same reason for it:
+`value_type` (`'actual'` / `'minimum'` / `'plug'`) rides along on every
+row so Looker Studio can visually distinguish real numbers from
+assumed/calculated ones (e.g. italicize or footnote non-actual cells)
+instead of silently blending them. `pct_of_min` (hours ÷ `daily_min_bill`,
+via `SAFE_DIVIDE`) rides along too, same as before.
 
-- **`_long`** — one row per `(user, day_bucket, weeks_ago)`. Adds
-  `week_start` (the Monday of that week) and `weeks_ago` (1 = most recent
-  complete week, 4 = oldest of the 4) in place of `period`; carries
-  `hours`, `pct_of_min`, and `daily_min_bill` the same way as the main
-  `_long` view. A chart using `weeks_ago` as a Breakdown Dimension to
-  create the 4 weekly bars hits the same "can't also add a real second
-  Metric" wall as the main view did — use `_wide` instead if the chart
-  needs `daily_min_bill` as a working reference (a Combo chart with the
-  weekly bars plus `daily_min_bill` as a Line, exactly like the main
-  chart's fix).
-- **`_wide`** — one row per `(user, day_bucket)`, with each of the 4
-  prior weeks as its own column: `hours_1_week_ago` (most recent complete
-  week) through `hours_4_weeks_ago` (oldest). Labels are relative ("N
-  weeks ago"), not fixed calendar dates, so they stay correct
-  automatically as weeks roll forward — no weekly relabeling needed.
-
-Meant for a small-multiples-style chart alongside the main report, not a
-replacement for it.
-
-### Live projection: `v_user_current_week_hybrid`
-
-An 11th view — a "hybrid" projection of the still-in-progress current
-week, per your instruction. Each weekday bucket shows one of three things,
-tagged in a `value_type` column so Looker Studio can visually distinguish
-them (e.g. italicize or footnote non-actual cells) rather than silently
-blending real and assumed numbers:
-
-- **`actual`** — the weekday has already fully elapsed; shows real logged
-  hours.
-- **`minimum`** — the weekday hasn't happened yet (today included, since
-  today isn't complete either); shows the flat `daily_min_bill` as a
-  placeholder/assumption.
-- **`plug`** — Friday only, while the week is still in progress: `(5 ×
-  daily_min_bill) − whatever Mon–Thu are currently showing` (actual where
-  already past, the minimum placeholder otherwise), clamped at 0. This is
-  "how much is needed on the last day to stay on pace for the weekly
-  minimum," accounting for whatever's already happened.
-
-Worked through and confirmed for every day of the week, not just the
-Wednesday example given:
-- Monday run → Mon–Thu all show `minimum`, Friday's plug works out to
-  exactly one day's minimum (a "you're exactly on pace" baseline before
-  any real data comes in).
-- Friday run → Mon–Thu show `actual`, Friday itself shows the plug — now
-  a genuinely useful "how much more do I need today" figure.
-- **Saturday/Sunday run** (an edge case not in the original spec, decided
-  here): the entire business week is treated as already elapsed — every
-  bucket, Friday included, shows `actual`, since there's no remaining
-  week left to project into.
-
-This is a **separate view**, not a change to `_long`/`_wide`'s existing
-"Current Week" columns — those stay pure actuals (other things may rely
-on that meaning); this hybrid number is specific to this one live-
-tracking use case.
+**The "prior 4-week average" concept is gone entirely** (per your
+instruction — no longer needed), superseded by this quarter-to-date
+window of individual weeks, current-week projection included.
 
 ## Backfilling history
 
@@ -382,6 +333,17 @@ I'll wire up whichever one you pick.
 
 ## Known gaps / things to verify before relying on this
 
+- **Retired user-report views — drop order matters.**
+  `v_user_daily_billable_hours_long`, `_wide`, `v_user_daily_billable_hours_trend_long`,
+  `_wide`, and `v_user_current_week_hybrid` were all replaced by
+  `v_user_daily_billable_hours_base` / `v_user_weekly_billable_hours` (see
+  "User report" above). `--create-views` does not drop views removed from
+  `VIEW_NAMES` — the old ones stay live in BigQuery until manually
+  dropped. **Before dropping `v_user_daily_billable_hours_wide`
+  specifically**: it was already wired into a live "Team Hours" Combo
+  chart in Looker Studio — rebuild that chart against
+  `v_user_weekly_billable_hours` first, then drop the 5 old views (safe
+  to drop the other 4 immediately; nothing was built against them yet).
 - **Endpoint paths.** All four (`PROJECTS_PATH`, `TASKS_PATH`,
   `TIMELOGS_PATH`, `PROJECT_BUDGETS_PATH`) have now returned real data in a
   live `--dry-run` against this account.
@@ -477,6 +439,5 @@ I'll wire up whichever one you pick.
 - `bigquery_sync.py` — dataset/table creation, truncate+load, the
   transactional current-month replace for timelogs
 - `views.py` — the five exception/QC reporting views plus `v_usermins`,
-  `v_user_daily_billable_hours_long` / `_wide`,
-  `v_user_daily_billable_hours_trend_long` / `_wide`, and
-  `v_user_current_week_hybrid` (see "Exception reporting views" above)
+  `v_user_daily_billable_hours_base`, and `v_user_weekly_billable_hours`
+  (see "Exception reporting views" above)
