@@ -77,11 +77,12 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
 Five BigQuery views, one per quality-control rule, meant to be the direct
 data source for Looker Studio reports for leadership — each one is
 filterable by user / project / client / tasklist directly off its columns
-(no extra joins needed in Looker). Plus five more that aren't exception
-rules — `v_usermins` (see "External reference data" below) and the user
-report's `v_user_daily_billable_hours_long` / `_wide` plus their trend
-companions `v_user_daily_billable_hours_trend_long` / `_wide` (see "User
-report" below). All ten are defined in `views.py`; created/updated via:
+(no extra joins needed in Looker). Plus six more that aren't exception
+rules — `v_usermins` (see "External reference data" below), the user
+report's `v_user_daily_billable_hours_long` / `_wide`, their trend
+companions `v_user_daily_billable_hours_trend_long` / `_wide`, and the
+live `v_user_current_week_hybrid` (see "User report" below). All eleven
+are defined in `views.py`; created/updated via:
 
 ```
 python sync.py --create-views
@@ -299,6 +300,42 @@ average. Same `_long`/`_wide` split and the same reason for it:
 Meant for a small-multiples-style chart alongside the main report, not a
 replacement for it.
 
+### Live projection: `v_user_current_week_hybrid`
+
+An 11th view — a "hybrid" projection of the still-in-progress current
+week, per your instruction. Each weekday bucket shows one of three things,
+tagged in a `value_type` column so Looker Studio can visually distinguish
+them (e.g. italicize or footnote non-actual cells) rather than silently
+blending real and assumed numbers:
+
+- **`actual`** — the weekday has already fully elapsed; shows real logged
+  hours.
+- **`minimum`** — the weekday hasn't happened yet (today included, since
+  today isn't complete either); shows the flat `daily_min_bill` as a
+  placeholder/assumption.
+- **`plug`** — Friday only, while the week is still in progress: `(5 ×
+  daily_min_bill) − whatever Mon–Thu are currently showing` (actual where
+  already past, the minimum placeholder otherwise), clamped at 0. This is
+  "how much is needed on the last day to stay on pace for the weekly
+  minimum," accounting for whatever's already happened.
+
+Worked through and confirmed for every day of the week, not just the
+Wednesday example given:
+- Monday run → Mon–Thu all show `minimum`, Friday's plug works out to
+  exactly one day's minimum (a "you're exactly on pace" baseline before
+  any real data comes in).
+- Friday run → Mon–Thu show `actual`, Friday itself shows the plug — now
+  a genuinely useful "how much more do I need today" figure.
+- **Saturday/Sunday run** (an edge case not in the original spec, decided
+  here): the entire business week is treated as already elapsed — every
+  bucket, Friday included, shows `actual`, since there's no remaining
+  week left to project into.
+
+This is a **separate view**, not a change to `_long`/`_wide`'s existing
+"Current Week" columns — those stay pure actuals (other things may rely
+on that meaning); this hybrid number is specific to this one live-
+tracking use case.
+
 ## Backfilling history
 
 The normal run only ever touches "this calendar month" for timelogs (see
@@ -440,6 +477,6 @@ I'll wire up whichever one you pick.
 - `bigquery_sync.py` — dataset/table creation, truncate+load, the
   transactional current-month replace for timelogs
 - `views.py` — the five exception/QC reporting views plus `v_usermins`,
-  `v_user_daily_billable_hours_long` / `_wide`, and
-  `v_user_daily_billable_hours_trend_long` / `_wide` (see "Exception
-  reporting views" above)
+  `v_user_daily_billable_hours_long` / `_wide`,
+  `v_user_daily_billable_hours_trend_long` / `_wide`, and
+  `v_user_current_week_hybrid` (see "Exception reporting views" above)

@@ -96,6 +96,7 @@ VIEW_NAMES = [
     "v_user_daily_billable_hours_wide",
     "v_user_daily_billable_hours_trend_long",
     "v_user_daily_billable_hours_trend_wide",
+    "v_user_current_week_hybrid",
 ]
 
 
@@ -659,6 +660,127 @@ LEFT JOIN weekly_hours w3
 LEFT JOIN weekly_hours w4
   ON w4.user_id = s.user_id AND w4.day_bucket = s.day_bucket
  AND w4.week_start = DATE_SUB(w.week_start, INTERVAL 4 WEEK)
+"""
+
+    # Live "hybrid" projection of the CURRENT (in-progress) week, per your
+    # instruction: a weekday bucket shows ACTUAL hours once it's already
+    # fully elapsed; a not-yet-elapsed weekday (today included, since
+    # today isn't complete either) shows the flat daily_min_bill as a
+    # placeholder; the LAST business-day bucket (Friday) is instead a
+    # "plug" -- (5 x daily_min_bill) minus whatever the other 4 buckets
+    # are currently showing -- so the week's running total stays on pace
+    # for the weekly minimum. Clamped at 0 rather than going negative if
+    # someone's already ahead of pace by Thursday.
+    #
+    # Edge cases decided here (not explicitly specified, flagged for
+    # review): if run on Saturday or Sunday, the whole business week is
+    # treated as already elapsed -- every bucket (Friday included) shows
+    # plain actuals, since there's no remaining week left to project into.
+    # This is a NEW, separate view rather than changing _long/_wide's
+    # "Current Week" -- those stay pure actuals, since other things may
+    # rely on that meaning; this hybrid number is specific to this one
+    # live-tracking use case.
+    #
+    # `value_type` ('actual' / 'minimum' / 'plug') rides along so Looker
+    # Studio can visually distinguish real numbers from assumed/calculated
+    # ones (e.g. italicize or footnote non-actual cells) instead of
+    # silently blending them.
+    views["v_user_current_week_hybrid"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_user_current_week_hybrid")} AS
+WITH day_buckets AS (
+  SELECT 'Monday' AS day_bucket, 1 AS day_order UNION ALL
+  SELECT 'Tuesday', 2 UNION ALL
+  SELECT 'Wednesday', 3 UNION ALL
+  SELECT 'Thursday', 4 UNION ALL
+  SELECT 'Friday', 5
+),
+billable AS (
+  SELECT
+    tl.user_id,
+    tl.hours,
+    DATE_TRUNC(tl.log_date, WEEK(MONDAY)) AS week_start,
+    CASE EXTRACT(DAYOFWEEK FROM tl.log_date)
+      WHEN 1 THEN 'Monday'    -- Sunday folds into Monday (same week)
+      WHEN 2 THEN 'Monday'
+      WHEN 3 THEN 'Tuesday'
+      WHEN 4 THEN 'Wednesday'
+      WHEN 5 THEN 'Thursday'
+      WHEN 6 THEN 'Friday'
+      WHEN 7 THEN 'Friday'    -- Saturday folds into Friday (same week)
+    END AS day_bucket
+  FROM {timelogs} tl
+  WHERE tl.is_billable = TRUE
+),
+this_week AS (
+  SELECT
+    DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY)) AS week_start,
+    -- Today's weekday mapped onto the same 1-5 scale as day_order;
+    -- Saturday/Sunday both map to 6 (past the last workday -> the whole
+    -- business week is treated as already elapsed).
+    CASE EXTRACT(DAYOFWEEK FROM CURRENT_DATE())
+      WHEN 1 THEN 6   -- Sunday
+      WHEN 2 THEN 1   -- Monday
+      WHEN 3 THEN 2   -- Tuesday
+      WHEN 4 THEN 3   -- Wednesday
+      WHEN 5 THEN 4   -- Thursday
+      WHEN 6 THEN 5   -- Friday
+      WHEN 7 THEN 6   -- Saturday
+    END AS today_order
+),
+current_week_hours AS (
+  SELECT b.user_id, b.day_bucket, SUM(b.hours) AS hours
+  FROM billable b, this_week w
+  WHERE b.week_start = w.week_start
+  GROUP BY b.user_id, b.day_bucket
+),
+scaffold AS (
+  SELECT
+    m.user_id,
+    m.email AS user_email,
+    m.first_name,
+    m.last_name,
+    m.daily_min_bill,
+    db.day_bucket,
+    db.day_order,
+    w.today_order
+  FROM {fqn("v_usermins")} m
+  CROSS JOIN day_buckets db
+  CROSS JOIN this_week w
+),
+classified AS (
+  SELECT
+    s.*,
+    COALESCE(cw.hours, 0) AS actual_hours,
+    CASE
+      WHEN s.today_order > 5 THEN 'actual'     -- Sat/Sun: week already over
+      WHEN s.day_order < s.today_order THEN 'actual'  -- this weekday already passed
+      WHEN s.day_order = 5 THEN 'plug'         -- Friday, week still in progress
+      ELSE 'minimum'                            -- today or a future Mon-Thu day
+    END AS value_type
+  FROM scaffold s
+  LEFT JOIN current_week_hours cw
+    ON cw.user_id = s.user_id AND cw.day_bucket = s.day_bucket
+),
+non_friday_totals AS (
+  -- What Mon-Thu are currently showing (actual where past, minimum
+  -- placeholder otherwise) -- needed to size Friday's catch-up plug.
+  SELECT
+    user_id,
+    SUM(CASE WHEN value_type = 'actual' THEN actual_hours ELSE daily_min_bill END) AS non_friday_total
+  FROM classified
+  WHERE day_order < 5
+  GROUP BY user_id
+)
+SELECT
+  c.user_id, c.user_email, c.first_name, c.last_name,
+  c.day_bucket, c.day_order, c.daily_min_bill, c.value_type,
+  CASE c.value_type
+    WHEN 'actual' THEN c.actual_hours
+    WHEN 'minimum' THEN c.daily_min_bill
+    WHEN 'plug' THEN GREATEST(c.daily_min_bill * 5 - nft.non_friday_total, 0)
+  END AS hours
+FROM classified c
+LEFT JOIN non_friday_totals nft ON nft.user_id = c.user_id
 """
 
     return views
