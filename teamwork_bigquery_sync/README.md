@@ -310,29 +310,55 @@ python sync.py --backfill-months 2026-01,2026-02,2026-03
   the **Backfill months** box → leave **Dry run only** unchecked → **Run
   workflow**. Leave the box blank for a normal run.
 
-## Scheduling recommendation
+## Scheduling
 
-Target cadence: daily at 5am and noon (pick the timezone via `SYNC_TIMEZONE`
-and configure the scheduler in the same timezone — the two aren't linked
-automatically).
+Built as a **GitHub Actions scheduled workflow** (`.github/workflows/teamwork-bigquery-sync.yml`),
+twice daily. Current cron: `15 4,16 * * *` (04:15 and 16:15 UTC — see "Known
+gaps" below for why it's deliberately not on the hour, and for documented
+evidence that GitHub's scheduler has been delaying these firings by
+anywhere from minutes to several hours). `SYNC_TIMEZONE` (`America/New_York`,
+set as a workflow env var) controls what "current calendar month" means for
+the timelogs window — it's independent of the cron's UTC timing, the two
+aren't linked automatically.
 
-Given this now lives in a GitHub repo, **GitHub Actions scheduled workflow**
-is the simplest fit: no infra to stand up, secrets live in repo/org GitHub
-Secrets (`TEAMWORK_API_KEY`, and the service-account JSON base64-encoded or
-via Workload Identity Federation to avoid storing a long-lived key at all),
-and a `cron` trigger covers twice-daily easily. Cloud Scheduler + Cloud Run
-is the better fit only if this needs to live alongside other GCP-native
-infra, needs sub-minute reliability guarantees, or the service-account key
-should never leave GCP (Cloud Run can use the attached service account
-directly with zero stored key material — arguably the more secure option
-long-term). Plain cron is fine too if there's already an always-on host for
-it, but adds a "did the box stay up" failure mode the other two don't have.
-
-Not building the scheduler itself per your instructions — say the word and
-I'll wire up whichever one you pick.
+If GitHub Actions' scheduling reliability continues to be a problem after
+the on-the-hour fix, **Cloud Scheduler + Cloud Run** is the documented
+fallback: real timing guarantees GitHub's best-effort scheduler doesn't
+give, and the service account key never has to leave GCP (Cloud Run can use
+the attached service account directly). Say the word and I'll wire it up.
 
 ## Known gaps / things to verify before relying on this
 
+- **Scheduled-run delays (partially mitigated, not fully solved).**
+  The original cron (`0 5,17 * * *`, firing exactly on the hour) was
+  investigated after noticing a run at an unexpected time. Pulled via the
+  GitHub Actions API (`created_at` on each `event=schedule` run — precise,
+  not the rounded UI display) for the 9 most recent scheduled firings as
+  of 2026-09-01:
+
+  | Run # | Actual fire time (UTC) | Intended slot | Delay |
+  |---|---|---|---|
+  | 21 | 2026-08-28 01:16:54 | Aug 27, 17:00 | 8h 16m |
+  | 23 | 2026-08-28 17:10:04 | Aug 28, 17:00 | 10m |
+  | 26 | 2026-08-29 11:28:58 | Aug 29, 05:00 | 6h 28m |
+  | 30 | 2026-08-29 19:36:39 | Aug 29, 17:00 | 2h 36m |
+  | 32 | 2026-08-30 10:16:46 | Aug 30, 05:00 | 5h 16m |
+  | 34 | 2026-08-30 19:38:55 | Aug 30, 17:00 | 2h 38m |
+  | 36 | 2026-08-31 11:22:13 | Aug 31, 05:00 | 6h 22m |
+  | 37 | 2026-08-31 21:44:11 | Aug 31, 17:00 | 4h 44m |
+  | 38 | 2026-09-01 09:46:32 | Sep 1, 05:00 | 4h 46m |
+
+  Delay ranged from 10 minutes to over 8 hours — not a fixed offset — and
+  the gap *between* consecutive scheduled fires ranged from ~8 to ~18
+  hours, when a healthy twice-daily schedule should hold a steady ~12.
+  This is more than GitHub's documented "top-of-the-hour congestion"
+  effect (typically minutes, not hours) would explain on its own.
+  **Mitigation applied**: moved the cron off `:00` to `15 4,16 * * *`
+  (04:15/16:15 UTC) — a cheap, documented best practice, but not
+  guaranteed to eliminate multi-hour delays given the severity above. If
+  delays are still unacceptable after this change, the documented
+  fallback is Cloud Scheduler + Cloud Run (see "Scheduling" above), which
+  doesn't share GitHub's best-effort queue.
 - **Retired user-report views — drop order matters.**
   `v_user_daily_billable_hours_long`, `_wide`, `v_user_daily_billable_hours_trend_long`,
   `_wide`, and `v_user_current_week_hybrid` were all replaced by
