@@ -270,6 +270,76 @@ def run_dry_run(client):
         any_failed = True
         print(f"[FAIL] client (company) diagnostic — {exc}")
 
+    # TEMPORARY spike diagnostic (2026-09-02): investigating whether tasks
+    # belonging to archived projects can be pulled at all. list_tasks()
+    # currently passes no archived-projects equivalent of the
+    # includeArchivedProjects=true flag that list_projects() already needs
+    # — this probes whether tasks.json accepts the same (or a similar)
+    # flag, and whether real project payloads carry a populated
+    # archivedAt/status so an "archived after <date>" cutoff is even
+    # possible. Purely informational — does not affect any_failed/exit
+    # code. Remove once the question is settled (see README "Known gaps").
+    print("\n--- Archived-project tasks diagnostic (temporary spike) ---")
+    try:
+        raw_projects, _ = client.list_projects()
+        archived_like = [
+            p
+            for p in raw_projects
+            if p.get("isArchived") or p.get("archivedAt") or str(p.get("status", "")).lower() == "archived"
+        ]
+        print(
+            f"     {len(archived_like)}/{len(raw_projects)} projects look archived by "
+            "isArchived/archivedAt/status=='archived'"
+        )
+        distinct_statuses = sorted({str(p.get("status")) for p in raw_projects})
+        print(f"     distinct raw 'status' values seen across all projects: {distinct_statuses}")
+        if not archived_like:
+            print("     [FAIL] no archived-looking project found — can't run the rest of this diagnostic")
+        else:
+            target = archived_like[0]
+            target_id = target["id"]
+            print(f"     sample archived-looking project: id={target_id}, name={target.get('name')!r}")
+            print(f"     raw fields: {json.dumps(target, default=str)}")
+
+            baseline = client._get(TASKS_PATH, {"page": 1, "pageSize": 1, "includeCompletedTasks": "true"})
+            baseline_count = (baseline.get("meta") or {}).get("page", {}).get("count")
+            print(f"     baseline tasks.json total count (meta.page.count): {baseline_count}")
+
+            for flag in ("includeArchivedProjects", "includeArchivedTasks"):
+                probe = client._get(
+                    TASKS_PATH,
+                    {"page": 1, "pageSize": 1, "includeCompletedTasks": "true", flag: "true"},
+                )
+                probe_count = (probe.get("meta") or {}).get("page", {}).get("count")
+                if isinstance(probe_count, int) and isinstance(baseline_count, int):
+                    delta = probe_count - baseline_count
+                else:
+                    delta = "n/a"
+                print(f"     with {flag}=true: total count={probe_count} (delta vs baseline: {delta})")
+
+            # Targeted check scoped to the one known-archived project, in case
+            # the flags above are no-ops for an unrelated reason or the API
+            # doesn't expose a total count.
+            for params_label, extra_params in (
+                ("no archived flag", {}),
+                ("includeArchivedProjects=true", {"includeArchivedProjects": "true"}),
+            ):
+                scoped_params = {
+                    "projectIds": str(target_id),
+                    "page": 1,
+                    "pageSize": 5,
+                    "includeCompletedTasks": "true",
+                    **extra_params,
+                }
+                scoped = client._get(TASKS_PATH, scoped_params)
+                scoped_tasks = scoped.get("tasks", [])
+                print(
+                    f"     tasks.json?projectIds={target_id} ({params_label}): "
+                    f"{len(scoped_tasks)} task(s) returned"
+                )
+    except Exception as exc:
+        print(f"[FAIL] archived-project tasks diagnostic — {exc}")
+
     print()
     if any_failed:
         print("One or more checks failed. Fix TEAMWORK_BASE_URL/API key or the")
