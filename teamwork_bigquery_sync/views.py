@@ -1,7 +1,8 @@
 """BigQuery views for the exception / quality-control reporting layer.
 
-Five views, one per rule agreed on for identifying where staff isn't using
-Teamwork the way it's meant to be used. Each view is meant to be the direct
+Six views for the five rules agreed on for identifying where staff isn't
+using Teamwork the way it's meant to be used (the missing-activity rule is
+split across two views — see below). Each view is meant to be the direct
 data source for a Looker Studio report, filterable by user / project /
 client / tasklist — the columns needed for those filters are included in
 every view's output, not just the flagged field itself.
@@ -86,7 +87,8 @@ LONG_ENTRY_THRESHOLD_HOURS = 2
 ANCILLARY_USER_INFO_TABLE = "gs_minimum_user_info"
 
 VIEW_NAMES = [
-    "v_exception_missing_activity",
+    "v_exception_missing_activity_with_time",
+    "v_exception_missing_activty_no_time",
     "v_exception_missing_estimate",
     "v_exception_billable_time_internal_projects",
     "v_exception_long_time_entries",
@@ -147,8 +149,19 @@ def build_view_sql(project_id, dataset):
 
     views = {}
 
-    views["v_exception_missing_activity"] = f"""
-CREATE OR REPLACE VIEW {fqn("v_exception_missing_activity")} AS
+    # Missing-activity was originally one view; split per your instruction
+    # into a task-level view for the cases where time HAS been posted (the
+    # more urgent case — billable work happening with no Activity value)
+    # and a tasklist-level rollup for the no-time-posted cases, which only
+    # surfaces when they cluster (3+ in one tasklist) rather than flagging
+    # every individual task.
+    has_no_activity_time_col = f"""EXISTS(
+    SELECT 1 FROM {timelogs} tl
+    WHERE tl.task_id = t.task_id AND tl.minutes > 0
+  )"""
+
+    views["v_exception_missing_activity_with_time"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_exception_missing_activity_with_time")} AS
 SELECT
   p.project_id,
   p.name AS project_name,
@@ -161,7 +174,6 @@ SELECT
   t.name AS task_name,
   t.status,
   {assignee_names},
-  {has_time_logged_col},
   t.due_date,
   t.start_date,
   t.created_at,
@@ -172,6 +184,28 @@ JOIN {projects} p ON p.project_id = t.project_id
 {proj_owner_join}
 WHERE t.activity IS NULL
   AND p.category_name IN UNNEST({monitored})
+  AND {has_no_activity_time_col}
+"""
+
+    views["v_exception_missing_activty_no_time"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_exception_missing_activty_no_time")} AS
+SELECT
+  p.project_id,
+  p.name AS project_name,
+  p.category_name,
+  p.client_name,
+  {proj_owner_col},
+  t.tasklist_id,
+  t.tasklist_name,
+  COUNT(*) AS missing_activity_no_time_task_count
+FROM {tasks} t
+JOIN {projects} p ON p.project_id = t.project_id
+{proj_owner_join}
+WHERE t.activity IS NULL
+  AND p.category_name IN UNNEST({monitored})
+  AND NOT {has_no_activity_time_col}
+GROUP BY p.project_id, p.name, p.category_name, p.client_name, proj_owner, t.tasklist_id, t.tasklist_name
+HAVING COUNT(*) >= 3
 """
 
     views["v_exception_missing_estimate"] = f"""

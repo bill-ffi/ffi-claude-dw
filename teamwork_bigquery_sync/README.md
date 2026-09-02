@@ -95,33 +95,50 @@ independent of the normal sync schedule.
 
 | View | Flags | Scope |
 |---|---|---|
-| `v_exception_missing_activity` | Tasks with no "Activity" value set | Monitored categories only |
+| `v_exception_missing_activity_with_time` | Tasks with no "Activity" value set AND at least one timelog (`minutes > 0`) posted against them — the more urgent half of the old missing_activity rule, since this is billable work happening with no Activity value | Monitored categories only |
+| `v_exception_missing_activty_no_time` | Tasklist-level rollup of tasks with no "Activity" value set AND no time posted — one row per tasklist, `missing_activity_no_time_task_count`, only surfaced where that count is 3 or more (a single untouched task isn't noteworthy; a cluster is) | Monitored categories only |
 | `v_exception_missing_estimate` | Tasks with `estimate_minutes` NULL or 0 | Monitored categories only, minus the Client Management / Client Management v2 / HR Advisory tasklist exception within Non-Monthly |
 | `v_exception_billable_time_internal_projects` | Billable timelogs (`minutes > 0`) posted to an internal-category project | `FFI Internal Projects`, `Functional`, or `Individual` category only |
 | `v_exception_long_time_entries` | Timelogs over 2 hours | All projects (not category-scoped) |
 | `v_exception_recurring_compliance` | Top-level tasks (no `parent_task_id`) in a "Books Maintenance"-category project with no `sequence_id` | Books Maintenance category only; sub-tasks excluded since they inherit recurrence from their parent and don't carry their own `sequence_id` |
 
-**Assignee names, not IDs.** The three task-based views (missing_activity,
-missing_estimate, recurring_compliance) surface a task's assignees as a
-single `assignee_names` string column (e.g. `"Bob, Jane, Mary"`), built via
-a `STRING_AGG` subquery over `tasks.assignee_user_ids` — not one row per
-assignee. This keeps these views at one row per task (a task with 3
-assignees used to show up as 3 duplicate rows before this). Trade-off: in
-Looker Studio, filtering this column by one person needs a **"Text
-contains"** filter condition rather than an exact-match dropdown, since
-it's a free-text concatenation, not a clean dimension value. The two
-timelog-based views (billable_time_internal_projects, long_time_entries)
-are unaffected — a timelog only ever has one `user_id`.
+**Missing-activity split into two views.** Originally one view
+(`v_exception_missing_activity`), split per your instruction into
+`v_exception_missing_activity_with_time` (task-level, time already posted —
+the more urgent case) and `v_exception_missing_activty_no_time`
+(tasklist-level count of untouched tasks, only shown once a tasklist has 3
+or more). Note the `no_time` view's name keeps your original spelling
+("activty") — this repo does not silently "fix" a name you specified.
+
+**Assignee names, not IDs.** The task-level views
+(missing_activity_with_time, missing_estimate, recurring_compliance)
+surface a task's assignees as a single `assignee_names` string column
+(e.g. `"Bob, Jane, Mary"`), built via a `STRING_AGG` subquery over
+`tasks.assignee_user_ids` — not one row per assignee. This keeps these
+views at one row per task (a task with 3 assignees used to show up as 3
+duplicate rows before this). Trade-off: in Looker Studio, filtering this
+column by one person needs a **"Text contains"** filter condition rather
+than an exact-match dropdown, since it's a free-text concatenation, not a
+clean dimension value. The two timelog-based views
+(billable_time_internal_projects, long_time_entries) are unaffected — a
+timelog only ever has one `user_id`. `missing_activty_no_time` doesn't
+carry this column either — it's aggregated to one row per tasklist, above
+individual task/assignee granularity.
 
 **`proj_owner`** — the project's owner (`projects.owner_id`) resolved to a
-name, on all five views (added anywhere project context already appears).
+name, on all six views (added anywhere project context already appears).
 
 **`has_time_logged`** — boolean, true if any timelog with `minutes > 0`
 exists against the task, via a correlated `EXISTS` subquery on `timelogs`.
-Only added to the three task-based views (missing_activity,
-missing_estimate, recurring_compliance) — on the two timelog-based views
-this would be trivially true for every row (the row itself is a posted
-time entry), so it wasn't added there.
+Added to the two task-level views where it's not already implied by the
+view's own filter (missing_estimate, recurring_compliance) — on the two
+timelog-based views this would be trivially true for every row (the row
+itself is a posted time entry), so it wasn't added there.
+`missing_activity_with_time` also skips it: by definition every row in
+that view already has time logged, so the column would just be a constant
+`TRUE`. `missing_activty_no_time` is aggregated, not per-task, so it
+doesn't apply there either — the "no time" condition is what's being
+counted, via `NOT EXISTS` in the view's `WHERE`.
 
 **`user_email`** — added to the two timelog-based views
 (billable_time_internal_projects, long_time_entries) alongside the existing
@@ -129,13 +146,14 @@ time entry), so it wasn't added there.
 security (data source setting: restrict rows by the viewer's login email)
 can be turned on for these two — each timelog has exactly one `user_id`,
 so this is a clean exact-match field. **Deliberately not added** to the
-three task-based views (missing_activity, missing_estimate,
-recurring_compliance): a task can have multiple assignees, and those views
-already collapse to one `assignee_names` string per task (see above) to
-avoid duplicate rows — a concatenated string can't satisfy Looker's
-exact-match email security. Confirmed with you: these three views stay
-one-row-per-task with no per-assignee security, rather than reverting to
-one row per assignee just to enable it.
+task-based views (missing_activity_with_time, missing_activty_no_time,
+missing_estimate, recurring_compliance): a task can have multiple
+assignees, and the per-task views among these already collapse to one
+`assignee_names` string per task (see above) to avoid duplicate rows — a
+concatenated string can't satisfy Looker's exact-match email security.
+Confirmed with you: these views stay one-row-per-task (or, for
+missing_activty_no_time, one-row-per-tasklist) with no per-assignee
+security, rather than reverting to one row per assignee just to enable it.
 
 **"Monitored categories"** = the four project categories confirmed as "all
 of the billable projects we are monitoring": Books Maintenance, Monthly
@@ -370,6 +388,13 @@ the attached service account directly). Say the word and I'll wire it up.
   chart in Looker Studio — rebuild that chart against
   `v_user_weekly_billable_hours` first, then drop the 5 old views (safe
   to drop the other 4 immediately; nothing was built against them yet).
+- **Retired `v_exception_missing_activity` — same drop caveat.** Replaced
+  by `v_exception_missing_activity_with_time` and
+  `v_exception_missing_activty_no_time` (see "Exception reporting views"
+  above). `--create-views` won't drop the old view — check whether any
+  Looker Studio report is still pointed at
+  `v_exception_missing_activity` and repoint it before running
+  `DROP VIEW` on it in BigQuery.
 - **Endpoint paths.** All four (`PROJECTS_PATH`, `TASKS_PATH`,
   `TIMELOGS_PATH`, `PROJECT_BUDGETS_PATH`) have now returned real data in a
   live `--dry-run` against this account.
@@ -464,6 +489,6 @@ the attached service account directly). Say the word and I'll wire it up.
 - `transform.py` — raw Teamwork JSON → BigQuery row mapping
 - `bigquery_sync.py` — dataset/table creation, truncate+load, the
   transactional current-month replace for timelogs
-- `views.py` — the five exception/QC reporting views plus `v_usermins`,
+- `views.py` — the six exception/QC reporting views plus `v_usermins`,
   `v_user_daily_billable_hours_base`, and `v_user_weekly_billable_hours`
   (see "Exception reporting views" above)
