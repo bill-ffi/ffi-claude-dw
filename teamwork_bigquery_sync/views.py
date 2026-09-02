@@ -187,6 +187,9 @@ WHERE t.activity IS NULL
   AND {has_no_activity_time_col}
 """
 
+    # Refinement per your instruction: a completed task missing "Activity"
+    # is done and isn't going to get one — only count still-open tasks
+    # toward the tasklist's cluster.
     views["v_exception_missing_activty_no_time"] = f"""
 CREATE OR REPLACE VIEW {fqn("v_exception_missing_activty_no_time")} AS
 SELECT
@@ -203,6 +206,7 @@ JOIN {projects} p ON p.project_id = t.project_id
 {proj_owner_join}
 WHERE t.activity IS NULL
   AND p.category_name IN UNNEST({monitored})
+  AND t.status != 'completed'
   AND NOT {has_no_activity_time_col}
 GROUP BY p.project_id, p.name, p.category_name, p.client_name, proj_owner, t.tasklist_id, t.tasklist_name
 HAVING COUNT(*) >= 3

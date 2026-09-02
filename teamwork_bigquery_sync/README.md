@@ -96,7 +96,7 @@ independent of the normal sync schedule.
 | View | Flags | Scope |
 |---|---|---|
 | `v_exception_missing_activity_with_time` | Tasks with no "Activity" value set AND at least one timelog (`minutes > 0`) posted against them — the more urgent half of the old missing_activity rule, since this is billable work happening with no Activity value | Monitored categories only |
-| `v_exception_missing_activty_no_time` | Tasklist-level rollup of tasks with no "Activity" value set AND no time posted — one row per tasklist, `missing_activity_no_time_task_count`, only surfaced where that count is 3 or more (a single untouched task isn't noteworthy; a cluster is) | Monitored categories only |
+| `v_exception_missing_activty_no_time` | Tasklist-level rollup of **still-open** tasks (`status != 'completed'`) with no "Activity" value set AND no time posted — one row per tasklist, `missing_activity_no_time_task_count`, only surfaced where that count is 3 or more (a single untouched task isn't noteworthy; a cluster is) | Monitored categories only |
 | `v_exception_missing_estimate` | Tasks with `estimate_minutes` NULL or 0 | Monitored categories only, minus the Client Management / Client Management v2 / HR Advisory tasklist exception within Non-Monthly |
 | `v_exception_billable_time_internal_projects` | Billable timelogs (`minutes > 0`) posted to an internal-category project | `FFI Internal Projects`, `Functional`, or `Individual` category only |
 | `v_exception_long_time_entries` | Timelogs over 2 hours | All projects (not category-scoped) |
@@ -109,6 +109,12 @@ the more urgent case) and `v_exception_missing_activty_no_time`
 (tasklist-level count of untouched tasks, only shown once a tasklist has 3
 or more). Note the `no_time` view's name keeps your original spelling
 ("activty") — this repo does not silently "fix" a name you specified.
+**Refinement**: `no_time` is further scoped to `t.status != 'completed'` —
+a completed task that never got an Activity value isn't actionable
+anymore, so it shouldn't count toward (or pad) a tasklist's cluster.
+Assumes the Teamwork status string for a completed task is exactly
+`'completed'` (lowercase, as returned by the tasks endpoint) — worth
+confirming against a known-completed task's row in BigQuery.
 
 **Assignee names, not IDs.** The task-level views
 (missing_activity_with_time, missing_estimate, recurring_compliance)
