@@ -362,6 +362,38 @@ the attached service account directly). Say the word and I'll wire it up.
 
 ## Known gaps / things to verify before relying on this
 
+- **Orphaned tasks under a deleted tasklist (known gap, not fixed — no fix
+  possible via the list API).** Investigated 2026-09-03 after task 49325131
+  ("Record health insurance allocation", a completed subtask in project
+  1388473, "CNE Monthly Books (2026)") turned up missing from the tasks
+  table despite its project being genuinely active and non-archived — so
+  not the archived-project cutoff above. Root cause, confirmed live: its
+  tasklist (id 3941748, "Monthly Close 2026-05") returns `404 entity not
+  found` from `GET /projects/api/v3/tasklists/{id}.json` — **the tasklist
+  itself has been deleted in Teamwork**, but this task under it was never
+  cascade-deleted (`deletedAt` is null; it's still directly fetchable via
+  `GET /projects/api/v3/tasks/{id}.json`). Its raw payload also has no
+  `workflowStages` key at all, unlike a normal task, consistent with its
+  board/tasklist context being gone.
+  - Ruled out first: not a subtask-visibility issue — candidate flags
+    `includeSubTasks`/`includeSubtasks`/`includeAllSubTasks` were all
+    confirmed no-ops (0 delta on the site-wide count), and the task is
+    still absent even when `tasks.json` is scoped directly to its own
+    project via `projectIds=`.
+  - **Why there's no fix**: `tasks.json` (site-wide or `projectIds`-scoped)
+    apparently enumerates tasks by walking tasklists, so a task whose
+    tasklist no longer exists can never appear in any list response — only
+    a direct single-task GET by known ID resolves it. There is no
+    enumerable index of "orphaned tasks under deleted tasklists" to pull
+    from, so this can't be scripted around the way the archived-projects
+    gap was; the only way to find one is to already know its ID.
+  - **Practical takeaway**: if a specific task is reported missing from the
+    `tasks` table, check whether its own project is excluded by the
+    archived-projects cutoff (see above) first; if the project is active
+    and non-archived, this orphaned-tasklist case is the next thing to
+    check via the single-task GET endpoint. Unknown how common this is —
+    treat any given missing task as a one-off to verify rather than assume
+    it's this same cause.
 - **Archived-project tasks (fixed 2026-09-03).** Tasks belonging to an
   archived project used to be silently excluded from the tasks pull —
   `teamwork_client.list_tasks()` called the site-wide `tasks.json` endpoint
