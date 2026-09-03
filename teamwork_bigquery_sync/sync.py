@@ -283,6 +283,58 @@ def run_dry_run(client):
         any_failed = True
         print(f"[FAIL] client (company) diagnostic — {exc}")
 
+    # TEMPORARY spike diagnostic (2026-09-03): re-testing showCompletedLists,
+    # this time in the EXACT combination used by Teamwork's own official
+    # example repo (getRequests/tasks/Get all tasks.js), which the earlier
+    # "claim-check" round never tried:
+    #   showCompletedLists=true & includeCompletedTasks=true & includeArchivedProjects=true
+    # The earlier round tested showCompletedLists alone (or with status=all),
+    # never combined with includeCompletedTasks — plausible that's exactly
+    # why it looked like a no-op. Target: task 49325131 in completed
+    # tasklist 3941748, project 1388473.
+    print("\n--- showCompletedLists + real combo re-test (temporary spike) ---")
+    target_task_id = 49325131
+    target_project_id = 1388473
+
+    baseline = client._get(
+        TASKS_PATH,
+        {"page": 1, "pageSize": 1, "includeCompletedTasks": "true", "includeArchivedProjects": "true"},
+    )
+    baseline_count = (baseline.get("meta") or {}).get("page", {}).get("count")
+    print(f"     baseline (current prod params, no showCompletedLists) site-wide total: {baseline_count}")
+
+    combo = client._get(
+        TASKS_PATH,
+        {
+            "page": 1,
+            "pageSize": 1,
+            "includeCompletedTasks": "true",
+            "includeArchivedProjects": "true",
+            "showCompletedLists": "true",
+        },
+    )
+    combo_count = (combo.get("meta") or {}).get("page", {}).get("count")
+    delta = combo_count - baseline_count if isinstance(combo_count, int) and isinstance(baseline_count, int) else "n/a"
+    print(f"     + showCompletedLists=true site-wide total: {combo_count} (delta: {delta})")
+
+    scoped = client._get(
+        TASKS_PATH,
+        {
+            "projectIds": str(target_project_id),
+            "page": 1,
+            "pageSize": 250,
+            "includeCompletedTasks": "true",
+            "includeArchivedProjects": "true",
+            "showCompletedLists": "true",
+        },
+    )
+    scoped_tasks = scoped.get("tasks", [])
+    present = any(t.get("id") == target_task_id for t in scoped_tasks)
+    print(
+        f"     GET tasks.json?projectIds={target_project_id} (full combo): "
+        f"{len(scoped_tasks)} task(s), target present: {present}"
+    )
+
     print()
     if any_failed:
         print("One or more checks failed. Fix TEAMWORK_BASE_URL/API key or the")
