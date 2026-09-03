@@ -293,7 +293,7 @@ def run_dry_run(client):
     # the one remaining real endpoint shape: Teamwork's own v3 docs
     # reference a dedicated tasklist-scoped tasks endpoint,
     # /tasklists/{tasklistId}/tasks.json, distinct from the site-wide one.
-    print("\n--- Missing-task diagnostic take 4 (temporary spike) ---")
+    print("\n--- Missing-task diagnostic take 5 (temporary spike) ---")
     target_task_id = 49325131
     target_tasklist_id = 3941748
 
@@ -301,6 +301,10 @@ def run_dry_run(client):
         ("no flag", {}),
         ("showCompleted=true", {"showCompleted": "true"}),
         ("includeCompletedTasks=true", {"includeCompletedTasks": "true"}),
+        (
+            "showCompleted+includeCompletedTasks",
+            {"showCompleted": "true", "includeCompletedTasks": "true"},
+        ),
     ):
         try:
             payload = client._get(
@@ -310,10 +314,34 @@ def run_dry_run(client):
             present = any(t.get("id") == target_task_id for t in tasks_here)
             print(
                 f"     GET tasklists/{target_tasklist_id}/tasks.json ({label}): "
-                f"{len(tasks_here)} task(s), target present: {present}"
+                f"{len(tasks_here)} task(s), target present: {present}; "
+                f"full raw payload: {json.dumps(payload, default=str)}"
             )
         except Exception as exc:
             print(f"     GET tasklists/{target_tasklist_id}/tasks.json ({label}): FAILED — {exc}")
+
+    # Control: does this endpoint shape even work for an ACTIVE (non-
+    # completed) tasklist in the same project? Rules out "the endpoint
+    # itself is wrong" vs. "it's specifically hiding completed-tasklist
+    # tasks."
+    try:
+        active_tasklists = client._get(
+            "/projects/api/v3/projects/1388473/tasklists.json", {}
+        ).get("tasklists", [])
+        if active_tasklists:
+            control_id = active_tasklists[0]["id"]
+            control_payload = client._get(
+                f"/projects/api/v3/tasklists/{control_id}/tasks.json", {}
+            )
+            control_tasks = control_payload.get("tasks", [])
+            print(
+                f"     CONTROL — GET tasklists/{control_id}/tasks.json (active tasklist, "
+                f"'{active_tasklists[0].get('name')}', no flag): {len(control_tasks)} task(s)"
+            )
+        else:
+            print("     CONTROL — no active tasklists returned for project 1388473 to test against")
+    except Exception as exc:
+        print(f"     CONTROL FAILED — {exc}")
 
     print()
     if any_failed:
