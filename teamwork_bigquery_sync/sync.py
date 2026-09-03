@@ -283,6 +283,109 @@ def run_dry_run(client):
         any_failed = True
         print(f"[FAIL] client (company) diagnostic — {exc}")
 
+    # TEMPORARY spike diagnostic (2026-09-03), take 2: the previous run of
+    # this diagnostic concluded task 49325131's tasklist (3941748, "Monthly
+    # Close 2026-05") was DELETED, based on a 404 from a plain GET on
+    # /tasklists/{id}.json. That conclusion was wrong (per your correction,
+    # confirmed by a Teamwork screenshot) — the tasklist is COMPLETED, not
+    # deleted, visible under the project's "Completed task lists" section.
+    # The 404 almost certainly means the same "excluded by default unless
+    # you ask for it" pattern already found twice (includeCompletedTasks,
+    # includeArchivedProjects) — a bug in the previous diagnostic (one
+    # unguarded call) aborted before testing that. Each probe below is
+    # independently try/excepted so one 404 can't hide the others.
+    print("\n--- Missing-task diagnostic take 2 (temporary spike) ---")
+    target_task_id = 49325131
+    target_tasklist_id = 3941748
+    target_project_id = 1388473
+
+    for label, params in (
+        ("no flag", {}),
+        ("includeCompleted=true", {"includeCompleted": "true"}),
+        ("showCompleted=true", {"showCompleted": "true"}),
+        ("includeCompletedTasklists=true", {"includeCompletedTasklists": "true"}),
+    ):
+        try:
+            payload = client._get(f"/projects/api/v3/tasklists/{target_tasklist_id}.json", params)
+            raw_tasklist = payload.get("tasklist", {})
+            print(f"     GET tasklists/{target_tasklist_id}.json ({label}): OK — {json.dumps(raw_tasklist, default=str)}")
+        except Exception as exc:
+            print(f"     GET tasklists/{target_tasklist_id}.json ({label}): FAILED — {exc}")
+
+    for label, params in (
+        ("no flag", {}),
+        ("includeCompletedTasklists=true", {"includeCompletedTasklists": "true"}),
+        ("includeCompleted=true", {"includeCompleted": "true"}),
+    ):
+        try:
+            payload = client._get(f"/projects/api/v3/projects/{target_project_id}/tasklists.json", params)
+            tasklists = payload.get("tasklists", [])
+            match = next((tl for tl in tasklists if tl.get("id") == target_tasklist_id), None)
+            print(
+                f"     GET projects/{target_project_id}/tasklists.json ({label}): "
+                f"{len(tasklists)} tasklist(s), target present: {match is not None}"
+                + (f" — {json.dumps(match, default=str)}" if match else "")
+            )
+        except Exception as exc:
+            print(f"     GET projects/{target_project_id}/tasklists.json ({label}): FAILED — {exc}")
+
+    for label, extra in (
+        ("no flag", {}),
+        ("includeCompletedTasklists=true", {"includeCompletedTasklists": "true"}),
+        ("includeCompleted=true", {"includeCompleted": "true"}),
+        ("showCompleted=true", {"showCompleted": "true"}),
+    ):
+        try:
+            scoped = client._get(
+                TASKS_PATH,
+                {
+                    "projectIds": str(target_project_id),
+                    "page": 1,
+                    "pageSize": 250,
+                    "includeCompletedTasks": "true",
+                    "includeArchivedProjects": "true",
+                    **extra,
+                },
+            )
+            scoped_tasks = scoped.get("tasks", [])
+            present = any(t.get("id") == target_task_id for t in scoped_tasks)
+            print(
+                f"     GET tasks.json?projectIds={target_project_id} ({label}): "
+                f"{len(scoped_tasks)} task(s), target present: {present}"
+            )
+        except Exception as exc:
+            print(f"     GET tasks.json?projectIds={target_project_id} ({label}): FAILED — {exc}")
+
+    # If any tasks.json flag above worked, also check its effect on the
+    # site-wide total count, same methodology as includeArchivedProjects.
+    try:
+        baseline = client._get(
+            TASKS_PATH,
+            {"page": 1, "pageSize": 1, "includeCompletedTasks": "true", "includeArchivedProjects": "true"},
+        )
+        baseline_count = (baseline.get("meta") or {}).get("page", {}).get("count")
+        print(f"     baseline (current prod params) site-wide total count: {baseline_count}")
+        for flag in ("includeCompletedTasklists", "includeCompleted", "showCompleted"):
+            probe = client._get(
+                TASKS_PATH,
+                {
+                    "page": 1,
+                    "pageSize": 1,
+                    "includeCompletedTasks": "true",
+                    "includeArchivedProjects": "true",
+                    flag: "true",
+                },
+            )
+            probe_count = (probe.get("meta") or {}).get("page", {}).get("count")
+            delta = (
+                probe_count - baseline_count
+                if isinstance(probe_count, int) and isinstance(baseline_count, int)
+                else "n/a"
+            )
+            print(f"     site-wide tasks.json with {flag}=true: total count={probe_count} (delta: {delta})")
+    except Exception as exc:
+        print(f"     site-wide count probe FAILED — {exc}")
+
     print()
     if any_failed:
         print("One or more checks failed. Fix TEAMWORK_BASE_URL/API key or the")
