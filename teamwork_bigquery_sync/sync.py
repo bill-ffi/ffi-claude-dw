@@ -343,6 +343,42 @@ def run_dry_run(client):
     except Exception as exc:
         print(f"     CONTROL FAILED — {exc}")
 
+    # Size the gap: how many completed tasklists (and their tasks) exist?
+    # No confirmed-real site-wide tasklists.json path, so this samples the
+    # first 150 in-scope projects' tasklists rather than scanning all
+    # ~1,889 (avoids ~1,900 extra API calls for a diagnostic) and
+    # extrapolates. Same project set the real sync already gets via
+    # list_projects().
+    try:
+        raw_projects, _ = client.list_projects()
+        sample = raw_projects[:150]
+        sample_tasklists = 0
+        sample_completed_tasklists = 0
+        sample_completed_tasklist_tasks = 0
+        projects_checked = 0
+        for raw_project in sample:
+            pid = raw_project.get("id")
+            try:
+                tls = client._get(
+                    f"/projects/api/v3/projects/{pid}/tasklists.json", {"showCompleted": "true"}
+                ).get("tasklists", [])
+            except Exception:
+                continue
+            projects_checked += 1
+            sample_tasklists += len(tls)
+            for tl in tls:
+                if tl.get("status") == "completed":
+                    sample_completed_tasklists += 1
+        print(
+            f"     Sample ({projects_checked}/{len(sample)} of first {len(sample)} projects, "
+            f"out of {len(raw_projects)} total): {sample_tasklists} tasklists, "
+            f"{sample_completed_tasklists} completed — extrapolated site-wide: "
+            f"~{round(sample_completed_tasklists * len(raw_projects) / max(projects_checked, 1))} "
+            "completed tasklists"
+        )
+    except Exception as exc:
+        print(f"     Gap-sizing scan FAILED — {exc}")
+
     print()
     if any_failed:
         print("One or more checks failed. Fix TEAMWORK_BASE_URL/API key or the")
