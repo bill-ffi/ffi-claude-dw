@@ -362,65 +362,58 @@ the attached service account directly). Say the word and I'll wire it up.
 
 ## Known gaps / things to verify before relying on this
 
-- **Tasks in a COMPLETED tasklist (known gap, not fixed — no fix found via
-  any list-based endpoint).** Investigated 2026-09-03 after task 49325131
+- **Tasks in a COMPLETED tasklist (root cause found 2026-09-03, fix not
+  yet applied — pending a scoping decision, same shape as the
+  archived-projects one below).** Investigated after task 49325131
   ("Record health insurance allocation", a completed subtask in project
   1388473, "CNE Monthly Books (2026)") turned up missing from the tasks
   table despite its project being genuinely active and non-archived — so
-  not the archived-project cutoff above.
+  not the archived-project cutoff below.
   - **Root cause, confirmed live**: its tasklist (id 3941748, "Monthly
     Close 2026-05") is **completed**, not deleted — an earlier pass at this
     investigation wrongly concluded "deleted" from a bare `404` on
-    `GET /tasklists/{id}.json`, which was corrected after you pointed out
-    (with a screenshot) that the tasklist is visible under the project's
-    "Completed task lists" section. `showCompleted=true` is the real flag:
-    it resolves the single-tasklist GET (`"status": "completed"`) and
-    correctly reveals the tasklist on the tasklists-list endpoint (3 → 7
-    tasklists for that project, the missing one now included).
-  - **But `tasks.json` itself has no working equivalent.** Every list-based
-    path to this task's tasks was tried and confirmed to fail: site-wide
-    `tasks.json` and `projectIds=`-scoped `tasks.json`, with
-    `showCompleted`, `showCompletedTasklists`, and `includeCompletedTasklists`
-    all as no-ops; `tasklistIds=` isn't even a recognized `tasks.json`
-    filter (0 results regardless); and the dedicated tasklist-scoped
-    endpoint (`GET /tasklists/{tasklistId}/tasks.json`) — confirmed real
-    and working via a control call against an active tasklist (returned 4
-    tasks with no flags needed) — returns a clean `count: 0` for this
-    completed tasklist under every flag combination tried, including
-    `showCompleted=true` and `includeCompletedTasks=true` together. The
-    task is only reachable via a direct single-task GET by known ID
-    (`GET /tasks/{id}.json`); there is no enumerable index of "tasks in a
-    completed tasklist" to pull from, so unlike the archived-projects gap
-    above, this can't be scripted around from the client side — it appears
-    to be a genuine Teamwork API limitation on their list endpoints, not a
-    missing query parameter on our end.
-  - **Also tried and confirmed no-op** (2026-09-03, per a claim from an
-    external LLM that turned out not to hold up): `showCompletedLists=true`
-    and `status=all`, alone and combined, on the tasklist-scoped tasks
-    endpoint, `projectIds=`-scoped `tasks.json`, and `tasklists.json` —
-    every result was byte-identical to the equivalent call with no flag at
-    all (including `tasklists.json?status=all` still returning only 3
-    tasklists for the project, vs. 7 with the confirmed-real
-    `showCompleted=true`). Don't re-try these two names without new
-    evidence they've changed.
-  - **Scope, sampled**: of the first 150 (of 1,889) projects, 45 tasklists
-    total, 18 completed — extrapolating, roughly **~227 completed
-    tasklists** site-wide. The one project inspected directly showed
-    ~33-34 tasks per completed tasklist, which would put total affected
-    tasks in the low thousands if that holds broadly, but that's a single
-    anecdotal data point extrapolated widely — treat it as a rough
-    order-of-magnitude, not a real count, until sized properly (e.g. by
-    actually pulling task counts per completed tasklist across a larger
-    sample, or asking Teamwork support directly whether any endpoint or
-    parameter exposes these).
-  - **Practical takeaway**: if a specific task is reported missing from the
-    `tasks` table, check the archived-projects cutoff first (see above);
-    if the project is active and non-archived, check whether the task's
-    own tasklist is completed (`GET /tasklists/{id}.json?showCompleted=true`)
-    before assuming anything else. This is a real, currently-unresolved
-    gap in coverage, potentially larger than the archived-projects one was
-    before its fix — worth prioritizing a proper fix (or confirming with
-    Teamwork that none exists) rather than treating it as a rare edge case.
+    `GET /tasklists/{id}.json`, corrected after you pointed out (with a
+    screenshot) that the tasklist is visible under the project's
+    "Completed task lists" section.
+  - **The real fix — `showCompletedLists=true`.** Sourced from Teamwork's
+    own official example repo
+    ([Teamwork/Teamwork.com-API-Request-Examples](https://github.com/Teamwork/Teamwork.com-API-Request-Examples),
+    `getRequests/tasks/Get all tasks.js`), confirmed verbatim and then
+    tested live: it must be combined with the `includeCompletedTasks=true`
+    and `includeArchivedProjects=true` this pipeline already sends — added
+    alone (or with `status=all` instead of `includeCompletedTasks`) it's a
+    no-op, which is why an earlier pass at this investigation wrongly
+    concluded no fix existed. With the full three-flag combination:
+    task count went from 19,577 to 55,355 (**+35,778 tasks**), and task
+    49325131 is now present when the same call is scoped to its project.
+    (A related third-party guess of the same parameter name, offered
+    without this combination or a citable source, was separately tested
+    and — on its own — correctly found to be a no-op; the difference was
+    entirely the missing `includeCompletedTasks=true` pairing, a useful
+    reminder to verify any unsourced API-parameter claim against the real
+    API rather than trusting it either way.)
+  - **Scope, exact count**: site-wide `tasklists.json` (a real, working,
+    non-project-scoped endpoint) gives an exact count via
+    `meta.page.count`: 599 tasklists without `showCompleted=true`, 896
+    with it — **297 completed tasklists** site-wide, not a sample-based
+    estimate. Averaging ~120 tasks per completed tasklist (35,778 / 297) —
+    well above the ~33-34 seen in the one project inspected directly, so
+    the distribution is uneven; some completed tasklists (particularly
+    older, long-running recurring ones) likely carry far more history than
+    others.
+  - **Decision needed before implementing**: pulling all 35,778 would
+    nearly triple the current ~12,160-row `tasks` table. Given the
+    archived-projects fix already applies a date cutoff
+    (`ARCHIVED_PROJECT_TASKS_CUTOFF`) for the same reason — old, closed-out
+    work has little reporting value — the same shape of fix likely applies
+    here too, but tasklists don't carry a `completedAt` timestamp in their
+    raw payload (only `status: "completed"` and `updatedAt`, which is an
+    approximation at best) — worth confirming with Teamwork whether a true
+    completion timestamp exists before designing the cutoff, or falling
+    back to `updatedAt` if not. Not implemented yet — say the word on how
+    you want this scoped (mirror the 2026-01-01 cutoff, a different date,
+    unconditional inclusion, or something else) and it can go in the same
+    way the archived-projects fix did.
 - **Archived-project tasks (fixed 2026-09-03).** Tasks belonging to an
   archived project used to be silently excluded from the tasks pull —
   `teamwork_client.list_tasks()` called the site-wide `tasks.json` endpoint
