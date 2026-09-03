@@ -394,6 +394,15 @@ the attached service account directly). Say the word and I'll wire it up.
     above, this can't be scripted around from the client side — it appears
     to be a genuine Teamwork API limitation on their list endpoints, not a
     missing query parameter on our end.
+  - **Also tried and confirmed no-op** (2026-09-03, per a claim from an
+    external LLM that turned out not to hold up): `showCompletedLists=true`
+    and `status=all`, alone and combined, on the tasklist-scoped tasks
+    endpoint, `projectIds=`-scoped `tasks.json`, and `tasklists.json` —
+    every result was byte-identical to the equivalent call with no flag at
+    all (including `tasklists.json?status=all` still returning only 3
+    tasklists for the project, vs. 7 with the confirmed-real
+    `showCompleted=true`). Don't re-try these two names without new
+    evidence they've changed.
   - **Scope, sampled**: of the first 150 (of 1,889) projects, 45 tasklists
     total, 18 completed — extrapolating, roughly **~227 completed
     tasklists** site-wide. The one project inspected directly showed
