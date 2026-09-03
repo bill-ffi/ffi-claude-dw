@@ -283,6 +283,77 @@ def run_dry_run(client):
         any_failed = True
         print(f"[FAIL] client (company) diagnostic — {exc}")
 
+    # TEMPORARY spike diagnostic (2026-09-03): task 49325131 is reportedly a
+    # completed task in an active project, but is missing from the tasks
+    # table. Investigating why, now that the archived-project cutoff logic
+    # has been shown by construction not to touch non-archived-project
+    # tasks. Purely informational — does not affect any_failed/exit code.
+    # Remove once the question is settled.
+    print("\n--- Missing-task diagnostic (temporary spike) ---")
+    try:
+        target_task_id = 49325131
+
+        raw_single = client._get(f"/projects/api/v3/tasks/{target_task_id}.json", {})
+        raw_task_ground_truth = raw_single.get("task", {})
+        print(f"     single-task GET raw fields: {json.dumps(raw_task_ground_truth, default=str)}")
+
+        tasklist_meta = (raw_task_ground_truth.get("tasklist") or {}).get("meta") or {}
+        gt_project_id = tasklist_meta.get("projectId")
+        print(f"     resolved project_id from tasklist.meta.projectId: {gt_project_id}")
+
+        if gt_project_id is not None:
+            project_payload = client._get(f"/projects/api/v3/projects/{gt_project_id}.json", {})
+            raw_project_ground_truth = project_payload.get("project", {})
+            print(f"     project raw fields: {json.dumps(raw_project_ground_truth, default=str)}")
+
+        # Is the task present at all in the exact production list_tasks()
+        # pull (same params, same pagination as a real sync)?
+        raw_tasks, _ = client.list_tasks()
+        matches = [t for t in raw_tasks if t.get("id") == target_task_id]
+        print(
+            f"     tw_client.list_tasks() production pull: {len(raw_tasks)} tasks total; "
+            f"target present: {bool(matches)}"
+        )
+
+        if matches:
+            # Present in the raw pull — replay it through the exact same
+            # transform + scoping logic sync_projects()/sync_tasks() use, to
+            # see whether OUR code keeps or drops it, and why.
+            raw_projects, _ = client.list_projects()
+            raw_budgets = client.list_project_budgets()
+            raw_categories = client.list_project_categories()
+            raw_companies = client.list_companies()
+            category_names = transform.build_category_name_map(raw_categories)
+            client_names = transform.build_client_name_map(raw_companies)
+            budgets_by_project = transform.build_budgets_by_project(raw_budgets)
+            project_rows = [
+                r
+                for r in (
+                    transform.normalize_project(raw, category_names, budgets_by_project, client_names)
+                    for raw in raw_projects
+                )
+                if r is not None
+            ]
+            task_pull_project_ids = {
+                r["project_id"]
+                for r in project_rows
+                if not r["archived_at"] or r["archived_at"] >= ARCHIVED_PROJECT_TASKS_CUTOFF
+            }
+            gt_project_row = next((r for r in project_rows if r["project_id"] == gt_project_id), None)
+            print(
+                f"     project {gt_project_id} present in normalized project_rows: "
+                f"{gt_project_row is not None}"
+                + (f", archived_at={gt_project_row['archived_at']!r}" if gt_project_row else "")
+            )
+            print(f"     project {gt_project_id} in task_pull_project_ids: {gt_project_id in task_pull_project_ids}")
+            task_row = transform.normalize_task(matches[0], task_pull_project_ids)
+            print(f"     transform.normalize_task() result: {'DROPPED (None)' if task_row is None else 'KEPT'}")
+        else:
+            print("     task is NOT in the raw list_tasks() pull at all — not a transform/filter issue, "
+                  "the Teamwork tasks.json list endpoint itself isn't returning it under production params.")
+    except Exception as exc:
+        print(f"[FAIL] missing-task diagnostic — {exc}")
+
     print()
     if any_failed:
         print("One or more checks failed. Fix TEAMWORK_BASE_URL/API key or the")
