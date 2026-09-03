@@ -351,41 +351,24 @@ def run_dry_run(client):
         else:
             print("     task is NOT in the raw list_tasks() pull at all — not a transform/filter issue, "
                   "the Teamwork tasks.json list endpoint itself isn't returning it under production params.")
-            print("     it IS a subtask (has a parentTask) — probing whether tasks.json silently "
-                  "excludes subtasks by default, the same class of bug as the archived-projects one.")
+            print("     it IS a subtask (has a parentTask), but candidate subtask-inclusion flags "
+                  "(includeSubTasks/includeSubtasks/includeAllSubTasks) were all confirmed no-ops, "
+                  "and it's still absent even scoped directly to its own project via projectIds= — "
+                  "ruling out a subtask-visibility flag. Its raw payload also has no 'workflowStages' "
+                  "key at all (unlike a normal top-level task), so checking whether its TASKLIST "
+                  "('Monthly Close 2026-05', an old month) has its own completed/archived state, "
+                  "mirroring the archived-PROJECT pattern one level down.")
 
-            baseline = client._get(
-                TASKS_PATH,
-                {"page": 1, "pageSize": 1, "includeCompletedTasks": "true", "includeArchivedProjects": "true"},
-            )
-            baseline_count = (baseline.get("meta") or {}).get("page", {}).get("count")
-            print(f"     baseline (current prod params) total count: {baseline_count}")
+            gt_tasklist_id = raw_task_ground_truth.get("tasklistId")
+            tasklist_payload = client._get(f"/projects/api/v3/tasklists/{gt_tasklist_id}.json", {})
+            raw_tasklist = tasklist_payload.get("tasklist", {})
+            print(f"     tasklist {gt_tasklist_id} raw fields: {json.dumps(raw_tasklist, default=str)}")
 
-            for flag in ("includeSubTasks", "includeSubtasks", "includeAllSubTasks"):
-                probe = client._get(
-                    TASKS_PATH,
-                    {
-                        "page": 1,
-                        "pageSize": 1,
-                        "includeCompletedTasks": "true",
-                        "includeArchivedProjects": "true",
-                        flag: "true",
-                    },
-                )
-                probe_count = (probe.get("meta") or {}).get("page", {}).get("count")
-                delta = (
-                    probe_count - baseline_count
-                    if isinstance(probe_count, int) and isinstance(baseline_count, int)
-                    else "n/a"
-                )
-                print(f"     with {flag}=true: total count={probe_count} (delta vs baseline: {delta})")
-
-            # Targeted check: does the target task show up when scoped to
-            # its own project, with/without each candidate flag?
             for label, extra in (
-                ("no subtask flag", {}),
-                ("includeSubTasks=true", {"includeSubTasks": "true"}),
-                ("includeSubtasks=true", {"includeSubtasks": "true"}),
+                ("no extra flag", {}),
+                ("includeCompletedTasklists=true", {"includeCompletedTasklists": "true"}),
+                ("includeArchivedTasklists=true", {"includeArchivedTasklists": "true"}),
+                ("includeTasklistsCompletedItems=true", {"includeTasklistsCompletedItems": "true"}),
             ):
                 scoped = client._get(
                     TASKS_PATH,
