@@ -57,6 +57,19 @@ RETRY_BACKOFF_SECONDS = 2
 # and should fail loudly rather than hammer the API indefinitely.
 MAX_PAGES = 500
 
+# tasks.json enforces a hard ceiling on how deep page-based offset
+# pagination can go — confirmed live 2026-09-03: page 200 at PAGE_SIZE=250
+# (offset 50,000) returned HTTP 400 "You have exceeded our maximum offset
+# request limit" once showCompletedLists=true pushed the unscoped
+# site-wide total to 55,355 tasks (previously 19,577, comfortably under
+# the ceiling). list_tasks() now scopes each query to a batch of project
+# ids via projectIds= (a comma-joined list, confirmed working with 605 ids
+# in one call during investigation) so no single paginated query's total
+# gets anywhere near that ceiling, and — as a bonus — no longer fetches
+# tasks for projects the caller doesn't want in the first place. Chosen
+# well under the 605 already confirmed to work, as a safety margin.
+TASK_PROJECT_BATCH_SIZE = 300
+
 
 class PaginationLimitExceeded(RuntimeError):
     def __init__(self, path, max_pages):
@@ -174,20 +187,23 @@ class TeamworkClient:
                 raise PaginationLimitExceeded(PROJECTS_PATH, MAX_PAGES)
         return projects, included
 
-    def list_tasks(self):
-        """All tasks site-wide, including completed ones, tasks belonging to
-        archived projects, and tasks in completed tasklists. Filtered down
-        to in-scope projects by the caller (which also applies the
-        archived-project cutoff — see sync.py's ARCHIVED_PROJECT_TASKS_CUTOFF
-        and README "Known gaps").
+    def list_tasks(self, project_ids):
+        """All tasks belonging to the given project ids, including completed
+        ones and tasks in completed tasklists. `project_ids` is required —
+        see TASK_PROJECT_BATCH_SIZE above for why (tasks.json's offset
+        pagination ceiling): the caller passes exactly the project ids it
+        wants (typically sync_projects()'s task_pull_project_ids, which
+        already applies the archived-project cutoff — see sync.py's
+        ARCHIVED_PROJECT_TASKS_CUTOFF and README "Known gaps"), and this
+        method fetches only those, in batches of TASK_PROJECT_BATCH_SIZE via
+        projectIds=, rather than pulling everything site-wide and filtering
+        client-side afterward.
 
         includeArchivedProjects=true confirmed live 2026-09-02: without it,
         tasks.json silently excludes every task belonging to an archived
         project (mirrors the same flag already needed on projects.json).
-        Confirmed via a real API call: baseline count 7,689 -> 19,527 with
-        this flag added, +11,838 tasks. includeArchivedTasks=true (a
-        plausible-sounding alternative name) was also tried and confirmed to
-        be a no-op on this account.
+        includeArchivedTasks=true (a plausible-sounding alternative name)
+        was also tried and confirmed to be a no-op on this account.
 
         showCompletedLists=true confirmed live 2026-09-03: without it,
         tasks.json silently excludes every task belonging to a COMPLETED
@@ -200,12 +216,13 @@ class TeamworkClient:
         getRequests/tasks/Get all tasks.js), confirmed verbatim, then tested
         live: it only has an effect when combined with
         includeCompletedTasks=true — added alone, or with status=all
-        instead, it's a no-op. With the full combination: site-wide count
-        went from 19,577 to 55,355 (+35,778 tasks). See README "Known gaps"
-        for the full investigation, including a plausible-sounding
-        third-party parameter-name guess that (without this combination)
-        tested as a no-op — a reminder to verify any unsourced API claim
-        against the real API before trusting or dismissing it.
+        instead, it's a no-op. With the full combination, unscoped: site-
+        wide count went from 19,577 to 55,355 (+35,778 tasks) — this is what
+        first surfaced the offset-pagination ceiling above. See README
+        "Known gaps" for the full investigation, including a plausible-
+        sounding third-party parameter-name guess that (without this
+        combination) tested as a no-op — a reminder to verify any unsourced
+        API claim against the real API before trusting or dismissing it.
 
         Also requests includeCustomFields=true — confirmed real via
         Teamwork's own public API-Request-Examples repo (not guessed) — so
@@ -213,7 +230,7 @@ class TeamworkClient:
         included["customfieldTasks"] in the SAME response, no per-task call
         needed. Returns (tasks, included) like list_projects().
         """
-        params = {
+        base_params = {
             "includeCompletedTasks": "true",
             "includeCustomFields": "true",
             "includeArchivedProjects": "true",
@@ -221,26 +238,38 @@ class TeamworkClient:
         }
         tasks = []
         included = {}
-        page_number = 1
-        while True:
-            page_params = dict(params)
-            page_params["page"] = page_number
-            page_params["pageSize"] = PAGE_SIZE
-            payload = self._get(TASKS_PATH, page_params)
-            items = payload.get("tasks", [])
-            logger.info("Fetched tasks page %d: %d items", page_number, len(items))
-            tasks.extend(items)
-            for included_type, records in (payload.get("included") or {}).items():
-                if isinstance(records, dict):
-                    included.setdefault(included_type, {}).update(records)
-                elif isinstance(records, list):
-                    included.setdefault(included_type, []).extend(records)
-            page_meta = payload.get("meta", {}).get("page", {})
-            if not page_meta.get("hasMore", False) or not items:
-                break
-            page_number += 1
-            if page_number > MAX_PAGES:
-                raise PaginationLimitExceeded(TASKS_PATH, MAX_PAGES)
+        sorted_ids = sorted(project_ids)
+        for batch_start in range(0, len(sorted_ids), TASK_PROJECT_BATCH_SIZE):
+            batch = sorted_ids[batch_start : batch_start + TASK_PROJECT_BATCH_SIZE]
+            params = dict(base_params)
+            params["projectIds"] = ",".join(str(project_id) for project_id in batch)
+            page_number = 1
+            while True:
+                page_params = dict(params)
+                page_params["page"] = page_number
+                page_params["pageSize"] = PAGE_SIZE
+                payload = self._get(TASKS_PATH, page_params)
+                items = payload.get("tasks", [])
+                logger.info(
+                    "Fetched tasks page %d (project batch %d-%d of %d): %d items",
+                    page_number,
+                    batch_start + 1,
+                    batch_start + len(batch),
+                    len(sorted_ids),
+                    len(items),
+                )
+                tasks.extend(items)
+                for included_type, records in (payload.get("included") or {}).items():
+                    if isinstance(records, dict):
+                        included.setdefault(included_type, {}).update(records)
+                    elif isinstance(records, list):
+                        included.setdefault(included_type, []).extend(records)
+                page_meta = payload.get("meta", {}).get("page", {})
+                if not page_meta.get("hasMore", False) or not items:
+                    break
+                page_number += 1
+                if page_number > MAX_PAGES:
+                    raise PaginationLimitExceeded(TASKS_PATH, MAX_PAGES)
         return tasks, included
 
     def list_timelogs(self, start_date, end_date):

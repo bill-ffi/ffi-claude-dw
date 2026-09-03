@@ -479,7 +479,7 @@ def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids):
         )
         return {"status": "skipped", "reason": "projects sync failed"}
 
-    raw_tasks, tasks_included = tw_client.list_tasks()
+    raw_tasks, tasks_included = tw_client.list_tasks(task_pull_project_ids)
     rows = []
     for raw in raw_tasks:
         row = transform.normalize_task(raw, task_pull_project_ids)
