@@ -52,6 +52,19 @@ logger = logging.getLogger("sync")
 
 MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
+# Tasks belonging to archived projects are now pulled (see
+# teamwork_client.list_tasks()'s includeArchivedProjects=true), but archived
+# projects going back to the start of this account (2023) would add ~11,800
+# mostly-stale task rows on every run for very little reporting value.
+# Confirmed live 2026-09-02: pulling every archived project's tasks brings
+# the tasks table from 7,689 to 19,527 rows; scoping to projects archived on
+# or after this cutoff brings in only the recently-archived ones (605
+# projects, 4,471 tasks) for a total of ~12,160. Projects archived before
+# this date are excluded from the tasks pull entirely — not from the
+# projects table, which still carries every non-deleted project regardless
+# of archive date. See README "Known gaps" for the full investigation.
+ARCHIVED_PROJECT_TASKS_CUTOFF = "2026-01-01"
+
 
 def month_bounds(year, month):
     """Returns (month_start, month_end_exclusive) as date objects for the
@@ -340,7 +353,23 @@ def sync_projects(tw_client, bq_client, dataset_ref):
     written = bigquery_sync.truncate_and_load(
         bq_client, dataset_ref, schemas.PROJECTS_TABLE, schemas.PROJECTS_SCHEMA, rows
     )
-    valid_project_ids = {row["project_id"] for row in rows}
+
+    # Tasks are pulled for every non-archived project, plus archived
+    # projects no older than ARCHIVED_PROJECT_TASKS_CUTOFF — see that
+    # constant's comment. This does NOT affect the projects table above,
+    # which keeps every non-deleted project regardless of archive date.
+    task_pull_project_ids = {
+        row["project_id"]
+        for row in rows
+        if not row["archived_at"] or row["archived_at"] >= ARCHIVED_PROJECT_TASKS_CUTOFF
+    }
+    projects_excluded_by_archive_cutoff = len(rows) - len(task_pull_project_ids)
+    logger.info(
+        "%d/%d projects excluded from the tasks pull (archived before %s)",
+        projects_excluded_by_archive_cutoff,
+        len(rows),
+        ARCHIVED_PROJECT_TASKS_CUTOFF,
+    )
     return {
         "status": "success",
         "rows_pulled": len(raw_projects),
@@ -349,7 +378,8 @@ def sync_projects(tw_client, bq_client, dataset_ref):
         "rows_with_category_name": rows_with_category_name,
         "clients_resolved": len(client_names),
         "rows_with_client_name": rows_with_client_name,
-    }, valid_project_ids
+        "projects_excluded_from_tasks_pull_by_archive_cutoff": projects_excluded_by_archive_cutoff,
+    }, task_pull_project_ids
 
 
 ACTIVITY_FIELD_NAME = "Activity"
@@ -436,8 +466,8 @@ def enrich_tasks_with_activity(tw_client, rows, tasks_included):
     return stats
 
 
-def sync_tasks(tw_client, bq_client, dataset_ref, valid_project_ids):
-    if valid_project_ids is None:
+def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids):
+    if task_pull_project_ids is None:
         logger.warning(
             "Skipping tasks sync: projects sync did not complete successfully "
             "this run, so there is no reliable set of in-scope project ids."
@@ -447,7 +477,7 @@ def sync_tasks(tw_client, bq_client, dataset_ref, valid_project_ids):
     raw_tasks, tasks_included = tw_client.list_tasks()
     rows = []
     for raw in raw_tasks:
-        row = transform.normalize_task(raw, valid_project_ids)
+        row = transform.normalize_task(raw, task_pull_project_ids)
         if row is not None:
             rows.append(row)
 
@@ -525,9 +555,9 @@ def run_full_sync(cfg):
     stages = {}
     started_at = datetime.now(timezone.utc)
 
-    valid_project_ids = None
+    task_pull_project_ids = None
     try:
-        stages["projects"], valid_project_ids = sync_projects(
+        stages["projects"], task_pull_project_ids = sync_projects(
             tw_client, bq_client, dataset_ref
         )
     except Exception:
@@ -535,7 +565,7 @@ def run_full_sync(cfg):
         stages["projects"] = {"status": "failed", "error": traceback.format_exc()}
 
     try:
-        stages["tasks"] = sync_tasks(tw_client, bq_client, dataset_ref, valid_project_ids)
+        stages["tasks"] = sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids)
     except Exception:
         logger.error("Tasks sync failed:\n%s", traceback.format_exc())
         stages["tasks"] = {"status": "failed", "error": traceback.format_exc()}

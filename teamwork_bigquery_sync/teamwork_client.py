@@ -175,8 +175,18 @@ class TeamworkClient:
         return projects, included
 
     def list_tasks(self):
-        """All tasks site-wide, including completed ones. Filtered down to
-        tasks belonging to in-scope projects by the caller.
+        """All tasks site-wide, including completed ones and tasks belonging
+        to archived projects. Filtered down to in-scope projects by the
+        caller (which also applies the archived-project cutoff — see
+        sync.py's ARCHIVED_PROJECT_TASKS_CUTOFF and README "Known gaps").
+
+        includeArchivedProjects=true confirmed live 2026-09-02: without it,
+        tasks.json silently excludes every task belonging to an archived
+        project (mirrors the same flag already needed on projects.json).
+        Confirmed via a real API call: baseline count 7,689 -> 19,527 with
+        this flag added, +11,838 tasks. includeArchivedTasks=true (a
+        plausible-sounding alternative name) was also tried and confirmed to
+        be a no-op on this account.
 
         Also requests includeCustomFields=true — confirmed real via
         Teamwork's own public API-Request-Examples repo (not guessed) — so
@@ -184,7 +194,11 @@ class TeamworkClient:
         included["customfieldTasks"] in the SAME response, no per-task call
         needed. Returns (tasks, included) like list_projects().
         """
-        params = {"includeCompletedTasks": "true", "includeCustomFields": "true"}
+        params = {
+            "includeCompletedTasks": "true",
+            "includeCustomFields": "true",
+            "includeArchivedProjects": "true",
+        }
         tasks = []
         included = {}
         page_number = 1

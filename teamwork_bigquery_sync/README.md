@@ -12,10 +12,19 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
   field). Prior months are left untouched. The delete+insert is wrapped in a
   single BigQuery multi-statement transaction (via a staging table) so a
   mid-run failure can't leave the table half-deleted.
-- Projects/tasks scope: all projects except deleted ones (active, current,
-  late, upcoming, completed, and archived are all included, per your
-  instruction to "pull everything but deleted"). Tasks are filtered to
-  belong to one of those in-scope projects.
+- Projects scope: all projects except deleted ones — every non-archived and
+  archived project is included in the **projects** table, per your
+  instruction to "pull everything but deleted." (Correction: this account's
+  raw `status` field is only ever `'active'`/`'inactive'` — "archived" is
+  not a `status` value, it's a separate `archivedAt` timestamp, populated
+  whenever a project has been archived.)
+- Tasks scope: tasks belonging to a non-archived project, OR an archived
+  project archived on or after `ARCHIVED_PROJECT_TASKS_CUTOFF` (currently
+  `2026-01-01`, set in `sync.py`). Tasks belonging to a project archived
+  before that cutoff are excluded from the **tasks** table entirely — the
+  project itself still appears in **projects** regardless of archive date,
+  only its tasks are skipped. See "Known gaps" below for how this cutoff
+  was chosen and its effect on row counts.
 - Users scope: everyone on the account, including deactivated/deleted users
   — they're kept (flagged via `is_deleted`) rather than dropped, so
   historical timelogs/tasks referencing them still resolve to a name instead
@@ -353,6 +362,40 @@ the attached service account directly). Say the word and I'll wire it up.
 
 ## Known gaps / things to verify before relying on this
 
+- **Archived-project tasks (fixed 2026-09-03).** Tasks belonging to an
+  archived project used to be silently excluded from the tasks pull —
+  `teamwork_client.list_tasks()` called the site-wide `tasks.json` endpoint
+  with no equivalent of the `includeArchivedProjects=true` flag that
+  `list_projects()` already needed for projects.json, so any task whose
+  project had been archived just never came back, even though the task
+  itself was neither deleted nor completed-and-gone. Confirmed live against
+  the real API (2026-09-02): a real, non-deleted, completed task in a known
+  archived project was invisible to a site-wide pull, but returned fine
+  once queried scoped to its own project.
+  - **Fix**: `list_tasks()` now passes `includeArchivedProjects=true`
+    (confirmed live: task count went from 7,689 to 19,527 with the flag —
+    a real, working parameter, not a guess). `includeArchivedTasks=true`
+    was also tried as a plausible alternative name and confirmed to be a
+    no-op on this account — not real.
+  - **Cutoff, not everything**: pulling every archived project's tasks
+    unconditionally would add ~11,838 mostly-stale rows from projects
+    archived as far back as this account's 2023 start — a lot of volume
+    for very little reporting value. Instead, `sync.py`'s
+    `ARCHIVED_PROJECT_TASKS_CUTOFF` (currently `2026-01-01`) only pulls
+    tasks for projects archived on or after that date; older archived
+    projects are excluded from the tasks pull (their project row still
+    exists in **projects**, only their tasks are skipped). Confirmed live:
+    of 1,671 archived projects, 605 were archived on/after 2026-01-01
+    (4,471 tasks) vs. 1,066 archived earlier (7,367 tasks) — so the cutoff
+    brings the tasks table to roughly 12,160 rows instead of 19,527.
+    Change the constant (not the SQL/query params) if the cutoff date ever
+    needs to move, and re-run a full sync.
+  - **Correction to a previous README claim**: this account's real project
+    `status` field is only ever `'active'`/`'inactive'` — "archived" was
+    previously (incorrectly) assumed to be one of six `status` values
+    alongside active/current/late/upcoming/completed. It's actually a
+    separate `archivedAt` timestamp field (`projects.archived_at` in
+    BigQuery), unrelated to `status`.
 - **Scheduled-run delays (partially mitigated, not fully solved).**
   The original cron (`0 5,17 * * *`, firing exactly on the hour) was
   investigated after noticing a run at an unexpected time. Pulled via the
