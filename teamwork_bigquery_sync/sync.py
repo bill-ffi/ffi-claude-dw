@@ -283,88 +283,37 @@ def run_dry_run(client):
         any_failed = True
         print(f"[FAIL] client (company) diagnostic — {exc}")
 
-    # TEMPORARY spike diagnostic (2026-09-03), take 3: confirmed take 2 that
-    # tasklist 3941748 ("Monthly Close 2026-05") is COMPLETED (status:
-    # "completed"), not deleted — showCompleted=true resolves the single
-    # tasklist GET (which otherwise 404s). What's still unconfirmed: is
-    # there an equivalent flag for the tasklists LIST endpoint (only tried
-    # includeCompleted/includeCompletedTasklists there, not the confirmed-
-    # correct showCompleted name) or for tasks.json itself.
-    print("\n--- Missing-task diagnostic take 3 (temporary spike) ---")
+    # TEMPORARY spike diagnostic (2026-09-03), take 4: confirmed take 3 that
+    # showCompleted=true is the real flag — it works on the tasklists LIST
+    # endpoint (3 -> 7 tasklists, target tasklist now present, status:
+    # "completed"). But tasks.json itself (site-wide or projectIds-scoped)
+    # has no equivalent — tried showCompleted, showCompletedTasklists,
+    # includeCompletedTasklists, all no-ops — and tasklistIds isn't even a
+    # recognized tasks.json filter (0 results regardless of flags). Testing
+    # the one remaining real endpoint shape: Teamwork's own v3 docs
+    # reference a dedicated tasklist-scoped tasks endpoint,
+    # /tasklists/{tasklistId}/tasks.json, distinct from the site-wide one.
+    print("\n--- Missing-task diagnostic take 4 (temporary spike) ---")
     target_task_id = 49325131
     target_tasklist_id = 3941748
-    target_project_id = 1388473
 
     for label, params in (
         ("no flag", {}),
         ("showCompleted=true", {"showCompleted": "true"}),
+        ("includeCompletedTasks=true", {"includeCompletedTasks": "true"}),
     ):
         try:
-            payload = client._get(f"/projects/api/v3/projects/{target_project_id}/tasklists.json", params)
-            tasklists = payload.get("tasklists", [])
-            match = next((tl for tl in tasklists if tl.get("id") == target_tasklist_id), None)
+            payload = client._get(
+                f"/projects/api/v3/tasklists/{target_tasklist_id}/tasks.json", params
+            )
+            tasks_here = payload.get("tasks", [])
+            present = any(t.get("id") == target_task_id for t in tasks_here)
             print(
-                f"     GET projects/{target_project_id}/tasklists.json ({label}): "
-                f"{len(tasklists)} tasklist(s), target present: {match is not None}"
-                + (f" — {json.dumps(match, default=str)}" if match else "")
+                f"     GET tasklists/{target_tasklist_id}/tasks.json ({label}): "
+                f"{len(tasks_here)} task(s), target present: {present}"
             )
         except Exception as exc:
-            print(f"     GET projects/{target_project_id}/tasklists.json ({label}): FAILED — {exc}")
-
-    for label, extra in (
-        ("no flag", {}),
-        ("showCompleted=true", {"showCompleted": "true"}),
-        ("showCompletedTasklists=true", {"showCompletedTasklists": "true"}),
-        ("includeCompletedTasklists=true", {"includeCompletedTasklists": "true"}),
-    ):
-        try:
-            scoped = client._get(
-                TASKS_PATH,
-                {
-                    "projectIds": str(target_project_id),
-                    "page": 1,
-                    "pageSize": 250,
-                    "includeCompletedTasks": "true",
-                    "includeArchivedProjects": "true",
-                    **extra,
-                },
-            )
-            scoped_tasks = scoped.get("tasks", [])
-            present = any(t.get("id") == target_task_id for t in scoped_tasks)
-            print(
-                f"     GET tasks.json?projectIds={target_project_id} ({label}): "
-                f"{len(scoped_tasks)} task(s), target present: {present}"
-            )
-        except Exception as exc:
-            print(f"     GET tasks.json?projectIds={target_project_id} ({label}): FAILED — {exc}")
-
-    # Also try scoping tasks.json directly by tasklist id, in case that's a
-    # supported filter and behaves differently than projectIds scoping.
-    for label, extra in (
-        ("no flag", {}),
-        ("showCompleted=true", {"showCompleted": "true"}),
-        ("showCompletedTasklists=true", {"showCompletedTasklists": "true"}),
-    ):
-        try:
-            scoped = client._get(
-                TASKS_PATH,
-                {
-                    "tasklistIds": str(target_tasklist_id),
-                    "page": 1,
-                    "pageSize": 250,
-                    "includeCompletedTasks": "true",
-                    "includeArchivedProjects": "true",
-                    **extra,
-                },
-            )
-            scoped_tasks = scoped.get("tasks", [])
-            present = any(t.get("id") == target_task_id for t in scoped_tasks)
-            print(
-                f"     GET tasks.json?tasklistIds={target_tasklist_id} ({label}): "
-                f"{len(scoped_tasks)} task(s), target present: {present}"
-            )
-        except Exception as exc:
-            print(f"     GET tasks.json?tasklistIds={target_tasklist_id} ({label}): FAILED — {exc}")
+            print(f"     GET tasklists/{target_tasklist_id}/tasks.json ({label}): FAILED — {exc}")
 
     print()
     if any_failed:
