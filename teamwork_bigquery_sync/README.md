@@ -362,38 +362,56 @@ the attached service account directly). Say the word and I'll wire it up.
 
 ## Known gaps / things to verify before relying on this
 
-- **Orphaned tasks under a deleted tasklist (known gap, not fixed — no fix
-  possible via the list API).** Investigated 2026-09-03 after task 49325131
+- **Tasks in a COMPLETED tasklist (known gap, not fixed — no fix found via
+  any list-based endpoint).** Investigated 2026-09-03 after task 49325131
   ("Record health insurance allocation", a completed subtask in project
   1388473, "CNE Monthly Books (2026)") turned up missing from the tasks
   table despite its project being genuinely active and non-archived — so
-  not the archived-project cutoff above. Root cause, confirmed live: its
-  tasklist (id 3941748, "Monthly Close 2026-05") returns `404 entity not
-  found` from `GET /projects/api/v3/tasklists/{id}.json` — **the tasklist
-  itself has been deleted in Teamwork**, but this task under it was never
-  cascade-deleted (`deletedAt` is null; it's still directly fetchable via
-  `GET /projects/api/v3/tasks/{id}.json`). Its raw payload also has no
-  `workflowStages` key at all, unlike a normal task, consistent with its
-  board/tasklist context being gone.
-  - Ruled out first: not a subtask-visibility issue — candidate flags
-    `includeSubTasks`/`includeSubtasks`/`includeAllSubTasks` were all
-    confirmed no-ops (0 delta on the site-wide count), and the task is
-    still absent even when `tasks.json` is scoped directly to its own
-    project via `projectIds=`.
-  - **Why there's no fix**: `tasks.json` (site-wide or `projectIds`-scoped)
-    apparently enumerates tasks by walking tasklists, so a task whose
-    tasklist no longer exists can never appear in any list response — only
-    a direct single-task GET by known ID resolves it. There is no
-    enumerable index of "orphaned tasks under deleted tasklists" to pull
-    from, so this can't be scripted around the way the archived-projects
-    gap was; the only way to find one is to already know its ID.
+  not the archived-project cutoff above.
+  - **Root cause, confirmed live**: its tasklist (id 3941748, "Monthly
+    Close 2026-05") is **completed**, not deleted — an earlier pass at this
+    investigation wrongly concluded "deleted" from a bare `404` on
+    `GET /tasklists/{id}.json`, which was corrected after you pointed out
+    (with a screenshot) that the tasklist is visible under the project's
+    "Completed task lists" section. `showCompleted=true` is the real flag:
+    it resolves the single-tasklist GET (`"status": "completed"`) and
+    correctly reveals the tasklist on the tasklists-list endpoint (3 → 7
+    tasklists for that project, the missing one now included).
+  - **But `tasks.json` itself has no working equivalent.** Every list-based
+    path to this task's tasks was tried and confirmed to fail: site-wide
+    `tasks.json` and `projectIds=`-scoped `tasks.json`, with
+    `showCompleted`, `showCompletedTasklists`, and `includeCompletedTasklists`
+    all as no-ops; `tasklistIds=` isn't even a recognized `tasks.json`
+    filter (0 results regardless); and the dedicated tasklist-scoped
+    endpoint (`GET /tasklists/{tasklistId}/tasks.json`) — confirmed real
+    and working via a control call against an active tasklist (returned 4
+    tasks with no flags needed) — returns a clean `count: 0` for this
+    completed tasklist under every flag combination tried, including
+    `showCompleted=true` and `includeCompletedTasks=true` together. The
+    task is only reachable via a direct single-task GET by known ID
+    (`GET /tasks/{id}.json`); there is no enumerable index of "tasks in a
+    completed tasklist" to pull from, so unlike the archived-projects gap
+    above, this can't be scripted around from the client side — it appears
+    to be a genuine Teamwork API limitation on their list endpoints, not a
+    missing query parameter on our end.
+  - **Scope, sampled**: of the first 150 (of 1,889) projects, 45 tasklists
+    total, 18 completed — extrapolating, roughly **~227 completed
+    tasklists** site-wide. The one project inspected directly showed
+    ~33-34 tasks per completed tasklist, which would put total affected
+    tasks in the low thousands if that holds broadly, but that's a single
+    anecdotal data point extrapolated widely — treat it as a rough
+    order-of-magnitude, not a real count, until sized properly (e.g. by
+    actually pulling task counts per completed tasklist across a larger
+    sample, or asking Teamwork support directly whether any endpoint or
+    parameter exposes these).
   - **Practical takeaway**: if a specific task is reported missing from the
-    `tasks` table, check whether its own project is excluded by the
-    archived-projects cutoff (see above) first; if the project is active
-    and non-archived, this orphaned-tasklist case is the next thing to
-    check via the single-task GET endpoint. Unknown how common this is —
-    treat any given missing task as a one-off to verify rather than assume
-    it's this same cause.
+    `tasks` table, check the archived-projects cutoff first (see above);
+    if the project is active and non-archived, check whether the task's
+    own tasklist is completed (`GET /tasklists/{id}.json?showCompleted=true`)
+    before assuming anything else. This is a real, currently-unresolved
+    gap in coverage, potentially larger than the archived-projects one was
+    before its fix — worth prioritizing a proper fix (or confirming with
+    Teamwork that none exists) rather than treating it as a rare edge case.
 - **Archived-project tasks (fixed 2026-09-03).** Tasks belonging to an
   archived project used to be silently excluded from the tasks pull —
   `teamwork_client.list_tasks()` called the site-wide `tasks.json` endpoint
