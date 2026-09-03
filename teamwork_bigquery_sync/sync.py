@@ -335,6 +335,24 @@ def run_dry_run(client):
         f"{len(scoped_tasks)} task(s), target present: {present}"
     )
 
+    # +35,778 is much bigger than the ~227-completed-tasklist sample-based
+    # estimate implied — check whether a site-wide (non-project-scoped)
+    # tasklists.json exists, which would give an exact completed-tasklist
+    # count via meta.page.count instead of sampling/extrapolating.
+    try:
+        tl_baseline = client._get("/projects/api/v3/tasklists.json", {"page": 1, "pageSize": 1})
+        tl_baseline_count = (tl_baseline.get("meta") or {}).get("page", {}).get("count")
+        tl_combo = client._get(
+            "/projects/api/v3/tasklists.json", {"page": 1, "pageSize": 1, "showCompleted": "true"}
+        )
+        tl_combo_count = (tl_combo.get("meta") or {}).get("page", {}).get("count")
+        print(
+            f"     site-wide tasklists.json: {tl_baseline_count} (no flag) vs "
+            f"{tl_combo_count} (showCompleted=true)"
+        )
+    except Exception as exc:
+        print(f"     site-wide tasklists.json probe FAILED — {exc}")
+
     print()
     if any_failed:
         print("One or more checks failed. Fix TEAMWORK_BASE_URL/API key or the")
