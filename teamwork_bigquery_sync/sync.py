@@ -337,6 +337,41 @@ def run_dry_run(client):
                     f"     tasks.json?projectIds={target_id} ({params_label}): "
                     f"{len(scoped_tasks)} task(s) returned"
                 )
+
+            # Quantify a proposed cutoff: only pull tasks for projects
+            # archived on/after 2026-01-01, skipping older archived
+            # projects entirely. ISO-8601 strings sort lexicographically,
+            # so plain string comparison against the cutoff is safe here.
+            cutoff = "2026-01-01"
+            archived_on_or_after_cutoff = [
+                p for p in raw_projects if p.get("archivedAt") and p["archivedAt"][:10] >= cutoff
+            ]
+            archived_before_cutoff = [
+                p for p in raw_projects if p.get("archivedAt") and p["archivedAt"][:10] < cutoff
+            ]
+            print(
+                f"     of {len(archived_like)} archived projects: "
+                f"{len(archived_on_or_after_cutoff)} archived on/after {cutoff}, "
+                f"{len(archived_before_cutoff)} archived before {cutoff}"
+            )
+            if archived_on_or_after_cutoff:
+                recent_ids = ",".join(str(p["id"]) for p in archived_on_or_after_cutoff)
+                recent_probe = client._get(
+                    TASKS_PATH,
+                    {
+                        "projectIds": recent_ids,
+                        "page": 1,
+                        "pageSize": 1,
+                        "includeCompletedTasks": "true",
+                        "includeArchivedProjects": "true",
+                    },
+                )
+                recent_count = (recent_probe.get("meta") or {}).get("page", {}).get("count")
+                print(
+                    f"     tasks.json?projectIds=<the {len(archived_on_or_after_cutoff)} projects "
+                    f"archived on/after {cutoff}>&includeArchivedProjects=true: "
+                    f"total count={recent_count}"
+                )
     except Exception as exc:
         print(f"[FAIL] archived-project tasks diagnostic — {exc}")
 
