@@ -56,13 +56,18 @@ MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 # teamwork_client.list_tasks()'s includeArchivedProjects=true), but archived
 # projects going back to the start of this account (2023) would add ~11,800
 # mostly-stale task rows on every run for very little reporting value.
-# Confirmed live 2026-09-02: pulling every archived project's tasks brings
-# the tasks table from 7,689 to 19,527 rows; scoping to projects archived on
-# or after this cutoff brings in only the recently-archived ones (605
-# projects, 4,471 tasks) for a total of ~12,160. Projects archived before
-# this date are excluded from the tasks pull entirely — not from the
-# projects table, which still carries every non-deleted project regardless
-# of archive date. See README "Known gaps" for the full investigation.
+# Confirmed live 2026-09-02 (before the showCompletedLists=true fix that
+# followed — see teamwork_client.list_tasks() and README "Known gaps" for
+# that one; the row counts below predate it and are now understated):
+# pulling every archived project's tasks brings the tasks table from 7,689
+# to 19,527 rows; scoping to projects archived on or after this cutoff
+# brings in only the recently-archived ones (605 projects, 4,471 tasks) for
+# a total of ~12,160. Projects archived before this date are excluded from
+# the tasks pull entirely — not from the projects table, which still
+# carries every non-deleted project regardless of archive date. This same
+# scoping applies regardless of whether a task's own tasklist is completed
+# — per your instruction, an active or recently-archived project's tasks
+# should all come through, completed tasklist or not.
 ARCHIVED_PROJECT_TASKS_CUTOFF = "2026-01-01"
 
 

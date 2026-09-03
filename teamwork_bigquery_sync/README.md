@@ -18,13 +18,17 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
   raw `status` field is only ever `'active'`/`'inactive'` — "archived" is
   not a `status` value, it's a separate `archivedAt` timestamp, populated
   whenever a project has been archived.)
-- Tasks scope: tasks belonging to a non-archived project, OR an archived
+- Tasks scope: **all** tasks (open or completed, in any tasklist whether
+  active or completed) belonging to a non-archived project, OR an archived
   project archived on or after `ARCHIVED_PROJECT_TASKS_CUTOFF` (currently
   `2026-01-01`, set in `sync.py`). Tasks belonging to a project archived
   before that cutoff are excluded from the **tasks** table entirely — the
   project itself still appears in **projects** regardless of archive date,
-  only its tasks are skipped. See "Known gaps" below for how this cutoff
-  was chosen and its effect on row counts.
+  only its tasks are skipped. Whether a task's own *tasklist* is completed
+  has no bearing on inclusion — `showCompletedLists=true` (see
+  `teamwork_client.list_tasks()`) makes sure those come through too. See
+  "Known gaps" below for how the cutoff was chosen and both flags' effect
+  on row counts.
 - Users scope: everyone on the account, including deactivated/deleted users
   — they're kept (flagged via `is_deleted`) rather than dropped, so
   historical timelogs/tasks referencing them still resolve to a name instead
@@ -362,21 +366,21 @@ the attached service account directly). Say the word and I'll wire it up.
 
 ## Known gaps / things to verify before relying on this
 
-- **Tasks in a COMPLETED tasklist (root cause found 2026-09-03, fix not
-  yet applied — pending a scoping decision, same shape as the
-  archived-projects one below).** Investigated after task 49325131
-  ("Record health insurance allocation", a completed subtask in project
-  1388473, "CNE Monthly Books (2026)") turned up missing from the tasks
-  table despite its project being genuinely active and non-archived — so
-  not the archived-project cutoff below.
+- **Tasks in a COMPLETED tasklist (fixed 2026-09-03).** Tasks belonging to a
+  completed tasklist used to be silently excluded from the tasks pull, even
+  within an active, non-archived project. Found via task 49325131 ("Record
+  health insurance allocation", a completed subtask in project 1388473,
+  "CNE Monthly Books (2026)"), which turned up missing from the tasks table
+  despite its project being genuinely active — so not the archived-project
+  cutoff above.
   - **Root cause, confirmed live**: its tasklist (id 3941748, "Monthly
     Close 2026-05") is **completed**, not deleted — an earlier pass at this
     investigation wrongly concluded "deleted" from a bare `404` on
     `GET /tasklists/{id}.json`, corrected after you pointed out (with a
     screenshot) that the tasklist is visible under the project's
     "Completed task lists" section.
-  - **The real fix — `showCompletedLists=true`.** Sourced from Teamwork's
-    own official example repo
+  - **Fix — `showCompletedLists=true`.** Sourced from Teamwork's own
+    official example repo
     ([Teamwork/Teamwork.com-API-Request-Examples](https://github.com/Teamwork/Teamwork.com-API-Request-Examples),
     `getRequests/tasks/Get all tasks.js`), confirmed verbatim and then
     tested live: it must be combined with the `includeCompletedTasks=true`
@@ -384,36 +388,39 @@ the attached service account directly). Say the word and I'll wire it up.
     alone (or with `status=all` instead of `includeCompletedTasks`) it's a
     no-op, which is why an earlier pass at this investigation wrongly
     concluded no fix existed. With the full three-flag combination:
-    task count went from 19,577 to 55,355 (**+35,778 tasks**), and task
-    49325131 is now present when the same call is scoped to its project.
-    (A related third-party guess of the same parameter name, offered
-    without this combination or a citable source, was separately tested
-    and — on its own — correctly found to be a no-op; the difference was
-    entirely the missing `includeCompletedTasks=true` pairing, a useful
-    reminder to verify any unsourced API-parameter claim against the real
-    API rather than trusting it either way.)
+    site-wide task count went from 19,577 to 55,355 (**+35,778 tasks**),
+    and task 49325131 is now present when the same call is scoped to its
+    project. `list_tasks()` now passes it unconditionally, matching your
+    instruction that inclusion should not depend on a task's own tasklist
+    being completed. (A related third-party guess of the same parameter
+    name, offered without this combination or a citable source, was
+    separately tested and — on its own — correctly found to be a no-op;
+    the difference was entirely the missing `includeCompletedTasks=true`
+    pairing, a useful reminder to verify any unsourced API-parameter claim
+    against the real API rather than trusting it either way.)
+  - **No separate cutoff for this one — the existing project-level cutoff
+    already covers it.** Per your instruction: the new logic should pull
+    all tasks (open or completed, any tasklist) for all active projects
+    plus any project archived on or after `ARCHIVED_PROJECT_TASKS_CUTOFF`,
+    regardless of whether a task's own tasklist is completed. Since
+    `task_pull_project_ids` in `sync_projects()` already filters purely on
+    each *project's* `archived_at`, adding `showCompletedLists=true`
+    site-wide and leaving that filter untouched produces exactly this
+    behavior with no additional code — tasks from completed tasklists flow
+    through the same project-level gate as everything else. No tasklist
+    `completedAt` timestamp was needed (tasklists don't carry one anyway,
+    only `status: "completed"` and `updatedAt`).
   - **Scope, exact count**: site-wide `tasklists.json` (a real, working,
     non-project-scoped endpoint) gives an exact count via
     `meta.page.count`: 599 tasklists without `showCompleted=true`, 896
-    with it — **297 completed tasklists** site-wide, not a sample-based
-    estimate. Averaging ~120 tasks per completed tasklist (35,778 / 297) —
-    well above the ~33-34 seen in the one project inspected directly, so
-    the distribution is uneven; some completed tasklists (particularly
-    older, long-running recurring ones) likely carry far more history than
-    others.
-  - **Decision needed before implementing**: pulling all 35,778 would
-    nearly triple the current ~12,160-row `tasks` table. Given the
-    archived-projects fix already applies a date cutoff
-    (`ARCHIVED_PROJECT_TASKS_CUTOFF`) for the same reason — old, closed-out
-    work has little reporting value — the same shape of fix likely applies
-    here too, but tasklists don't carry a `completedAt` timestamp in their
-    raw payload (only `status: "completed"` and `updatedAt`, which is an
-    approximation at best) — worth confirming with Teamwork whether a true
-    completion timestamp exists before designing the cutoff, or falling
-    back to `updatedAt` if not. Not implemented yet — say the word on how
-    you want this scoped (mirror the 2026-01-01 cutoff, a different date,
-    unconditional inclusion, or something else) and it can go in the same
-    way the archived-projects fix did.
+    with it — **297 completed tasklists** site-wide. Averaging ~120 tasks
+    per completed tasklist (35,778 / 297) — well above the ~33-34 seen in
+    the one project inspected directly, so the distribution is uneven;
+    some completed tasklists (particularly older, long-running recurring
+    ones) likely carry far more history than others. Combined with the
+    archived-projects cutoff, expect the `tasks` table to land well above
+    the ~12,160 rows that cutoff alone produced — re-run and check the
+    `RUN_SUMMARY` for the real number.
 - **Archived-project tasks (fixed 2026-09-03).** Tasks belonging to an
   archived project used to be silently excluded from the tasks pull —
   `teamwork_client.list_tasks()` called the site-wide `tasks.json` endpoint

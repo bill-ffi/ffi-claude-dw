@@ -175,10 +175,11 @@ class TeamworkClient:
         return projects, included
 
     def list_tasks(self):
-        """All tasks site-wide, including completed ones and tasks belonging
-        to archived projects. Filtered down to in-scope projects by the
-        caller (which also applies the archived-project cutoff — see
-        sync.py's ARCHIVED_PROJECT_TASKS_CUTOFF and README "Known gaps").
+        """All tasks site-wide, including completed ones, tasks belonging to
+        archived projects, and tasks in completed tasklists. Filtered down
+        to in-scope projects by the caller (which also applies the
+        archived-project cutoff — see sync.py's ARCHIVED_PROJECT_TASKS_CUTOFF
+        and README "Known gaps").
 
         includeArchivedProjects=true confirmed live 2026-09-02: without it,
         tasks.json silently excludes every task belonging to an archived
@@ -187,6 +188,24 @@ class TeamworkClient:
         this flag added, +11,838 tasks. includeArchivedTasks=true (a
         plausible-sounding alternative name) was also tried and confirmed to
         be a no-op on this account.
+
+        showCompletedLists=true confirmed live 2026-09-03: without it,
+        tasks.json silently excludes every task belonging to a COMPLETED
+        tasklist, even when includeCompletedTasks=true and the task itself
+        is neither deleted nor archived-project-excluded — confirmed via a
+        real task (49325131) that was invisible to every list-based query
+        without this flag, but resolved fine by direct single-task GET.
+        Sourced from Teamwork's own official example repo
+        (Teamwork/Teamwork.com-API-Request-Examples,
+        getRequests/tasks/Get all tasks.js), confirmed verbatim, then tested
+        live: it only has an effect when combined with
+        includeCompletedTasks=true — added alone, or with status=all
+        instead, it's a no-op. With the full combination: site-wide count
+        went from 19,577 to 55,355 (+35,778 tasks). See README "Known gaps"
+        for the full investigation, including a plausible-sounding
+        third-party parameter-name guess that (without this combination)
+        tested as a no-op — a reminder to verify any unsourced API claim
+        against the real API before trusting or dismissing it.
 
         Also requests includeCustomFields=true — confirmed real via
         Teamwork's own public API-Request-Examples repo (not guessed) — so
@@ -198,6 +217,7 @@ class TeamworkClient:
             "includeCompletedTasks": "true",
             "includeCustomFields": "true",
             "includeArchivedProjects": "true",
+            "showCompletedLists": "true",
         }
         tasks = []
         included = {}
