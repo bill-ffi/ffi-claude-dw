@@ -31,7 +31,10 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
   inclusion — `showCompletedLists=true` (see
   `teamwork_client.list_tasks()`) makes sure those come through too.
   Run `python sync.py --explain-task-scope` to see the exact task count
-  each candidate scope definition produces before syncing. See
+  each candidate scope definition produces before syncing — or from GitHub
+  Actions: **Actions** tab -> **Teamwork -> BigQuery sync** -> **Run
+  workflow** -> check **"Explain task scope only"** -> **Run workflow**.
+  It reads only; nothing is written to BigQuery. See
   "Known gaps" below for how the cutoff was chosen and both flags' effect
   on row counts.
 - Users scope: everyone on the account, including deactivated/deleted users
