@@ -230,12 +230,8 @@ class TeamworkClient:
         included["customfieldTasks"] in the SAME response, no per-task call
         needed. Returns (tasks, included) like list_projects().
         """
-        base_params = {
-            "includeCompletedTasks": "true",
-            "includeCustomFields": "true",
-            "includeArchivedProjects": "true",
-            "showCompletedLists": "true",
-        }
+        base_params = dict(self.TASK_SCOPE_PARAMS)
+        base_params["includeCustomFields"] = "true"
         tasks = []
         included = {}
         sorted_ids = sorted(project_ids)
@@ -271,6 +267,58 @@ class TeamworkClient:
                 if page_number > MAX_PAGES:
                     raise PaginationLimitExceeded(TASKS_PATH, MAX_PAGES)
         return tasks, included
+
+    # The flags that define "every task, open or completed, in any
+    # tasklist, including archived projects" — shared by list_tasks() and
+    # count_tasks() so a scope count can never drift from the real pull.
+    TASK_SCOPE_PARAMS = {
+        "includeCompletedTasks": "true",
+        "includeArchivedProjects": "true",
+        "showCompletedLists": "true",
+    }
+
+    def count_tasks(self, project_ids=None):
+        """Exact task count for `project_ids` (or site-wide if None), read
+        from meta.page.count with pageSize=1 — no rows fetched.
+
+        One cheap request per TASK_PROJECT_BATCH_SIZE batch. Returns None
+        (rather than a wrong number) if the response carries no usable
+        count field, since guessing here would defeat the point.
+        """
+        if project_ids is None:
+            batches = [None]
+        else:
+            sorted_ids = sorted(project_ids)
+            batches = [
+                sorted_ids[i : i + TASK_PROJECT_BATCH_SIZE]
+                for i in range(0, len(sorted_ids), TASK_PROJECT_BATCH_SIZE)
+            ] or [[]]
+
+        total = 0
+        for batch in batches:
+            if batch is not None and not batch:
+                continue
+            params = dict(self.TASK_SCOPE_PARAMS)
+            params["page"] = 1
+            params["pageSize"] = 1
+            if batch is not None:
+                params["projectIds"] = ",".join(str(pid) for pid in batch)
+            payload = self._get(TASKS_PATH, params)
+            page_meta = payload.get("meta", {}).get("page", {}) or {}
+            count = None
+            for candidate in ("count", "totalItems", "total"):
+                if isinstance(page_meta.get(candidate), int):
+                    count = page_meta[candidate]
+                    break
+            if count is None:
+                logger.warning(
+                    "tasks.json meta.page carries no count field (keys: %s) — "
+                    "cannot count without fetching every row",
+                    list(page_meta.keys()),
+                )
+                return None
+            total += count
+        return total
 
     def list_timelogs(self, start_date, end_date):
         """Timelogs with a log date in [start_date, end_date], both

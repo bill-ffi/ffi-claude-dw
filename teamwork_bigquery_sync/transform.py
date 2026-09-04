@@ -1,6 +1,13 @@
 """Maps raw Teamwork API objects to BigQuery row dicts."""
 
-from datetime import datetime, timezone
+import logging
+from datetime import date, datetime, timezone
+
+logger = logging.getLogger(__name__)
+
+# An archivedAt older than this is treated as "never archived" rather than
+# as a real archive date — see parse_archived_at().
+ARCHIVE_SENTINEL_MAX_YEAR = 1900
 
 
 def _date_part(value):
@@ -31,12 +38,60 @@ def pick_current_budget(budgets_for_project):
     return max(candidates, key=lambda b: b.get("startDate") or "")
 
 
+def parse_archived_at(value):
+    """Teamwork's `archivedAt` as a real `date`, or None if the project has
+    never been archived.
+
+    Deliberately NOT a raw lexicographic string comparison. `archivedAt`
+    has been observed as null on non-archived projects, but Teamwork's v3
+    API is Go-based, and Go serialises an unset timestamp as the zero time
+    "0001-01-01T00:00:00Z" rather than null. A bare `value >= "2026-01-01"`
+    test reads that sentinel as a genuine archive date in the year 1 and
+    silently drops the project from the tasks pull — the exact inverse of
+    what's intended. Anything unparseable, or dated before
+    ARCHIVE_SENTINEL_MAX_YEAR, is therefore treated as "never archived"
+    and logged once so it can't fail silently.
+    """
+    if not value:
+        return None
+    text = str(value)[:10]
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError:
+        logger.warning(
+            "Unparseable archivedAt %r — treating the project as never archived",
+            value,
+        )
+        return None
+    if parsed.year < ARCHIVE_SENTINEL_MAX_YEAR:
+        return None
+    return parsed
+
+
+def task_project_id(raw):
+    """The project a task belongs to.
+
+    Teamwork's tasks.json carries this on the nested tasklist meta block,
+    but this mirrors the defensive fallback chain already used for
+    timelogs and budgets rather than depending on one nested key: if
+    `tasklist.meta.projectId` were ever absent, keying scope decisions
+    solely off it would silently drop EVERY task.
+    """
+    tasklist = raw.get("tasklist") or {}
+    tasklist_meta = tasklist.get("meta") or {}
+    return (
+        tasklist_meta.get("projectId")
+        or raw.get("projectId")
+        or _ref_id(raw.get("project"))
+    )
+
+
 def normalize_project(raw, category_names_by_id, budgets_by_project_id, client_names_by_id=None):
     if raw.get("status") == "deleted" or raw.get("deletedAt"):
         return None
 
     project_id = raw["id"]
-    category_id = _ref_id(raw.get("category"))
+    category_id = raw.get("categoryId") or _ref_id(raw.get("category"))
     company_id = raw.get("companyId") or _ref_id(raw.get("company"))
     budget = pick_current_budget(budgets_by_project_id.get(project_id, []))
     budget_capacity = budget.get("capacity") if budget else None
@@ -86,7 +141,7 @@ def normalize_task(raw, in_scope_project_ids):
 
     tasklist = raw.get("tasklist") or {}
     tasklist_meta = tasklist.get("meta") or {}
-    project_id = tasklist_meta.get("projectId")
+    project_id = task_project_id(raw)
     if in_scope_project_ids is not None and project_id not in in_scope_project_ids:
         return None
 
@@ -140,7 +195,9 @@ def normalize_timelog(raw):
         "logged_at": logged_at,
         "minutes": minutes,
         "hours": round(minutes / 60.0, 4) if minutes is not None else None,
-        "is_billable": raw.get("isBillable", raw.get("billable")),
+        "is_billable": (
+            raw["isBillable"] if raw.get("isBillable") is not None else raw.get("billable")
+        ),
         "billable_rate": raw.get("billableRate"),
         "cost_rate": raw.get("costRate"),
         "description": raw.get("description"),

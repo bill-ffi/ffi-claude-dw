@@ -20,6 +20,7 @@ python sync.py --dry-run                          # connectivity + payload-shape
 python sync.py                                     # full sync: projects/tasks/users (full replace) + current-month timelogs
 python sync.py --backfill-months 2026-01,2026-02   # re-pull only these months' timelogs; leaves other months and projects/tasks untouched
 python sync.py --create-views                      # (re)create the BigQuery reporting views from views.py; no Teamwork calls, no table writes
+python sync.py --explain-task-scope                # print which projects the tasks pull covers + exact task count per candidate scope; reads only, writes nothing
 ```
 
 There is no automated test suite (no pytest, no test directory). Verification is done by:
@@ -30,6 +31,8 @@ There is no automated test suite (no pytest, no test directory). Verification is
 ## Architecture
 
 ### Two independent subsystems sharing one dataset
+
+Task scope is decided in one place — `sync.py`'s `select_task_pull_projects()`, driven by `ACTIVE_PROJECT_STATUSES` and `ARCHIVED_PROJECT_TASKS_CUTOFF`. Change the rule via those constants, never by editing the filter inline, and confirm the resulting row count with `--explain-task-scope` before running a real sync. `archived_at` must go through `transform.parse_archived_at()` rather than being string-compared — see README "Known gaps" for why.
 
 1. **Ingestion pipeline** (`config.py` → `teamwork_client.py` → `transform.py` → `bigquery_sync.py`, orchestrated by `sync.py`): pulls from the Teamwork REST API v3 and writes to four native tables (`projects`, `tasks`, `users`, `timelogs`). `projects`/`tasks`/`users` are full truncate-and-reload every run; `timelogs` only deletes+reinserts the *current calendar month* (via a staging-table + multi-statement transaction in `bigquery_sync.replace_current_month_timelogs`), leaving prior months untouched. This is the twice-daily scheduled workflow.
 

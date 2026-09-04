@@ -15,6 +15,13 @@ Usage:
                                 # that predates when this script started
                                 # running, or to fix a month you know is
                                 # wrong. Safe to re-run for the same month.
+    python sync.py --explain-task-scope
+                                # prints which projects the tasks pull covers
+                                # and the exact task count each candidate
+                                # scope definition returns, without writing
+                                # anything or fetching task rows. Run this to
+                                # confirm the tasks table will land on the
+                                # expected size before a real sync.
 """
 
 import argparse
@@ -69,6 +76,69 @@ MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 # — per your instruction, an active or recently-archived project's tasks
 # should all come through, completed tasklist or not.
 ARCHIVED_PROJECT_TASKS_CUTOFF = "2026-01-01"
+ARCHIVED_PROJECT_TASKS_CUTOFF_DATE = date.fromisoformat(ARCHIVED_PROJECT_TASKS_CUTOFF)
+
+# Which project `status` values count as "active" for the tasks pull.
+#
+# The requirement is "all tasks for all ACTIVE projects, plus any project
+# archived on or after ARCHIVED_PROJECT_TASKS_CUTOFF". Until now the code
+# only ever tested `archived_at` — so a project that was never archived
+# was in scope no matter its status, and every dormant, completed, or
+# inactive project contributed its entire task history to the tasks table.
+# That is the difference between "all non-archived projects" and "all
+# active projects", and on this account (per README, `status` is only ever
+# 'active'/'inactive', with large dormant categories such as Books [1,056
+# projects] and Tax/Compliance [253]) it is a large difference.
+#
+# Set to {"active", "inactive"} to restore the old "everything that isn't
+# archived" behaviour. `python sync.py --explain-task-scope` prints the
+# project and task counts under both definitions without writing anything,
+# so the choice can be checked against a known-good number first.
+ACTIVE_PROJECT_STATUSES = {"active"}
+
+
+def select_task_pull_projects(
+    project_rows,
+    active_statuses=ACTIVE_PROJECT_STATUSES,
+    cutoff=ARCHIVED_PROJECT_TASKS_CUTOFF_DATE,
+):
+    """Which projects the tasks pull should cover, plus a breakdown of how
+    every project row was classified.
+
+    Scope = (never archived AND status in `active_statuses`)
+            OR archived on/after `cutoff` (whatever its status).
+
+    The breakdown is returned rather than just the ids so RUN_SUMMARY can
+    say exactly why the tasks table is the size it is — the absence of
+    that visibility is what made an over-broad scope hard to spot.
+    """
+    in_scope = set()
+    breakdown = {
+        "in_scope_active": 0,
+        "in_scope_archived_on_or_after_cutoff": 0,
+        "excluded_archived_before_cutoff": 0,
+        "excluded_not_active": 0,
+        "excluded_statuses": {},
+    }
+    for row in project_rows:
+        archived_on = transform.parse_archived_at(row.get("archived_at"))
+        status = (row.get("status") or "").strip().lower()
+        if archived_on is not None:
+            if archived_on >= cutoff:
+                in_scope.add(row["project_id"])
+                breakdown["in_scope_archived_on_or_after_cutoff"] += 1
+            else:
+                breakdown["excluded_archived_before_cutoff"] += 1
+        elif status in active_statuses:
+            in_scope.add(row["project_id"])
+            breakdown["in_scope_active"] += 1
+        else:
+            breakdown["excluded_not_active"] += 1
+            key = status or "(null)"
+            breakdown["excluded_statuses"][key] = breakdown["excluded_statuses"].get(key, 0) + 1
+    breakdown["projects_considered"] = len(project_rows)
+    breakdown["projects_in_scope"] = len(in_scope)
+    return in_scope, breakdown
 
 
 def month_bounds(year, month):
@@ -297,6 +367,114 @@ def run_dry_run(client):
     return 0
 
 
+def run_explain_task_scope(cfg):
+    """Explains exactly which projects the tasks pull covers, and how many
+    tasks each candidate scope definition would produce — without writing
+    anything to BigQuery and without fetching a single task row (counts come
+    from tasks.json's meta.page.count at pageSize=1).
+
+    Use this to confirm the tasks table will land on the expected number
+    BEFORE running a real sync, and to see which bucket any excess is
+    coming from.
+    """
+    tw_client = TeamworkClient(cfg.teamwork_base_url, cfg.teamwork_api_key)
+    print("Task scope explanation — no BigQuery writes, no task rows fetched.\n")
+
+    raw_projects, _ = tw_client.list_projects()
+    rows = []
+    for raw in raw_projects:
+        row = transform.normalize_project(raw, {}, {}, {})
+        if row is not None:
+            rows.append(row)
+    print(f"Projects returned by projects.json (non-deleted): {len(rows)}")
+
+    # How archivedAt actually arrives on this account. If "sentinel/
+    # unparseable" is non-zero, the old `archived_at >= '2026-01-01'`
+    # string comparison was mis-classifying those projects.
+    never = sum(1 for r in rows if not r.get("archived_at"))
+    sentinel = sum(
+        1
+        for r in rows
+        if r.get("archived_at") and transform.parse_archived_at(r["archived_at"]) is None
+    )
+    real = len(rows) - never - sentinel
+    print(f"  archivedAt null/empty      : {never}")
+    print(f"  archivedAt sentinel/unparseable: {sentinel}")
+    print(f"  archivedAt a real date     : {real}")
+    if sentinel:
+        print("  ^ these were previously read as 'archived long ago' and DROPPED from the tasks pull")
+
+    print("\n--- projects by status x archive bucket ---")
+    crosstab = {}
+    for r in rows:
+        status = (r.get("status") or "(null)").strip().lower()
+        archived_on = transform.parse_archived_at(r.get("archived_at"))
+        if archived_on is None:
+            bucket = "never archived"
+        elif archived_on >= ARCHIVED_PROJECT_TASKS_CUTOFF_DATE:
+            bucket = f"archived >= {ARCHIVED_PROJECT_TASKS_CUTOFF}"
+        else:
+            bucket = f"archived <  {ARCHIVED_PROJECT_TASKS_CUTOFF}"
+        crosstab[(status, bucket)] = crosstab.get((status, bucket), 0) + 1
+    for (status, bucket), count in sorted(crosstab.items(), key=lambda kv: -kv[1]):
+        print(f"  {status:<12} {bucket:<28} {count:>6}")
+
+    def ids_where(predicate):
+        return {r["project_id"] for r in rows if predicate(r)}
+
+    def archived_on(r):
+        return transform.parse_archived_at(r.get("archived_at"))
+
+    def status_of(r):
+        return (r.get("status") or "").strip().lower()
+
+    recently_archived = lambda r: (
+        archived_on(r) is not None and archived_on(r) >= ARCHIVED_PROJECT_TASKS_CUTOFF_DATE
+    )
+
+    candidates = [
+        (
+            "A  active only (never archived, status=active)",
+            ids_where(lambda r: archived_on(r) is None and status_of(r) == "active"),
+        ),
+        (
+            "B  active + archived>=cutoff  [CURRENT DEFAULT]",
+            ids_where(lambda r: (archived_on(r) is None and status_of(r) == "active") or recently_archived(r)),
+        ),
+        (
+            "C  any non-archived + archived>=cutoff  [OLD BEHAVIOUR]",
+            ids_where(lambda r: archived_on(r) is None or recently_archived(r)),
+        ),
+        ("D  every non-deleted project", ids_where(lambda r: True)),
+    ]
+
+    print("\n--- task counts per candidate scope (exact, via meta.page.count) ---")
+    for label, ids in candidates:
+        count = tw_client.count_tasks(ids)
+        shown = f"{count:,}" if count is not None else "unavailable (no count in meta.page)"
+        print(f"  {label:<56} {len(ids):>5} projects -> {shown} tasks")
+
+    site_wide = tw_client.count_tasks(None)
+    if site_wide is not None:
+        print(f"\n  site-wide, no projectIds filter{'':<26} -> {site_wide:,} tasks")
+        smallest_label, smallest_ids = min(candidates, key=lambda c: len(c[1]))
+        smallest_count = tw_client.count_tasks(smallest_ids)
+        if smallest_count is not None and smallest_ids and smallest_count == site_wide:
+            print(
+                "\n[FAIL] the narrowest scope returns the same count as no filter at all —\n"
+                "       tasks.json is IGNORING projectIds=, so every batch pulls the whole\n"
+                "       site. Scoping is not working; do not trust a sync until this is fixed."
+            )
+        else:
+            print("\n[OK] projectIds= is honoured (a narrower scope returns fewer tasks).")
+
+    print(
+        "\nPick the scope that matches the requirement and set ACTIVE_PROJECT_STATUSES\n"
+        "in sync.py accordingly ({'active'} = B, {'active','inactive'} = C)."
+    )
+    return 0
+
+
 def sync_projects(tw_client, bq_client, dataset_ref):
     raw_projects, included = tw_client.list_projects()
     raw_budgets = tw_client.list_project_budgets()
@@ -359,22 +537,12 @@ def sync_projects(tw_client, bq_client, dataset_ref):
         bq_client, dataset_ref, schemas.PROJECTS_TABLE, schemas.PROJECTS_SCHEMA, rows
     )
 
-    # Tasks are pulled for every non-archived project, plus archived
-    # projects no older than ARCHIVED_PROJECT_TASKS_CUTOFF — see that
-    # constant's comment. This does NOT affect the projects table above,
-    # which keeps every non-deleted project regardless of archive date.
-    task_pull_project_ids = {
-        row["project_id"]
-        for row in rows
-        if not row["archived_at"] or row["archived_at"] >= ARCHIVED_PROJECT_TASKS_CUTOFF
-    }
-    projects_excluded_by_archive_cutoff = len(rows) - len(task_pull_project_ids)
-    logger.info(
-        "%d/%d projects excluded from the tasks pull (archived before %s)",
-        projects_excluded_by_archive_cutoff,
-        len(rows),
-        ARCHIVED_PROJECT_TASKS_CUTOFF,
-    )
+    # Tasks are pulled for active projects plus projects archived on or
+    # after ARCHIVED_PROJECT_TASKS_CUTOFF — see select_task_pull_projects().
+    # This does NOT affect the projects table above, which keeps every
+    # non-deleted project regardless of status or archive date.
+    task_pull_project_ids, scope_breakdown = select_task_pull_projects(rows)
+    logger.info("Task-pull project scope: %s", json.dumps(scope_breakdown, default=str))
     return {
         "status": "success",
         "rows_pulled": len(raw_projects),
@@ -383,7 +551,7 @@ def sync_projects(tw_client, bq_client, dataset_ref):
         "rows_with_category_name": rows_with_category_name,
         "clients_resolved": len(client_names),
         "rows_with_client_name": rows_with_client_name,
-        "projects_excluded_from_tasks_pull_by_archive_cutoff": projects_excluded_by_archive_cutoff,
+        "task_pull_project_scope": scope_breakdown,
     }, task_pull_project_ids
 
 
@@ -479,12 +647,61 @@ def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids):
         )
         return {"status": "skipped", "reason": "projects sync failed"}
 
+    if not task_pull_project_ids:
+        logger.error(
+            "Skipping tasks sync: the project scope came back empty. Writing "
+            "now would truncate the tasks table to zero rows."
+        )
+        return {"status": "failed", "reason": "empty project scope"}
+
     raw_tasks, tasks_included = tw_client.list_tasks(task_pull_project_ids)
-    rows = []
+
+    # Accounted for explicitly rather than folded into a single
+    # normalize_task() -> None: when the tasks table comes out the wrong
+    # size, the reason needs to be in RUN_SUMMARY, not inferred later.
+    rows_by_task_id = {}
+    dropped = {"deleted": 0, "no_project_id": 0, "out_of_scope": 0, "duplicate": 0}
     for raw in raw_tasks:
+        if raw.get("deletedAt"):
+            dropped["deleted"] += 1
+            continue
+        project_id = transform.task_project_id(raw)
+        if project_id is None:
+            dropped["no_project_id"] += 1
+            continue
+        if project_id not in task_pull_project_ids:
+            dropped["out_of_scope"] += 1
+            continue
         row = transform.normalize_task(raw, task_pull_project_ids)
-        if row is not None:
-            rows.append(row)
+        if row is None:
+            continue
+        if row["task_id"] in rows_by_task_id:
+            dropped["duplicate"] += 1
+        rows_by_task_id[row["task_id"]] = row
+    rows = list(rows_by_task_id.values())
+
+    # projectIds= is a query param this API would silently ignore if it
+    # ever stopped honouring it (exactly how the page[size] bug behaved).
+    # A task coming back for a project we did not ask about is the tell.
+    if dropped["out_of_scope"]:
+        logger.error(
+            "%d of %d tasks came back for projects OUTSIDE the requested "
+            "projectIds= scope — tasks.json may be ignoring the parameter and "
+            "returning site-wide results. Scope counts below are unreliable.",
+            dropped["out_of_scope"],
+            len(raw_tasks),
+        )
+    if dropped["duplicate"]:
+        logger.warning(
+            "%d duplicate task rows collapsed by task_id before load",
+            dropped["duplicate"],
+        )
+    logger.info(
+        "Tasks: %d pulled -> %d rows after scope/dedupe (dropped: %s)",
+        len(raw_tasks),
+        len(rows),
+        json.dumps(dropped),
+    )
 
     try:
         activity_stats = enrich_tasks_with_activity(tw_client, rows, tasks_included)
@@ -499,6 +716,8 @@ def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids):
         "status": "success",
         "rows_pulled": len(raw_tasks),
         "rows_written": written,
+        "projects_in_scope": len(task_pull_project_ids),
+        "rows_dropped": dropped,
         "activity": activity_stats,
     }
 
@@ -695,6 +914,12 @@ def main():
              "Does not touch projects/tasks or any other month.",
     )
     parser.add_argument(
+        "--explain-task-scope",
+        action="store_true",
+        help="Explain which projects the tasks pull covers and how many tasks each "
+             "candidate scope returns. Reads only; no BigQuery writes.",
+    )
+    parser.add_argument(
         "--create-views",
         action="store_true",
         help="(Re)create the exception/QC reporting views (see views.py). "
@@ -703,6 +928,9 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config()
+
+    if args.explain_task_scope:
+        sys.exit(run_explain_task_scope(cfg))
 
     if args.create_views:
         sys.exit(run_create_views(cfg))
