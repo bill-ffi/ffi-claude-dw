@@ -375,6 +375,42 @@ the attached service account directly). Say the word and I'll wire it up.
 
 ## Known gaps / things to verify before relying on this
 
+- **`CURRENT_DATE()` was UTC in the user-hours views (fixed 2026-09-04).**
+  `v_user_weekly_billable_hours`'s `bounds` CTE decided "has this weekday
+  elapsed yet?" from `CURRENT_DATE()`, which takes no timezone argument in
+  BigQuery and so returns the **UTC** date. Eastern is UTC-4/-5, so from
+  20:00 ET onward BigQuery already believed it was tomorrow. Simulated
+  hour by hour across a full week: **28 of 168 hours (17%) were
+  misclassified**, every evening between 20:00 and 23:59 ET.
+  - **What it looked like**: Mon-Thu buckets flipped from `minimum` to
+    `actual` a day early (showing a real 0 for a day nobody had worked
+    yet, which also drags `pct_of_min` to 0); Thursday evening turned
+    Friday into a `plug` before Friday began; and worst, from 20:00 ET
+    **Saturday**, `DATE_TRUNC(CURRENT_DATE(), WEEK)` rolled forward to the
+    next Sunday — so the week that had just finished dropped out of the
+    report entirely and a brand-new, fully-projected empty week appeared
+    in its place.
+  - **Fix**: all three `CURRENT_DATE()` calls in `bounds` now pass
+    `REPORTING_TIMEZONE` (`America/New_York`), a constant at the top of
+    `views.py`. Re-run `--create-views` to apply it — a view bakes its SQL
+    in at creation time, so editing the constant alone changes nothing
+    until the view is recreated.
+  - **Verified**: the two `UNION ALL` branches were re-simulated for all
+    seven days after the change and remain mutually exclusive and
+    exhaustive, with the Sunday run still producing a one-day Friday plug
+    exactly as documented under "User report" above. `log_date` needed no
+    change — it is already a `DATE`, so `DATE_TRUNC`/`EXTRACT` over it
+    carry no timezone.
+  - **Not fixed by this, and separate**: `timelogs.log_date` is the date
+    portion of Teamwork's UTC `timeLogged`, so an entry logged late in the
+    evening Eastern can still be bucketed to the following day. This fix
+    corrects *when a day is considered elapsed*, not *which day an entry
+    lands on*.
+  - **`REPORTING_TIMEZONE` vs `SYNC_TIMEZONE`**: same business day, two
+    constants on purpose — a view bakes its timezone in at
+    `--create-views` time, while `SYNC_TIMEZONE` is read fresh on every
+    sync run. If the team's anchor timezone ever changes, change both and
+    re-run `--create-views`.
 - **Task scope — measured and confirmed correct (2026-09-04).** A review
   round suspected the scope filter was over-pulling, on the theory that
   `sync_projects()` only ever tested `archived_at` and never `status`, so

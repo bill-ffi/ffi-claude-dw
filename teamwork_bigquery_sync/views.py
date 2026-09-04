@@ -69,6 +69,31 @@ RECURRING_REQUIRED_CATEGORY = "Books Maintenance"
 
 LONG_ENTRY_THRESHOLD_HOURS = 2
 
+# The business timezone the user-hours report's "has today happened yet?"
+# logic is evaluated in.
+#
+# BigQuery's CURRENT_DATE() takes no timezone and therefore returns the UTC
+# date. Eastern is UTC-4/-5, so from 20:00 ET onward BigQuery already
+# believes it is tomorrow, and v_user_weekly_billable_hours misclassifies
+# every evening: Mon-Thu buckets flip from 'minimum' to 'actual' a day
+# early, Thursday evening turns Friday into a 'plug' before Friday starts,
+# and — worst — from 20:00 ET Saturday DATE_TRUNC(CURRENT_DATE(), WEEK)
+# rolls to the NEXT Sunday, so the week just completed drops out of the
+# report and an empty, fully-projected week takes its place. Simulated
+# hour by hour across a full week: 28 of 168 hours (17%) were wrong.
+#
+# This is the same business day SYNC_TIMEZONE anchors the timelogs window
+# to; they are kept as separate constants because a view bakes its SQL in
+# at --create-views time while SYNC_TIMEZONE is read per sync run. If the
+# team's anchor timezone ever changes, change both and re-run
+# --create-views.
+#
+# NOTE: this fixes when a day is *considered elapsed*. It does not change
+# how timelogs are bucketed — timelogs.log_date is the date portion of
+# Teamwork's UTC `timeLogged`, so entries near midnight can still land on
+# the adjacent day. See README "Known gaps".
+REPORTING_TIMEZONE = "America/New_York"
+
 # External table backed by a Google Sheet (named range "mins4bq" in "FFI
 # Compensation Database and Budget"), created manually via the BigQuery
 # console — NOT by this pipeline, and NOT managed by ensure_all_tables().
@@ -474,15 +499,15 @@ bounds AS (
     -- values below. Naturally rolls forward each time the current
     -- quarter turns over.
     DATE_TRUNC(
-      DATE_SUB(DATE_TRUNC(CURRENT_DATE(), QUARTER), INTERVAL 3 MONTH),
+      DATE_SUB(DATE_TRUNC(CURRENT_DATE('{REPORTING_TIMEZONE}'), QUARTER), INTERVAL 3 MONTH),
       WEEK
     ) AS earliest_week_start,
-    DATE_TRUNC(CURRENT_DATE(), WEEK) AS current_week_start,
+    DATE_TRUNC(CURRENT_DATE('{REPORTING_TIMEZONE}'), WEEK) AS current_week_start,
     -- Today's weekday mapped onto the same 1-5 scale as day_order.
     -- Sunday -> 0 (the coming week hasn't started yet -- everything
     -- through Friday is still ahead). Saturday -> 6 (past Friday --
     -- the whole business week just finished).
-    CASE EXTRACT(DAYOFWEEK FROM CURRENT_DATE())
+    CASE EXTRACT(DAYOFWEEK FROM CURRENT_DATE('{REPORTING_TIMEZONE}'))
       WHEN 1 THEN 0   -- Sunday
       WHEN 2 THEN 1   -- Monday
       WHEN 3 THEN 2   -- Tuesday
