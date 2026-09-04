@@ -63,14 +63,21 @@ def truncate_and_load(client, dataset_ref, table_name, schema, rows):
     return len(rows)
 
 
-def replace_current_month_timelogs(
-    client, project_id, dataset_id, rows, month_start_date, month_end_date_exclusive
+def replace_timelogs_window(
+    client, project_id, dataset_id, rows, window_start_date, window_end_date_exclusive
 ):
-    """Deletes existing timelogs rows whose log_date falls within the given
-    month window, then inserts the freshly-pulled `rows` for that window —
-    as a single atomic BigQuery multi-statement script, so a mid-run failure
-    can't leave the table with the window deleted but not reinserted.
-    Rows outside the window (prior months) are left untouched.
+    """Deletes existing timelogs rows whose log_date falls in
+    [window_start_date, window_end_date_exclusive), then inserts the
+    freshly-pulled `rows` for that window — as a single atomic BigQuery
+    multi-statement script, so a mid-run failure can't leave the table with
+    the window deleted but not reinserted. Rows outside the window are left
+    untouched.
+
+    The window is not necessarily one calendar month: the normal sync
+    replaces a rolling multi-month span (see sync.timelog_window) so that
+    timelogs entered retroactively against an already-closed month are
+    picked up, and --backfill-months replaces exactly one month at a time.
+    Named for the window rather than the month for that reason.
     """
     dataset_ref = bigquery.DatasetReference(project_id, dataset_id)
     staging_table_ref = dataset_ref.table(TIMELOGS_STAGING_TABLE)
@@ -84,7 +91,12 @@ def replace_current_month_timelogs(
     load_job.result()
     if load_job.errors:
         raise RuntimeError(f"Staging load errors for timelogs: {load_job.errors}")
-    logger.info("Staged %d timelogs rows for current-month replace", len(rows))
+    logger.info(
+        "Staged %d timelogs rows for the [%s, %s) replace",
+        len(rows),
+        window_start_date,
+        window_end_date_exclusive,
+    )
 
     timelogs_fqn = f"`{project_id}.{dataset_id}.{TIMELOGS_TABLE}`"
     staging_fqn = f"`{project_id}.{dataset_id}.{TIMELOGS_STAGING_TABLE}`"
@@ -93,23 +105,23 @@ def replace_current_month_timelogs(
     script = f"""
     BEGIN TRANSACTION;
     DELETE FROM {timelogs_fqn}
-    WHERE log_date >= @month_start AND log_date < @month_end;
+    WHERE log_date >= @window_start AND log_date < @window_end;
     INSERT INTO {timelogs_fqn} ({columns})
     SELECT {columns} FROM {staging_fqn};
     COMMIT TRANSACTION;
     """
     query_job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("month_start", "DATE", month_start_date),
-            bigquery.ScalarQueryParameter("month_end", "DATE", month_end_date_exclusive),
+            bigquery.ScalarQueryParameter("window_start", "DATE", window_start_date),
+            bigquery.ScalarQueryParameter("window_end", "DATE", window_end_date_exclusive),
         ]
     )
     query_job = client.query(script, job_config=query_job_config)
     query_job.result()
     logger.info(
         "Replaced timelogs for [%s, %s): %d rows inserted",
-        month_start_date,
-        month_end_date_exclusive,
+        window_start_date,
+        window_end_date_exclusive,
         len(rows),
     )
     return len(rows)

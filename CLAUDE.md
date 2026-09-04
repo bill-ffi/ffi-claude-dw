@@ -17,7 +17,7 @@ pip install -r requirements.txt
 cp .env.example .env   # fill in TEAMWORK_API_KEY, TEAMWORK_BASE_URL, GOOGLE_APPLICATION_CREDENTIALS, SYNC_TIMEZONE
 
 python sync.py --dry-run                          # connectivity + payload-shape check, no BigQuery writes
-python sync.py                                     # full sync: projects/tasks/users (full replace) + current-month timelogs
+python sync.py                                     # full sync: projects/tasks/users (full replace) + rolling 2-month timelogs window
 python sync.py --backfill-months 2026-01,2026-02   # re-pull only these months' timelogs; leaves other months and projects/tasks untouched
 python sync.py --create-views                      # (re)create the BigQuery reporting views from views.py; no Teamwork calls, no table writes
 python sync.py --explain-task-scope                # print which projects the tasks pull covers + exact task count per candidate scope; reads only, writes nothing
@@ -36,7 +36,7 @@ Task scope is decided in one place — `sync.py`'s `select_task_pull_projects()`
 
 Measured 2026-09-04: the expected `tasks` row count is **~37,226** (823 in-scope projects), made up of 13,930 tasks from 218 active projects plus 23,296 from 605 projects archived on/after the cutoff. `status` and `archived_at` are perfectly collinear on this account (`active` ⟺ never archived), so `ACTIVE_PROJECT_STATUSES` currently changes nothing. Note that `WHERE p.archived_at >= '2026-01-01'` measures only the archived half (23,296) and is *not* a check on the table's total size — see README "Known gaps" before concluding the scope is wrong.
 
-1. **Ingestion pipeline** (`config.py` → `teamwork_client.py` → `transform.py` → `bigquery_sync.py`, orchestrated by `sync.py`): pulls from the Teamwork REST API v3 and writes to four native tables (`projects`, `tasks`, `users`, `timelogs`). `projects`/`tasks`/`users` are full truncate-and-reload every run; `timelogs` only deletes+reinserts the *current calendar month* (via a staging-table + multi-statement transaction in `bigquery_sync.replace_current_month_timelogs`), leaving prior months untouched. This is the twice-daily scheduled workflow.
+1. **Ingestion pipeline** (`config.py` → `teamwork_client.py` → `transform.py` → `bigquery_sync.py`, orchestrated by `sync.py`): pulls from the Teamwork REST API v3 and writes to four native tables (`projects`, `tasks`, `users`, `timelogs`). `projects`/`tasks`/`users` are full truncate-and-reload every run; `timelogs` deletes+reinserts a *rolling window* — the current calendar month plus `TIMELOG_SYNC_MONTHS_BACK` (default 1) previous months, computed by `sync.timelog_window()` — via a staging-table + multi-statement transaction in `bigquery_sync.replace_timelogs_window()`, leaving older months untouched. The previous month is in the window because retroactive timelogs against a closed month were otherwise never ingested; see README "Known gaps". This is the twice-daily scheduled workflow.
 
 2. **Reporting views layer** (`views.py`, invoked via `sync.py --create-views`): pure BigQuery `CREATE OR REPLACE VIEW` SQL built in Python, run independently of the ingestion schedule. Reads from the native tables above plus one external dependency (see below). Not part of the scheduled cron job — triggered manually or via the `create_views` workflow_dispatch input.
 

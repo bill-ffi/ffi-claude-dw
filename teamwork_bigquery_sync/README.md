@@ -7,11 +7,17 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
 ## What it does
 
 - **projects**, **tasks**, **users**: full truncate + reload every run.
-- **timelogs**: only the current calendar month's rows are deleted and
-  reinserted each run (by `log_date`, derived from Teamwork's `timeLogged`
-  field). Prior months are left untouched. The delete+insert is wrapped in a
-  single BigQuery multi-statement transaction (via a staging table) so a
-  mid-run failure can't leave the table half-deleted.
+- **timelogs**: a rolling **two-month** window is deleted and reinserted
+  each run — the current calendar month plus the one before it (by
+  `log_date`, derived from Teamwork's `timeLogged` field). Months older
+  than that are left untouched. The span is set by
+  `TIMELOG_SYNC_MONTHS_BACK` in `sync.py` (`1` = one previous month;
+  `0` restores the old current-month-only behaviour). The previous month
+  is included so that timelogs entered *retroactively* against a
+  just-closed month still get picked up — see "Known gaps". The
+  delete+insert is wrapped in a single BigQuery multi-statement
+  transaction (via a staging table) so a mid-run failure can't leave the
+  table half-deleted.
 - Projects scope: all projects except deleted ones — every non-archived and
   archived project is included in the **projects** table, per your
   instruction to "pull everything but deleted." (Correction: this account's
@@ -75,7 +81,7 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
      `radiant-rig-284611`). **Do not commit this file** — `.gitignore` at
      the repo root already excludes `.env` and `service-account*.json`, but
      double-check before pushing.
-   - `SYNC_TIMEZONE` — the timezone "current calendar month" should be
+   - `SYNC_TIMEZONE` — the timezone the timelogs window's calendar months should be
      computed in (e.g. `America/New_York`). Defaults to UTC if unset —
      **pick the right one for your team before scheduling**, since it
      determines exactly when the timelogs window rolls over at month end.
@@ -335,10 +341,10 @@ window of individual weeks, current-week projection included.
 
 ## Backfilling history
 
-The normal run only ever touches "this calendar month" for timelogs (see
-**What it does** above), so it won't populate past months on its own. To
-load history — e.g. the last several months before this script started
-running — use `--backfill-months`:
+The normal run only covers a rolling two-month window (see **What it does**
+above), so it won't populate anything older on its own. To load history —
+e.g. the months before this script started running, or to repair a month
+that has since aged out of the rolling window — use `--backfill-months`:
 
 ```
 python sync.py --backfill-months 2026-01,2026-02,2026-03
@@ -379,7 +385,7 @@ twice daily. Cron: `15 11,16 * * *` — **11:15 and 16:15 UTC**.
 - **The `:15` offset is deliberate** — see "Known gaps" for the measured
   delay data behind it.
 - `SYNC_TIMEZONE` (`America/New_York`, a workflow env var) controls what
-  "current calendar month" means for the timelogs window. It is
+  the calendar months of the timelogs window mean. It is
   independent of the cron's UTC timing — the two are not linked
   automatically.
 - `timeout-minutes: 60` bounds the job. A hung run would otherwise hold the
@@ -401,30 +407,42 @@ the attached service account directly). Say the word and I'll wire it up.
   12h/12h to 5h/19h; that follows from the requested times, not from the
   fix. **This does not take effect until the branch is merged** — GitHub
   only fires `schedule:` from the default branch.
-- **The last ~12 hours of every month are never ingested, and retroactive
-  entries to a closed month never arrive at all.** Not a cron bug —
-  a consequence of the current-month-only replace window meeting any
-  twice-daily schedule, and unchanged by the cron correction above:
-
-  | | last run still covering September | next run (already October) | unsynced tail |
-  |---|---|---|---|
-  | old 04:15/16:15 UTC | Sep 30, 12:15 ET | Oct 1, 00:15 ET | 11h 45m |
-  | new 11:15/16:15 UTC | Sep 30, 12:15 ET | Oct 1, 07:15 ET | 11h 45m |
-
-  Once the calendar month rolls over in `SYNC_TIMEZONE`, `run_full_sync()`
-  only ever asks for the *new* month, so the previous month is frozen
-  exactly as it stood at its final run. Two consequences:
-  1. Time logged on the last day of the month after ~12:15 ET is never
-     picked up.
-  2. **More significant**: any timelog entered or edited *retroactively*
-     against a closed month — routine in timekeeping, where people write
-     up last week on Monday — is never ingested either. Those rows are
-     invisible in BigQuery until someone runs `--backfill-months` by hand.
-
-  No schedule change fixes this; the window has to widen. The cheap fix is
-  a rolling two-month window on the normal run (replace both the previous
-  and current month), which roughly doubles only the timelogs pull and
-  closes both cases. Not implemented — flagged for a decision.
+- **Retroactive timelogs against a closed month were never ingested
+  (fixed 2026-09-04).** The normal run replaced only the *current*
+  calendar month, so the moment the month rolled over in `SYNC_TIMEZONE`,
+  the previous month froze exactly as it stood at its final run. Two
+  things were lost, permanently, until someone ran `--backfill-months` by
+  hand:
+  1. Time logged on the last day of a month after that day's last sync —
+     ~11h45m under either the old 04:15/16:15 UTC schedule or the
+     corrected 11:15/16:15 UTC one (the last run covering September was
+     Sep 30 12:15 ET in both cases; the next run was already October).
+  2. **The bigger one**: any entry made or edited *retroactively* against
+     a closed month. That is routine in timekeeping — writing up last week
+     on a Monday, recoding a mistyped entry days later — and none of it
+     ever reached BigQuery.
+  - **Fix**: the normal run now replaces a rolling window of the current
+    month plus `TIMELOG_SYNC_MONTHS_BACK` (default `1`) previous months,
+    via `sync.timelog_window()`. On 2026-10-01 the window is
+    `[2026-09-01, 2026-11-01)`, so all of September is re-pulled for the
+    whole of October. `bigquery_sync.replace_current_month_timelogs()` was
+    renamed `replace_timelogs_window()` to match — it was never
+    month-specific, only ever called with one.
+  - **Residual gap, by design**: a retroactive edit made more than
+    `TIMELOG_SYNC_MONTHS_BACK` months after the fact still falls outside
+    the window. Raise the constant to widen the margin; the cost is one
+    extra paginated Teamwork range per month per run, and the rewrite
+    stays a single atomic transaction regardless. If prior-period
+    adjustments here routinely run months late, `2` or `3` is a
+    reasonable setting.
+  - **Not addressed by this**: `log_date` is the date portion of
+    Teamwork's UTC `timeLogged` while the API filters by its own date
+    interpretation, so a row at a window edge can still be inserted
+    without being deleted, duplicating on each run. Widening the window
+    shrinks the exposure (a row drifting across the old month boundary now
+    lands *inside* the window and is replaced correctly) but does not
+    remove it at the outer edges. Check with:
+    `SELECT COUNT(*), COUNT(DISTINCT timelog_id) FROM timelogs;`
 - **`CURRENT_DATE()` was UTC in the user-hours views (fixed 2026-09-04).**
   `v_user_weekly_billable_hours`'s `bounds` CTE decided "has this weekday
   elapsed yet?" from `CURRENT_DATE()`, which takes no timezone argument in
@@ -741,7 +759,7 @@ the attached service account directly). Say the word and I'll wire it up.
 - `schemas.py` — BigQuery table schemas
 - `transform.py` — raw Teamwork JSON → BigQuery row mapping
 - `bigquery_sync.py` — dataset/table creation, truncate+load, the
-  transactional current-month replace for timelogs
+  transactional windowed replace for timelogs
 - `views.py` — the six exception/QC reporting views plus `v_usermins`,
   `v_user_daily_billable_hours_base`, and `v_user_weekly_billable_hours`
   (see "Exception reporting views" above)

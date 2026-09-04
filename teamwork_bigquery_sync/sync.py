@@ -4,7 +4,9 @@ syncs them into BigQuery. Meant to be triggered by an external scheduler
 (cron, GitHub Actions, or Cloud Scheduler + Cloud Run) — see README.md.
 
 Usage:
-    python sync.py             # full sync (projects, tasks, users, current-month timelogs)
+    python sync.py             # full sync (projects, tasks, users, and a rolling
+                               # two-month timelogs window: the current calendar
+                               # month plus TIMELOG_SYNC_MONTHS_BACK before it)
     python sync.py --dry-run   # connectivity + payload-shape check only,
                                 # does not touch BigQuery or write anything
     python sync.py --backfill-months 2026-01,2026-02,2026-03
@@ -153,12 +155,55 @@ def month_bounds(year, month):
     return month_start, month_end_exclusive
 
 
-def month_window(tz_name):
-    """Returns (month_start, month_end_exclusive) for "this calendar month"
-    in the given timezone.
+# How many completed calendar months before the current one the normal sync
+# re-pulls and replaces, on top of the current month.
+#
+# 1 means a rolling TWO-month window (previous month + current month).
+#
+# Why this isn't 0: the timelogs replace only ever touches the window it is
+# given, so with a current-month-only window the previous month froze the
+# instant the calendar rolled over in SYNC_TIMEZONE. Two things were lost:
+# time logged on the last day of a month after that day's final run, and —
+# far more commonly — any entry made or edited RETROACTIVELY against a
+# closed month, which is routine in timekeeping (writing up last week on
+# Monday, recoding a mistyped entry days later). Neither was ever ingested;
+# both needed a manual --backfill-months to appear.
+#
+# Residual gap: a retroactive edit made more than `months_back` months
+# after the fact still falls outside the window. Raising this constant
+# widens the safety margin at the cost of re-pulling and rewriting that
+# many extra months of timelogs on every run — the pull is one extra
+# paginated range per month, and the rewrite stays a single atomic
+# transaction regardless.
+TIMELOG_SYNC_MONTHS_BACK = 1
+
+
+def _shift_month(year, month, delta):
+    """(year, month) shifted by `delta` months, handling year boundaries."""
+    index = year * 12 + (month - 1) + delta
+    return index // 12, index % 12 + 1
+
+
+def _months_in_window(window_start, window_end_exclusive):
+    """The YYYY-MM labels a window spans, for RUN_SUMMARY visibility."""
+    labels = []
+    year, month = window_start.year, window_start.month
+    while (year, month) < (window_end_exclusive.year, window_end_exclusive.month):
+        labels.append(f"{year:04d}-{month:02d}")
+        year, month = _shift_month(year, month, 1)
+    return labels
+
+
+def timelog_window(tz_name, months_back=TIMELOG_SYNC_MONTHS_BACK):
+    """Returns (window_start, window_end_exclusive) covering the current
+    calendar month plus the `months_back` months before it, in the given
+    timezone. months_back=0 reproduces the old current-month-only window.
     """
     now = datetime.now(ZoneInfo(tz_name))
-    return month_bounds(now.year, now.month)
+    start_year, start_month = _shift_month(now.year, now.month, -months_back)
+    window_start, _ = month_bounds(start_year, start_month)
+    _, window_end_exclusive = month_bounds(now.year, now.month)
+    return window_start, window_end_exclusive
 
 
 def parse_backfill_months(raw_value):
@@ -736,15 +781,16 @@ def sync_users(tw_client, bq_client, dataset_ref):
     }
 
 
-def sync_timelogs_for_month(tw_client, bq_client, gcp_project_id, dataset_id, month_start, month_end_exclusive):
-    """Deletes+reinserts the timelogs rows for exactly [month_start,
-    month_end_exclusive). Used both for "this calendar month" (the normal
-    run) and for backfilling an arbitrary past month.
+def sync_timelogs_for_window(tw_client, bq_client, gcp_project_id, dataset_id, window_start, window_end_exclusive):
+    """Deletes+reinserts the timelogs rows for exactly [window_start,
+    window_end_exclusive). Used both for the normal run's rolling
+    multi-month window (see timelog_window) and for backfilling a single
+    past month.
     """
-    last_day_inclusive = month_end_exclusive - timedelta(days=1)
+    last_day_inclusive = window_end_exclusive - timedelta(days=1)
 
     raw_timelogs = tw_client.list_timelogs(
-        month_start.isoformat(), last_day_inclusive.isoformat()
+        window_start.isoformat(), last_day_inclusive.isoformat()
     )
     rows = []
     for raw in raw_timelogs:
@@ -752,19 +798,20 @@ def sync_timelogs_for_month(tw_client, bq_client, gcp_project_id, dataset_id, mo
         if row is not None:
             rows.append(row)
 
-    written = bigquery_sync.replace_current_month_timelogs(
+    written = bigquery_sync.replace_timelogs_window(
         bq_client,
         gcp_project_id,
         dataset_id,
         rows,
-        month_start,
-        month_end_exclusive,
+        window_start,
+        window_end_exclusive,
     )
     return {
         "status": "success",
         "rows_pulled": len(raw_timelogs),
         "rows_written": written,
-        "window": [month_start.isoformat(), month_end_exclusive.isoformat()],
+        "window": [window_start.isoformat(), window_end_exclusive.isoformat()],
+        "months_covered": _months_in_window(window_start, window_end_exclusive),
     }
 
 
@@ -801,10 +848,16 @@ def run_full_sync(cfg):
         stages["users"] = {"status": "failed", "error": traceback.format_exc()}
 
     try:
-        month_start, month_end_exclusive = month_window(cfg.sync_timezone)
-        stages["timelogs"] = sync_timelogs_for_month(
+        window_start, window_end_exclusive = timelog_window(cfg.sync_timezone)
+        logger.info(
+            "Timelogs window: [%s, %s) — current month plus %d previous",
+            window_start,
+            window_end_exclusive,
+            TIMELOG_SYNC_MONTHS_BACK,
+        )
+        stages["timelogs"] = sync_timelogs_for_window(
             tw_client, bq_client, cfg.gcp_project_id, cfg.bq_dataset,
-            month_start, month_end_exclusive,
+            window_start, window_end_exclusive,
         )
     except Exception:
         logger.error("Timelogs sync failed:\n%s", traceback.format_exc())
@@ -872,7 +925,7 @@ def run_backfill(cfg, months):
         month_start, month_end_exclusive = month_bounds(year, month)
         print(f"Backfilling timelogs for {label} ({month_start} to {month_end_exclusive}, exclusive)...")
         try:
-            stages[label] = sync_timelogs_for_month(
+            stages[label] = sync_timelogs_for_window(
                 tw_client, bq_client, cfg.gcp_project_id, cfg.bq_dataset,
                 month_start, month_end_exclusive,
             )
