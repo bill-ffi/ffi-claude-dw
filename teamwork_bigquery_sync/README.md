@@ -359,13 +359,31 @@ python sync.py --backfill-months 2026-01,2026-02,2026-03
 ## Scheduling
 
 Built as a **GitHub Actions scheduled workflow** (`.github/workflows/teamwork-bigquery-sync.yml`),
-twice daily. Current cron: `15 4,16 * * *` (04:15 and 16:15 UTC — see "Known
-gaps" below for why it's deliberately not on the hour, and for documented
-evidence that GitHub's scheduler has been delaying these firings by
-anywhere from minutes to several hours). `SYNC_TIMEZONE` (`America/New_York`,
-set as a workflow env var) controls what "current calendar month" means for
-the timelogs window — it's independent of the cron's UTC timing, the two
-aren't linked automatically.
+twice daily. Cron: `15 11,16 * * *` — **11:15 and 16:15 UTC**.
+
+| Fires (UTC) | US Eastern (EDT, ~Mar-Nov) | US Eastern (EST) |
+|---|---|---|
+| 11:15 | 07:15 | 06:15 |
+| 16:15 | 12:15 | 11:15 |
+
+- **Spacing is deliberately uneven**: 5 hours between the two runs, then 19
+  hours to the next morning. Activity logged after ~12:15 ET isn't in
+  BigQuery until the next morning. (The schedule was 04:15/16:15 UTC — an
+  even 12h/12h — until 2026-09-04; corrected to the intended
+  11:15/16:15 UTC.)
+- **Cron is UTC and DST-unaware.** The UTC times are fixed; the Eastern
+  clock times shift an hour twice a year. The requirement was specified in
+  UTC, so UTC is the contract.
+- **`schedule:` only fires from the default branch.** A cron edit on a
+  feature branch does nothing until merged.
+- **The `:15` offset is deliberate** — see "Known gaps" for the measured
+  delay data behind it.
+- `SYNC_TIMEZONE` (`America/New_York`, a workflow env var) controls what
+  "current calendar month" means for the timelogs window. It is
+  independent of the cron's UTC timing — the two are not linked
+  automatically.
+- `timeout-minutes: 60` bounds the job. A hung run would otherwise hold the
+  `concurrency` group and silently stall every later scheduled sync.
 
 If GitHub Actions' scheduling reliability continues to be a problem after
 the on-the-hour fix, **Cloud Scheduler + Cloud Run** is the documented
@@ -375,6 +393,38 @@ the attached service account directly). Say the word and I'll wire it up.
 
 ## Known gaps / things to verify before relying on this
 
+- **Cron fired 7 hours early (fixed 2026-09-04).** The workflow ran
+  `15 4,16 * * *` — 04:15 and 16:15 UTC — but the intended schedule was
+  **11:15 and 16:15 UTC**. The 16:15 slot was always right; the first slot
+  was 7 hours early, landing at 00:15 ET in summer instead of 07:15 ET.
+  Now `15 11,16 * * *`. Note this also changed the spacing from an even
+  12h/12h to 5h/19h; that follows from the requested times, not from the
+  fix. **This does not take effect until the branch is merged** — GitHub
+  only fires `schedule:` from the default branch.
+- **The last ~12 hours of every month are never ingested, and retroactive
+  entries to a closed month never arrive at all.** Not a cron bug —
+  a consequence of the current-month-only replace window meeting any
+  twice-daily schedule, and unchanged by the cron correction above:
+
+  | | last run still covering September | next run (already October) | unsynced tail |
+  |---|---|---|---|
+  | old 04:15/16:15 UTC | Sep 30, 12:15 ET | Oct 1, 00:15 ET | 11h 45m |
+  | new 11:15/16:15 UTC | Sep 30, 12:15 ET | Oct 1, 07:15 ET | 11h 45m |
+
+  Once the calendar month rolls over in `SYNC_TIMEZONE`, `run_full_sync()`
+  only ever asks for the *new* month, so the previous month is frozen
+  exactly as it stood at its final run. Two consequences:
+  1. Time logged on the last day of the month after ~12:15 ET is never
+     picked up.
+  2. **More significant**: any timelog entered or edited *retroactively*
+     against a closed month — routine in timekeeping, where people write
+     up last week on Monday — is never ingested either. Those rows are
+     invisible in BigQuery until someone runs `--backfill-months` by hand.
+
+  No schedule change fixes this; the window has to widen. The cheap fix is
+  a rolling two-month window on the normal run (replace both the previous
+  and current month), which roughly doubles only the timelogs pull and
+  closes both cases. Not implemented — flagged for a decision.
 - **`CURRENT_DATE()` was UTC in the user-hours views (fixed 2026-09-04).**
   `v_user_weekly_billable_hours`'s `bounds` CTE decided "has this weekday
   elapsed yet?" from `CURRENT_DATE()`, which takes no timezone argument in

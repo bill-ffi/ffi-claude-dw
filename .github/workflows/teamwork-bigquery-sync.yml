@@ -1,29 +1,38 @@
 name: Teamwork -> BigQuery sync
 
-# Runs the Teamwork -> BigQuery sync script automatically, twice a day.
+# Runs the Teamwork -> BigQuery sync script automatically, twice a day at
+# 11:15 and 16:15 UTC.
 #
-# Schedule below is 04:15 and 16:15 UTC — deliberately NOT on the hour.
-# GitHub's own docs warn that scheduled workflows are most likely to be
-# delayed when set to fire exactly at :00, since that's the most congested
-# slot across all of GitHub Actions. Confirmed on this repo: 9 consecutive
-# scheduled firings at the old 0 5,17 * * * schedule showed delays ranging
-# from 10 minutes to over 8 hours, with gaps between fires as uneven as
-# ~8-18 hours instead of a steady ~12 (see teamwork_bigquery_sync/README.md
-# "Known gaps" for the documented run-by-run data). This offset won't
-# necessarily eliminate multi-hour delays entirely, but avoiding :00 is a
-# cheap, documented first mitigation; escalate to a more reliable
-# scheduler (e.g. Cloud Scheduler + Cloud Run) if delays are still
-# unacceptable after this change.
+#   11:15 UTC = 07:15 US Eastern Daylight Time / 06:15 Eastern Standard Time
+#   16:15 UTC = 12:15 EDT / 11:15 EST
 #
-# 04:15/16:15 UTC is 12:15am / 12:15pm US Eastern Daylight Time (in effect
-# roughly mid-March to early November — GitHub Actions cron does not know
-# about daylight saving, so this drifts to 11:15pm-previous-day / 11:15am
-# Eastern Standard Time for the rest of the year). If exact clock-hour
-# timing matters year-round, ask to add DST-aware gating — for now this
-# keeps things simple.
+# GitHub Actions cron is always UTC and has no DST awareness, so the UTC
+# times above are fixed and the Eastern clock times shift by an hour twice
+# a year. The times were specified in UTC, so that is treated as the
+# contract; ask for DST-aware gating if the Eastern times are what must
+# stay fixed.
+#
+# NOTE ON SPACING: these two slots are 5 hours apart, then 19 hours to the
+# next day's first run — deliberately front-loaded onto the US business
+# morning rather than evenly spaced. (The previous 04:15/16:15 schedule was
+# an even 12h/12h.) That means Teamwork activity logged after ~12:15 ET is
+# not reflected in BigQuery until the following morning.
+#
+# The :15 offset is deliberate — GitHub's docs warn that scheduled
+# workflows are most likely to be delayed when set to fire exactly at :00,
+# the most congested slot across all of Actions. Confirmed on this repo: 9
+# consecutive firings at the original 0 5,17 * * * schedule showed delays
+# from 10 minutes to over 8 hours (see teamwork_bigquery_sync/README.md
+# "Known gaps" for the run-by-run data). Moving off :00 is a cheap first
+# mitigation, not a guarantee; escalate to Cloud Scheduler + Cloud Run if
+# multi-hour delays persist.
+#
+# REMINDER: `schedule:` only ever fires from the repository's DEFAULT
+# branch. Editing the cron on a feature branch changes nothing until that
+# branch is merged.
 on:
   schedule:
-    - cron: '15 4,16 * * *'
+    - cron: '15 11,16 * * *'
   # Lets you trigger a run manually from the "Actions" tab in GitHub,
   # instead of waiting for the schedule — useful for testing.
   workflow_dispatch:
@@ -57,6 +66,10 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    # A hung run would hold the concurrency group above and silently stall
+    # every subsequent scheduled sync until someone noticed. A normal full
+    # sync takes ~2 minutes.
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: teamwork_bigquery_sync
