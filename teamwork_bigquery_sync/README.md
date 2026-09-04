@@ -20,7 +20,8 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
   whenever a project has been archived.)
 - Tasks scope: **all** tasks (open or completed, in any tasklist whether
   active or completed) belonging to an **active** project (`status` in
-  `ACTIVE_PROJECT_STATUSES`, set in `sync.py` — currently just `active`),
+  `ACTIVE_PROJECT_STATUSES`, set in `sync.py` — currently just `active`;
+  on this account that gate is a no-op, see "Known gaps"),
   OR any project archived on or after `ARCHIVED_PROJECT_TASKS_CUTOFF`
   (currently `2026-01-01`, also in `sync.py`), whatever that project's
   status. Everything else — projects archived before the cutoff, and
@@ -374,54 +375,55 @@ the attached service account directly). Say the word and I'll wire it up.
 
 ## Known gaps / things to verify before relying on this
 
-- **Task scope was too broad — no `status` filter (fixed 2026-09-04).**
-  The requirement is "all tasks for all *active* projects, plus any
-  project archived on or after 2026-01-01". The scope filter in
-  `sync_projects()` only ever tested `archived_at`:
+- **Task scope — measured and confirmed correct (2026-09-04).** A review
+  round suspected the scope filter was over-pulling, on the theory that
+  `sync_projects()` only ever tested `archived_at` and never `status`, so
+  dormant-but-unarchived projects were sneaking in. **That theory was
+  wrong**, and `--explain-task-scope` disproved it against the live API.
+  The real numbers, for anyone re-deriving an expected row count later:
 
-  ```python
-  if not row["archived_at"] or row["archived_at"] >= ARCHIVED_PROJECT_TASKS_CUTOFF
-  ```
+  | projects | status | archive bucket | tasks |
+  |---:|---|---|---:|
+  | 218 | `active` | never archived | 13,930 |
+  | 605 | `inactive` | archived >= 2026-01-01 | 23,296 |
+  | 1,066 | `inactive` | archived < 2026-01-01 | *excluded* |
+  | **823** | | **in scope** | **37,226** |
+  | 1,889 | | every non-deleted project | 55,386 |
 
-  so *every* never-archived project was in scope no matter its status.
-  On this account `status` is only ever `active`/`inactive` (see the
-  correction below), and the account carries large dormant categories
-  (Books alone is 1,056 projects, Tax/Compliance 253) — all of which were
-  contributing their full task history. "All non-archived projects" is
-  not "all active projects", and the gap between them is most of the
-  excess. Scope selection now lives in `sync.py`'s
-  `select_task_pull_projects()`, gated on `ACTIVE_PROJECT_STATUSES`
-  (`{"active"}`); set it to `{"active", "inactive"}` to restore the old
-  behaviour.
-  - **Second defect in the same expression**: `archived_at` was compared
-    as a raw API *string*. That happens to work for a normal ISO
-    timestamp, but Teamwork's v3 API is Go-based, and Go serialises an
-    unset timestamp as the zero time `"0001-01-01T00:00:00Z"` rather than
-    null. That sentinel is truthy *and* sorts below `"2026-01-01"`, so any
-    project carrying it was read as "archived in the year 1" and dropped
-    from the tasks pull — the exact inverse of the intent.
-    `transform.parse_archived_at()` now parses to a real `date` and
-    treats anything before 1900, or anything unparseable, as "never
-    archived", logging a warning either way.
-  - **Why this was hard to see**: `RUN_SUMMARY` reported only
-    `rows_pulled` / `rows_written` for tasks. It now carries
-    `task_pull_project_scope` (every project classified into an in-scope
-    or excluded bucket, with a status breakdown of the exclusions) and
-    `rows_dropped` (tasks dropped as deleted / no project id /
-    out-of-scope / duplicate), so a wrong row count explains itself.
-  - **Duplicate protection**: tasks are now collapsed by `task_id` before
-    load. Nothing enforces uniqueness in BigQuery, and if `projectIds=`
-    were ever silently ignored (exactly how the `page[size]` bug behaved)
-    every batch would return the whole site and each in-scope task would
-    be written once per batch. A task coming back for a project that
-    wasn't requested is now logged as an error, since that is the tell
-    that the parameter has stopped working.
-  - **Verify before trusting a sync**: `python sync.py
-    --explain-task-scope` pulls projects only, prints a status x
-    archive-bucket crosstab, and reports the exact task count for four
-    candidate scope definitions using `meta.page.count` at `pageSize=1`
-    — no task rows fetched, nothing written. It also flags the case where
-    the narrowest scope returns the same count as no filter at all.
+  - **`status` and `archived_at` are perfectly collinear on this account**:
+    `active` always means never-archived, `inactive` always means archived.
+    There is no inactive-but-unarchived project, so "all active projects"
+    and "all non-archived projects" select the identical 823 projects and
+    the identical 37,226 tasks. `ACTIVE_PROJECT_STATUSES` (added by that
+    review round) is therefore a **no-op on current data** — kept because
+    it states the requirement literally, and because any future divergence
+    now shows up under `excluded_not_active` in `RUN_SUMMARY` instead of
+    silently changing the row count.
+  - **The expected tasks row count is ~37,226, not ~23,000.** 23,296 is
+    the *archived-only* half of the scope — what you get from
+    `... JOIN projects p ... WHERE p.archived_at >= '2026-01-01'`. That
+    query deliberately omits the 218 active projects and the 13,930 tasks
+    they carry, so it is not a check on the table's total size. Confirmed
+    with the repo owner 2026-09-04: 37,226 is the correct target.
+  - **Two other hypotheses from the same review, both disproved live**:
+    `archivedAt` carries no Go zero-time sentinel on this account (0 of
+    1,889 projects were unparseable or pre-1900), and `projectIds=` *is*
+    being honoured (the narrowest scope returns 13,930 against a site-wide
+    55,386, so batches are genuinely scoped rather than silently returning
+    everything).
+  - **What was kept from that round anyway**, since none of it depends on
+    the disproved theory: `transform.parse_archived_at()` (parses to a real
+    `date` rather than lexicographically comparing a raw API string),
+    `transform.task_project_id()` (the projectId fallback chain, so scope
+    no longer rests on one nested key whose absence would drop every task),
+    dedupe by `task_id` before load, a refusal to write an empty scope over
+    a populated table, an error log when a task returns for a project that
+    wasn't requested, and `task_pull_project_scope` / `rows_dropped` in
+    `RUN_SUMMARY` so a surprising row count explains itself next time.
+  - **Re-check the numbers any time** with `python sync.py
+    --explain-task-scope` (or the "Explain task scope only" checkbox in the
+    Actions workflow). It reads only — no BigQuery writes, no task rows
+    fetched, counts come from `meta.page.count` at `pageSize=1`.
 - **Tasks in a COMPLETED tasklist (fixed 2026-09-03).** Tasks belonging to a
   completed tasklist used to be silently excluded from the tasks pull, even
   within an active, non-archived project. Found via task 49325131 ("Record

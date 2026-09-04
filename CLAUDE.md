@@ -32,7 +32,9 @@ There is no automated test suite (no pytest, no test directory). Verification is
 
 ### Two independent subsystems sharing one dataset
 
-Task scope is decided in one place — `sync.py`'s `select_task_pull_projects()`, driven by `ACTIVE_PROJECT_STATUSES` and `ARCHIVED_PROJECT_TASKS_CUTOFF`. Change the rule via those constants, never by editing the filter inline, and confirm the resulting row count with `--explain-task-scope` before running a real sync. `archived_at` must go through `transform.parse_archived_at()` rather than being string-compared — see README "Known gaps" for why.
+Task scope is decided in one place — `sync.py`'s `select_task_pull_projects()`, driven by `ACTIVE_PROJECT_STATUSES` and `ARCHIVED_PROJECT_TASKS_CUTOFF`. Change the rule via those constants, never by editing the filter inline, and confirm the resulting row count with `--explain-task-scope` before running a real sync. `archived_at` must go through `transform.parse_archived_at()` rather than being string-compared.
+
+Measured 2026-09-04: the expected `tasks` row count is **~37,226** (823 in-scope projects), made up of 13,930 tasks from 218 active projects plus 23,296 from 605 projects archived on/after the cutoff. `status` and `archived_at` are perfectly collinear on this account (`active` ⟺ never archived), so `ACTIVE_PROJECT_STATUSES` currently changes nothing. Note that `WHERE p.archived_at >= '2026-01-01'` measures only the archived half (23,296) and is *not* a check on the table's total size — see README "Known gaps" before concluding the scope is wrong.
 
 1. **Ingestion pipeline** (`config.py` → `teamwork_client.py` → `transform.py` → `bigquery_sync.py`, orchestrated by `sync.py`): pulls from the Teamwork REST API v3 and writes to four native tables (`projects`, `tasks`, `users`, `timelogs`). `projects`/`tasks`/`users` are full truncate-and-reload every run; `timelogs` only deletes+reinserts the *current calendar month* (via a staging-table + multi-statement transaction in `bigquery_sync.replace_current_month_timelogs`), leaving prior months untouched. This is the twice-daily scheduled workflow.
 
