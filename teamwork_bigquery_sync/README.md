@@ -365,29 +365,28 @@ python sync.py --backfill-months 2026-01,2026-02,2026-03
 ## Scheduling
 
 Built as a **GitHub Actions scheduled workflow** (`.github/workflows/teamwork-bigquery-sync.yml`),
-twice daily. Cron: `15 11,16 * * *` — **11:15 and 16:15 UTC**.
+twice daily at **midnight and noon US Eastern Daylight Time**.
+Cron: `15 4,16 * * *` — 04:15 and 16:15 UTC.
 
-| Fires (UTC) | US Eastern (EDT, ~Mar-Nov) | US Eastern (EST) |
+| Fires (UTC) | Eastern (EDT, ~Mar-Nov) | Eastern (EST) |
 |---|---|---|
-| 11:15 | 07:15 | 06:15 |
+| 04:15 | 00:15 | 23:15 *(previous day)* |
 | 16:15 | 12:15 | 11:15 |
 
-- **Spacing is deliberately uneven**: 5 hours between the two runs, then 19
-  hours to the next morning. Activity logged after ~12:15 ET isn't in
-  BigQuery until the next morning. (The schedule was 04:15/16:15 UTC — an
-  even 12h/12h — until 2026-09-04; corrected to the intended
-  11:15/16:15 UTC.)
-- **Cron is UTC and DST-unaware.** The UTC times are fixed; the Eastern
-  clock times shift an hour twice a year. The requirement was specified in
-  UTC, so UTC is the contract.
-- **`schedule:` only fires from the default branch.** A cron edit on a
-  feature branch does nothing until merged.
+- **Evenly spaced**, 12 hours apart.
+- **Cron is UTC and DST-unaware**, so the Eastern clock times shift by an
+  hour once the clocks change. That drift is **accepted deliberately** —
+  holding midnight/noon Eastern year-round would mean firing at all four
+  candidate UTC hours and having the job no-op unless the local hour
+  matched, which is more machinery than an hour of drift on a reporting
+  refresh justifies. Say the word if it ever does matter.
+- **`schedule:` only fires from the default branch (`main`).** A cron edit
+  on a feature branch does nothing until merged.
 - **The `:15` offset is deliberate** — see "Known gaps" for the measured
   delay data behind it.
-- `SYNC_TIMEZONE` (`America/New_York`, a workflow env var) controls what
-  the calendar months of the timelogs window mean. It is
-  independent of the cron's UTC timing — the two are not linked
-  automatically.
+- `SYNC_TIMEZONE` (`America/New_York`, a workflow env var) controls the
+  calendar months of the timelogs window. It is independent of the cron's
+  UTC timing — the two are not linked automatically.
 - `timeout-minutes: 60` bounds the job. A hung run would otherwise hold the
   `concurrency` group and silently stall every later scheduled sync.
 
@@ -399,78 +398,22 @@ the attached service account directly). Say the word and I'll wire it up.
 
 ## Known gaps / things to verify before relying on this
 
-- **Cron fired 7 hours early (fixed 2026-09-04).** The workflow ran
-  `15 4,16 * * *` — 04:15 and 16:15 UTC — but the intended schedule was
-  **11:15 and 16:15 UTC**. The 16:15 slot was always right; the first slot
-  was 7 hours early, landing at 00:15 ET in summer instead of 07:15 ET.
-  Now `15 11,16 * * *`. Note this also changed the spacing from an even
-  12h/12h to 5h/19h; that follows from the requested times, not from the
-  fix. **This does not take effect until the branch is merged** — GitHub
-  only fires `schedule:` from the default branch.
-- **A failed scheduled run was silent (fixed 2026-09-04).** Nobody watches a
-  cron run. A failure produced GitHub's default email to the workflow author
-  and nothing else — easy to miss, and going to one person. Since the sync
-  now *refuses* to write bad data rather than writing it, "loud" only helps
-  if somebody hears it.
-  - The workflow now opens a GitHub issue labelled `sync-failure` when a
-    **scheduled** run fails, and closes it when a scheduled run next
-    succeeds. Repeated failures comment on the open issue rather than
-    opening a new one every 12 hours.
-  - Manual `workflow_dispatch` runs are deliberately excluded — somebody
-    clicked the button and is watching the result; an issue would be noise.
-  - Needs `issues: write`, which is why the workflow's `permissions:` block
-    is no longer `contents: read` alone. No new secrets: it uses the
-    built-in `github.token`.
-- **Retries only covered four status codes and no transport failures (fixed
-  2026-09-04).** `_get()` retried 429/502/503/504 and nothing else, so a
-  single dropped connection, read timeout, or body cut off mid-transfer —
-  across the thousands of requests one run makes — killed the whole stage.
-  - **Now retried**: `ConnectionError`, `Timeout`, `ChunkedEncodingError`,
-    `ContentDecodingError`, and a JSON decode failure (a truncated body
-    looks like `ValueError`, not an HTTP error). Plus HTTP 500 alongside the
-    gateway family — this API has returned transient 500s, and a genuine
-    server bug still surfaces after `MAX_RETRIES`.
-  - **Still never retried**: 400, 401, 403, 404 and friends. No number of
-    retries fixes a bad request, so those raise on the first response.
-  - **Backoff** is now exponential (2s, 4s, 8s) rather than linear, honours
-    a `Retry-After` header when the API sends one, and caps any single wait
-    at `MAX_RETRY_SLEEP_SECONDS` (120) so one absurd `Retry-After` can't
-    park the job. The old code also slept after its *final* attempt before
-    giving up; it no longer does.
-  - **Timeouts** are now `(connect, read) = (10, 60)`. There was no connect
-    timeout at all, so a black-holed TCP connect could hang a stage until
-    the workflow's `timeout-minutes` killed it.
-- **A full-replace table could be silently emptied by a bad pull (fixed
-  2026-09-04).** `projects`, `tasks` and `users` are truncate-and-reload, so
-  `truncate_and_load()` wrote whatever the pull returned. If Teamwork
-  returned `200` with zero items — an API blip, not a real result — the
-  table was emptied (a `logger.warning`, nothing more), every view built on
-  it went blank, and the stage still reported `"status": "success"` so the
-  run exited 0 and the workflow went green. `WRITE_TRUNCATE` leaves no
-  prior version to fall back to. Worse, an empty `projects` pull cascaded:
-  the task scope came out empty, so `tasks` was emptied in the same run.
-  - **Fix**: `truncate_and_load()` now refuses two cases outright —
-    - **zero rows**, unconditionally (`EmptyLoadRefused`). There is no flag
-      to override this; nothing legitimately empties these tables.
-    - **a shrink past `MIN_REPLACE_ROWS_RATIO`** (0.5 — more than half the
-      rows disappearing), via `SuspiciousShrinkRefused`. The prior count
-      comes from table metadata (`num_rows`), so the check costs no query.
-  - **The escape hatch**: a deliberate scope reduction — moving
-    `ARCHIVED_PROJECT_TASKS_CUTOFF` forward, say — legitimately shrinks a
-    table. Run `python sync.py --allow-shrink`, or tick **"Permit a
-    full-replace table to shrink by more than half"** in the Actions
-    workflow. That flag relaxes the shrink guard only; the zero-row refusal
-    still stands.
-  - **Same hazard on timelogs, handled differently**: an empty pull over a
-    populated window would delete those rows and insert nothing.
-    `replace_timelogs_window()` now refuses that, but *only* when the
-    window currently holds rows — an empty window is legitimate when
-    backfilling a month with no activity, so that case just logs and
-    returns 0.
-  - **Failure is loud, and partial by design**: the refusal raises, so that
-    stage records `"status": "failed"` with the reason and the run exits 1.
-    The table keeps its previous contents. Other stages still run, as they
-    already did.
+- **Cron was changed away from its intended times and back (2026-09-04).**
+  A round of review changed the schedule from `15 4,16 * * *` to
+  `15 11,16 * * *` on the stated requirement "twice per day at 16:15 UTC
+  and 11:15 UTC". That was wrong: the original intent was **midnight and
+  noon EDT**, which *is* `15 4,16 * * *` (00:15 / 12:15 Eastern in summer).
+  The cron in the repo had been correct all along; only the second slot
+  (16:15 UTC = noon EDT) ever matched under the mistaken version. Now
+  reverted.
+  - **The tell was there and was noted but not pressed**: the change turned
+    an even 12h/12h spacing into a lopsided 5h/19h, which was flagged at
+    the time as "worth confirming you want". A twice-daily job going
+    lopsided is a strong signal that the stated times are off — worth
+    treating as a blocker rather than a footnote next time.
+  - **Reading the cron in Eastern terms** is the reliable check, since the
+    requirement is always expressed in local time while the cron is always
+    UTC: `04:15Z = 00:15 EDT`, `16:15Z = 12:15 EDT`.
 - **Retroactive timelogs against a closed month were never ingested
   (fixed 2026-09-04).** The normal run replaced only the *current*
   calendar month, so the moment the month rolled over in `SYNC_TIMEZONE`,
