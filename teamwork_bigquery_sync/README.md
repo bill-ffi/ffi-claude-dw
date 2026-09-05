@@ -850,6 +850,46 @@ the attached service account directly). Say the word and I'll wire it up.
   `"customfieldTasks"` — different from the camelCase used by every other
   endpoint in this repo. A resolution failure for any individual task is
   non-fatal (that row's `activity` just stays `NULL`).
+- **Per-task Activity fallback is unbounded — reviewed 2026-09-05 and
+  deliberately left as is.** If `included.customfieldTasks` is ever absent
+  from *every* page of *every* project batch, `enrich_tasks_with_activity()`
+  falls back to one API call per task. At the current 37,226 tasks and
+  `CUSTOM_FIELD_FETCH_WORKERS = 8`, that is roughly **12-23 minutes** at the
+  ~200ms per-request latency seen in real runs — and potentially far longer
+  if Teamwork rate-limits it, which it has done to this pipeline before at
+  much lower volumes. Enrichment runs *before* the tasks table is written,
+  so a fallback that overruns `timeout-minutes: 60` kills the job by
+  SIGKILL (not catchable, so the `try/except` around enrichment does not
+  help) and leaves tasks, users and timelogs unwritten for that run.
+  - **Why it was left**: `activity` is an explicitly nullable, non-fatal
+    enrichment — a failure just leaves the column NULL and everything else
+    loads. Spending 20+ minutes and risking a whole sync to populate a
+    nullable column is a bad trade, but the blast radius is now bounded by
+    `timeout-minutes: 60` and made visible by the failure-alerting issue,
+    neither of which existed when this was first raised. The trigger has
+    also never actually occurred here.
+  - **What would justify revisiting**, all visible in `RUN_SUMMARY`:
+    `activity.method` reading `per_task_fallback` rather than
+    `bulk_sideload`; `activity.tasks_resolved` dropping materially from the
+    14,944 measured on 2026-09-04; or a sync taking much longer than its
+    usual ~2 minutes.
+  - **The quieter sibling worth watching**: `included` is merged across all
+    batches, so if *some* batches carry `customfieldTasks` and others do
+    not, the key is present, the bulk path is taken, and the result is
+    silently **partial** — no fallback, no warning, just a lower
+    `tasks_resolved`. That number is the only signal, which is why it is
+    listed above.
+  - **The failure this guards against is not primarily an API change.** The
+    strongest precedent is this pipeline's own history: `projects.json`'s
+    `included["projectCategories"]` sideload was confirmed present when
+    sampled through other tooling and confirmed empty on every page of
+    every real production run of this script, with the same params, and the
+    cause was never established (see `teamwork_client.py`). A different
+    sideload key on the same API behaving the same way cannot be ruled out.
+  - **The fix, if it is ever needed**: cap the fallback by task count —
+    above the cap, log an error and leave `activity` NULL rather than
+    spending the run on it. Below it, the fallback still works, which is
+    the small-account case it was actually useful for.
 - **Bulk vs. per-task fetching for Activity.** Originally built as
   ~7,400+ individual API calls (one per task, 8 concurrent) because no bulk
   mechanism appeared documented. Teamwork's own
