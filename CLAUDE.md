@@ -23,7 +23,9 @@ python sync.py --create-views                      # (re)create the BigQuery rep
 python sync.py --explain-task-scope                # print which projects the tasks pull covers + exact task count per candidate scope; reads only, writes nothing
 ```
 
-There is no automated test suite (no pytest, no test directory). Verification is done by:
+An offline pytest suite lives in `teamwork_bigquery_sync/tests/` — 160 tests, no network, no BigQuery, no credentials. Run it with `pip install -r requirements-dev.txt && python -m pytest tests/`; CI runs it on every push via `.github/workflows/tests.yml`. Every case corresponds to a bug this pipeline actually hit, so a failure means a real regression, not a style quibble. Add a test alongside any fix — the suite was verified by re-introducing nine past bugs and confirming each one fails it.
+
+The suite cannot reach anything that needs the live API or a real BigQuery client, so those are still verified by hand:
 - Running `--dry-run` and checking its per-endpoint diagnostics (pagination sanity check, Activity custom-field diagnostic, project-category diagnostic, client/company diagnostic all print `[OK]`/`[FAIL]`).
 - Running a real sync and inspecting the `RUN_SUMMARY` JSON log line at the end for per-table row counts and resolution stats (e.g. `rows_with_category_name`, `clients_resolved`, `activity.method`).
 - When writing ad-hoc verification SQL, avoid BigQuery reserved words as column aliases — `rows` is reserved (the `ROWS BETWEEN` window-frame keyword) and fails unless backticked. Use `total_rows`. Same trap: `range`, `groups`, `hash`, `window`, `partition`.

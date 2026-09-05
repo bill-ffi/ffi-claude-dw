@@ -1,0 +1,4 @@
+# Test-only dependencies. The production install (requirements.txt) stays lean;
+# the sync itself never imports pytest.
+-r requirements.txt
+pytest>=8.0

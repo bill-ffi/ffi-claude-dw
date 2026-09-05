@@ -1,0 +1,38 @@
+name: Tests
+
+# Runs the offline test suite on every push and pull request. Nothing here
+# touches Teamwork or BigQuery: no secrets, no credentials, no network.
+#
+# The point of this workflow is that a test suite nobody runs decays into
+# decoration. Every case in tests/ corresponds to a bug this pipeline
+# actually hit — see teamwork_bigquery_sync/README.md "Known gaps".
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: teamwork_bigquery_sync
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -v

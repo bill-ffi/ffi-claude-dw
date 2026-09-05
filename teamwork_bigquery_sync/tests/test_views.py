@@ -1,0 +1,126 @@
+"""views.py — the generated BigQuery SQL.
+
+There is no local BigQuery emulator, so correctness is checked by rendering
+the SQL and asserting on its text. That is exactly how the UTC CURRENT_DATE()
+bug survived: nothing ever looked at the rendered output.
+"""
+
+import re
+
+import pytest
+
+import views
+
+PROJECT, DATASET = "radiant-rig-284611", "teamwork_data"
+
+
+@pytest.fixture(scope="module")
+def sql():
+    return views.build_view_sql(PROJECT, DATASET)
+
+
+class TestViewInventory:
+    def test_view_names_matches_what_is_actually_rendered(self, sql):
+        # VIEW_NAMES is documented as the authoritative list but nothing in
+        # the code reads it, so it can drift silently.
+        assert set(views.VIEW_NAMES) == set(sql)
+
+    def test_every_view_is_a_create_or_replace(self, sql):
+        for name, body in sql.items():
+            assert body.lstrip().startswith("CREATE OR REPLACE VIEW"), name
+            assert f"`{PROJECT}.{DATASET}.{name}`" in body, name
+
+    def test_dependencies_are_created_before_their_dependents(self, sql):
+        # BigQuery requires a referenced view to exist already, and
+        # create_or_replace_views iterates this dict in order.
+        order = list(sql)
+        assert order.index("v_usermins") < order.index("v_user_weekly_billable_hours")
+        assert order.index("v_user_daily_billable_hours_base") < order.index("v_user_weekly_billable_hours")
+
+    def test_no_unrendered_placeholders_survive(self, sql):
+        for name, body in sql.items():
+            leftover = re.findall(r"\{[A-Za-z_]+\}", body)
+            assert not leftover, f"{name} has unrendered placeholders: {leftover}"
+
+
+class TestReportingTimezone:
+    """CURRENT_DATE() takes no timezone in BigQuery and returns the UTC date,
+    which misclassified every evening after 20:00 ET."""
+
+    def test_no_bare_current_date_anywhere(self, sql):
+        offenders = [n for n, b in sql.items() if re.search(r"CURRENT_DATE\(\s*\)", b)]
+        assert offenders == [], f"bare CURRENT_DATE() in: {offenders}"
+
+    def test_every_current_date_is_timezone_qualified(self, sql):
+        body = sql["v_user_weekly_billable_hours"]
+        zones = re.findall(r"CURRENT_DATE\('([^']+)'\)", body)
+        assert zones and set(zones) == {views.REPORTING_TIMEZONE}
+
+    def test_all_three_bounds_calls_are_qualified(self, sql):
+        body = sql["v_user_weekly_billable_hours"]
+        assert len(re.findall(r"CURRENT_DATE\('[^']+'\)", body)) == 3
+
+    def test_reporting_timezone_is_a_real_iana_name(self):
+        from zoneinfo import ZoneInfo
+        ZoneInfo(views.REPORTING_TIMEZONE)  # raises if bogus
+
+
+class TestRuleConstantsReachTheSql:
+    """The rules are meant to be changed via constants, never by editing the
+    generated SQL by hand."""
+
+    def test_monitored_categories_are_interpolated(self, sql):
+        body = sql["v_exception_missing_activity_with_time"]
+        for category in views.MONITORED_CATEGORIES:
+            assert f"'{category}'" in body
+
+    def test_internal_categories_scope_the_internal_time_rule(self, sql):
+        body = sql["v_exception_billable_time_internal_projects"]
+        for category in views.INTERNAL_CATEGORIES:
+            assert f"'{category}'" in body
+
+    def test_monitored_and_internal_sets_do_not_overlap(self):
+        assert not set(views.MONITORED_CATEGORIES) & set(views.INTERNAL_CATEGORIES)
+
+    def test_long_entry_threshold_is_interpolated(self, sql):
+        assert f"> {views.LONG_ENTRY_THRESHOLD_HOURS}" in sql["v_exception_long_time_entries"]
+
+    def test_estimate_exemption_is_scoped_to_its_category(self, sql):
+        body = sql["v_exception_missing_estimate"]
+        assert f"'{views.ESTIMATE_EXEMPT_CATEGORY}'" in body
+        for tasklist in views.ESTIMATE_EXEMPT_TASKLISTS:
+            assert f"'{tasklist}'" in body
+
+    def test_recurring_rule_is_scoped_to_its_category(self, sql):
+        assert f"'{views.RECURRING_REQUIRED_CATEGORY}'" in sql["v_exception_recurring_compliance"]
+
+    def test_external_sheet_table_is_referenced_by_constant(self, sql):
+        assert views.ANCILLARY_USER_INFO_TABLE in sql["v_usermins"]
+
+
+class TestBusinessWeekShape:
+    def test_week_starts_on_sunday(self, sql):
+        # DATE_TRUNC(..., WEEK) is BigQuery's Sunday-start default. A
+        # WEEK(MONDAY) here would silently reshape every report.
+        body = sql["v_user_daily_billable_hours_base"]
+        assert "DATE_TRUNC(tl.log_date, WEEK)" in body
+        assert "WEEK(MONDAY)" not in body
+
+    def test_only_billable_time_reaches_the_hours_base(self, sql):
+        assert "tl.is_billable = TRUE" in sql["v_user_daily_billable_hours_base"]
+
+    def test_projection_branch_labels_non_actual_values(self, sql):
+        body = sql["v_user_weekly_billable_hours"]
+        for label in ("'actual'", "'minimum'", "'plug'"):
+            assert label in body
+
+    def test_friday_plug_is_clamped_at_zero(self, sql):
+        assert "GREATEST(" in sql["v_user_weekly_billable_hours"]
+
+
+class TestSqlStringArray:
+    def test_renders_a_bigquery_array_literal(self):
+        assert views._sql_string_array(["a", "b"]) == "['a', 'b']"
+
+    def test_escapes_embedded_quotes(self):
+        assert "\\'" in views._sql_string_array(["O'Brien"])

@@ -757,6 +757,39 @@ the attached service account directly). Say the word and I'll wire it up.
   quirk on this specific account can't silently lose the whole feature.
   `--dry-run`'s diagnostic reports which path a real run would take.
 
+## Tests
+
+```
+pip install -r requirements-dev.txt
+python -m pytest tests/
+```
+
+160 tests, ~0.4s, entirely offline — no Teamwork API, no BigQuery, no
+credentials, no network. CI runs them on every push
+(`.github/workflows/tests.yml`).
+
+Every case corresponds to a bug this pipeline actually hit, so the suite
+doubles as an executable version of "Known gaps" below:
+
+| File | Covers |
+|---|---|
+| `test_transform.py` | Row mapping: the Go zero-time `archivedAt` sentinel, the `projectId` fallback chain, `is_billable` present-but-null, cents-to-dollars, budget selection, the Activity custom-field sideload |
+| `test_sync_scope_and_windows.py` | Task scope selection and the rolling timelogs window, including year boundaries and the month-tail gap |
+| `test_teamwork_client.py` | Retry matrix, `Retry-After`, the `page`/`pageSize` params behind the original rate-limiting incident, `projectIds` batching |
+| `test_bigquery_guards.py` | Refusing an empty load or a suspicious shrink; the `--allow-shrink` override |
+| `test_views.py` | Rendered SQL: no bare `CURRENT_DATE()`, rule constants reaching the SQL, view creation order, `VIEW_NAMES` drift |
+
+**The suite was itself verified** by re-introducing nine bugs fixed on
+2026-09-04 — UTC `CURRENT_DATE()`, the missing connect timeout, un-retried
+500s, the `page[size]` pagination bug, the current-month-only window, the
+`archived_at` string comparison, the `is_billable` fallback, the dropped
+`projectId` chain, and the unguarded empty load — and confirming each one
+fails it. A suite that passes against known-broken code is worse than none.
+
+What it deliberately does **not** cover: anything requiring the live
+Teamwork API or a real BigQuery client. Those are still verified by
+`--dry-run`, `--explain-task-scope`, and reading `RUN_SUMMARY`.
+
 ## Files
 
 - `sync.py` — entrypoint (`--dry-run`, `--explain-task-scope`,
