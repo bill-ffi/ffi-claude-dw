@@ -53,6 +53,10 @@ on:
         description: "(Re)create the exception/QC reporting views only — no Teamwork pull, no table data touched"
         type: boolean
         default: false
+      allow_shrink:
+        description: "Permit a full-replace table to shrink by more than half. Only tick this for a DELIBERATE scope reduction — the guard exists to stop a partial Teamwork pull gutting a table"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -107,7 +111,10 @@ jobs:
           CREATE_VIEWS: ${{ inputs.create_views }}
           BACKFILL_MONTHS: ${{ inputs.backfill_months }}
           DRY_RUN: ${{ inputs.dry_run }}
+          ALLOW_SHRINK: ${{ inputs.allow_shrink }}
         run: |
+          SHRINK_FLAG=""
+          if [ "$ALLOW_SHRINK" = "true" ]; then SHRINK_FLAG="--allow-shrink"; fi
           if [ "$EXPLAIN_TASK_SCOPE" = "true" ]; then
             python sync.py --explain-task-scope
           elif [ "$CREATE_VIEWS" = "true" ]; then
@@ -117,5 +124,5 @@ jobs:
           elif [ "$DRY_RUN" = "true" ]; then
             python sync.py --dry-run
           else
-            python sync.py
+            python sync.py $SHRINK_FLAG
           fi

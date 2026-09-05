@@ -520,7 +520,7 @@ def run_explain_task_scope(cfg):
     return 0
 
 
-def sync_projects(tw_client, bq_client, dataset_ref):
+def sync_projects(tw_client, bq_client, dataset_ref, allow_shrink=False):
     raw_projects, included = tw_client.list_projects()
     raw_budgets = tw_client.list_project_budgets()
     raw_categories = tw_client.list_project_categories()
@@ -579,7 +579,8 @@ def sync_projects(tw_client, bq_client, dataset_ref):
     )
 
     written = bigquery_sync.truncate_and_load(
-        bq_client, dataset_ref, schemas.PROJECTS_TABLE, schemas.PROJECTS_SCHEMA, rows
+        bq_client, dataset_ref, schemas.PROJECTS_TABLE, schemas.PROJECTS_SCHEMA, rows,
+        allow_shrink=allow_shrink,
     )
 
     # Tasks are pulled for active projects plus projects archived on or
@@ -684,7 +685,7 @@ def enrich_tasks_with_activity(tw_client, rows, tasks_included):
     return stats
 
 
-def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids):
+def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids, allow_shrink=False):
     if task_pull_project_ids is None:
         logger.warning(
             "Skipping tasks sync: projects sync did not complete successfully "
@@ -755,7 +756,8 @@ def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids):
         activity_stats = {"field_found": False, "error": "enrichment raised an exception, see logs"}
 
     written = bigquery_sync.truncate_and_load(
-        bq_client, dataset_ref, schemas.TASKS_TABLE, schemas.TASKS_SCHEMA, rows
+        bq_client, dataset_ref, schemas.TASKS_TABLE, schemas.TASKS_SCHEMA, rows,
+        allow_shrink=allow_shrink,
     )
     return {
         "status": "success",
@@ -767,12 +769,13 @@ def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids):
     }
 
 
-def sync_users(tw_client, bq_client, dataset_ref):
+def sync_users(tw_client, bq_client, dataset_ref, allow_shrink=False):
     raw_users = tw_client.list_users()
     rows = [transform.normalize_user(raw) for raw in raw_users]
 
     written = bigquery_sync.truncate_and_load(
-        bq_client, dataset_ref, schemas.USERS_TABLE, schemas.USERS_SCHEMA, rows
+        bq_client, dataset_ref, schemas.USERS_TABLE, schemas.USERS_SCHEMA, rows,
+        allow_shrink=allow_shrink,
     )
     return {
         "status": "success",
@@ -815,7 +818,7 @@ def sync_timelogs_for_window(tw_client, bq_client, gcp_project_id, dataset_id, w
     }
 
 
-def run_full_sync(cfg):
+def run_full_sync(cfg, allow_shrink=False):
     tw_client = TeamworkClient(cfg.teamwork_base_url, cfg.teamwork_api_key)
     bq_client = bigquery_sync.get_client(cfg.gcp_project_id)
     dataset_ref = bigquery_sync.ensure_dataset(
@@ -829,20 +832,25 @@ def run_full_sync(cfg):
     task_pull_project_ids = None
     try:
         stages["projects"], task_pull_project_ids = sync_projects(
-            tw_client, bq_client, dataset_ref
+            tw_client, bq_client, dataset_ref, allow_shrink=allow_shrink
         )
     except Exception:
         logger.error("Projects sync failed:\n%s", traceback.format_exc())
         stages["projects"] = {"status": "failed", "error": traceback.format_exc()}
 
     try:
-        stages["tasks"] = sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids)
+        stages["tasks"] = sync_tasks(
+            tw_client, bq_client, dataset_ref, task_pull_project_ids,
+            allow_shrink=allow_shrink,
+        )
     except Exception:
         logger.error("Tasks sync failed:\n%s", traceback.format_exc())
         stages["tasks"] = {"status": "failed", "error": traceback.format_exc()}
 
     try:
-        stages["users"] = sync_users(tw_client, bq_client, dataset_ref)
+        stages["users"] = sync_users(
+            tw_client, bq_client, dataset_ref, allow_shrink=allow_shrink
+        )
     except Exception:
         logger.error("Users sync failed:\n%s", traceback.format_exc())
         stages["users"] = {"status": "failed", "error": traceback.format_exc()}
@@ -967,6 +975,13 @@ def main():
              "Does not touch projects/tasks or any other month.",
     )
     parser.add_argument(
+        "--allow-shrink",
+        action="store_true",
+        help="Permit a full-replace table to shrink by more than half. Only for a "
+             "deliberate scope reduction — the guard exists because a partial "
+             "Teamwork pull would otherwise silently gut a table.",
+    )
+    parser.add_argument(
         "--explain-task-scope",
         action="store_true",
         help="Explain which projects the tasks pull covers and how many tasks each "
@@ -1000,7 +1015,7 @@ def main():
         tw_client = TeamworkClient(cfg.teamwork_base_url, cfg.teamwork_api_key)
         sys.exit(run_dry_run(tw_client))
 
-    sys.exit(run_full_sync(cfg))
+    sys.exit(run_full_sync(cfg, allow_shrink=args.allow_shrink))
 
 
 if __name__ == "__main__":

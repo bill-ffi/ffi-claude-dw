@@ -407,6 +407,37 @@ the attached service account directly). Say the word and I'll wire it up.
   12h/12h to 5h/19h; that follows from the requested times, not from the
   fix. **This does not take effect until the branch is merged** — GitHub
   only fires `schedule:` from the default branch.
+- **A full-replace table could be silently emptied by a bad pull (fixed
+  2026-09-04).** `projects`, `tasks` and `users` are truncate-and-reload, so
+  `truncate_and_load()` wrote whatever the pull returned. If Teamwork
+  returned `200` with zero items — an API blip, not a real result — the
+  table was emptied (a `logger.warning`, nothing more), every view built on
+  it went blank, and the stage still reported `"status": "success"` so the
+  run exited 0 and the workflow went green. `WRITE_TRUNCATE` leaves no
+  prior version to fall back to. Worse, an empty `projects` pull cascaded:
+  the task scope came out empty, so `tasks` was emptied in the same run.
+  - **Fix**: `truncate_and_load()` now refuses two cases outright —
+    - **zero rows**, unconditionally (`EmptyLoadRefused`). There is no flag
+      to override this; nothing legitimately empties these tables.
+    - **a shrink past `MIN_REPLACE_ROWS_RATIO`** (0.5 — more than half the
+      rows disappearing), via `SuspiciousShrinkRefused`. The prior count
+      comes from table metadata (`num_rows`), so the check costs no query.
+  - **The escape hatch**: a deliberate scope reduction — moving
+    `ARCHIVED_PROJECT_TASKS_CUTOFF` forward, say — legitimately shrinks a
+    table. Run `python sync.py --allow-shrink`, or tick **"Permit a
+    full-replace table to shrink by more than half"** in the Actions
+    workflow. That flag relaxes the shrink guard only; the zero-row refusal
+    still stands.
+  - **Same hazard on timelogs, handled differently**: an empty pull over a
+    populated window would delete those rows and insert nothing.
+    `replace_timelogs_window()` now refuses that, but *only* when the
+    window currently holds rows — an empty window is legitimate when
+    backfilling a month with no activity, so that case just logs and
+    returns 0.
+  - **Failure is loud, and partial by design**: the refusal raises, so that
+    stage records `"status": "failed"` with the reason and the run exits 1.
+    The table keeps its previous contents. Other stages still run, as they
+    already did.
 - **Retroactive timelogs against a closed month were never ingested
   (fixed 2026-09-04).** The normal run replaced only the *current*
   calendar month, so the moment the month rolled over in `SYNC_TIMEZONE`,
