@@ -407,6 +407,39 @@ the attached service account directly). Say the word and I'll wire it up.
   12h/12h to 5h/19h; that follows from the requested times, not from the
   fix. **This does not take effect until the branch is merged** — GitHub
   only fires `schedule:` from the default branch.
+- **A failed scheduled run was silent (fixed 2026-09-04).** Nobody watches a
+  cron run. A failure produced GitHub's default email to the workflow author
+  and nothing else — easy to miss, and going to one person. Since the sync
+  now *refuses* to write bad data rather than writing it, "loud" only helps
+  if somebody hears it.
+  - The workflow now opens a GitHub issue labelled `sync-failure` when a
+    **scheduled** run fails, and closes it when a scheduled run next
+    succeeds. Repeated failures comment on the open issue rather than
+    opening a new one every 12 hours.
+  - Manual `workflow_dispatch` runs are deliberately excluded — somebody
+    clicked the button and is watching the result; an issue would be noise.
+  - Needs `issues: write`, which is why the workflow's `permissions:` block
+    is no longer `contents: read` alone. No new secrets: it uses the
+    built-in `github.token`.
+- **Retries only covered four status codes and no transport failures (fixed
+  2026-09-04).** `_get()` retried 429/502/503/504 and nothing else, so a
+  single dropped connection, read timeout, or body cut off mid-transfer —
+  across the thousands of requests one run makes — killed the whole stage.
+  - **Now retried**: `ConnectionError`, `Timeout`, `ChunkedEncodingError`,
+    `ContentDecodingError`, and a JSON decode failure (a truncated body
+    looks like `ValueError`, not an HTTP error). Plus HTTP 500 alongside the
+    gateway family — this API has returned transient 500s, and a genuine
+    server bug still surfaces after `MAX_RETRIES`.
+  - **Still never retried**: 400, 401, 403, 404 and friends. No number of
+    retries fixes a bad request, so those raise on the first response.
+  - **Backoff** is now exponential (2s, 4s, 8s) rather than linear, honours
+    a `Retry-After` header when the API sends one, and caps any single wait
+    at `MAX_RETRY_SLEEP_SECONDS` (120) so one absurd `Retry-After` can't
+    park the job. The old code also slept after its *final* attempt before
+    giving up; it no longer does.
+  - **Timeouts** are now `(connect, read) = (10, 60)`. There was no connect
+    timeout at all, so a black-holed TCP connect could hang a stage until
+    the workflow's `timeout-minutes` killed it.
 - **A full-replace table could be silently emptied by a bad pull (fixed
   2026-09-04).** `projects`, `tasks` and `users` are truncate-and-reload, so
   `truncate_and_load()` wrote whatever the pull returned. If Teamwork

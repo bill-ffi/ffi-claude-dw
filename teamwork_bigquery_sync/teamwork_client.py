@@ -33,6 +33,32 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# Transport-level failures that say nothing about the request's validity, so
+# they are worth retrying. Previously none of these were caught: a single
+# dropped connection anywhere in a run of thousands of requests killed the
+# whole stage. ChunkedEncodingError and a JSON decode failure both mean a
+# response was cut off mid-transfer, which is the same class of problem.
+RETRYABLE_EXCEPTIONS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.ContentDecodingError,
+    ValueError,  # json.JSONDecodeError subclasses this — a truncated body
+)
+
+
+def _retry_after_seconds(response):
+    """The Retry-After header in seconds, or None. Only the integer-seconds
+    form is honoured; the HTTP-date form is rare here and not worth guessing at.
+    """
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return max(0, int(raw.strip()))
+    except (TypeError, ValueError):
+        return None
+
 PROJECTS_PATH = "/projects/api/v3/projects.json"
 TASKS_PATH = "/projects/api/v3/tasks.json"
 TIMELOGS_PATH = "/projects/api/v3/time.json"
@@ -51,6 +77,22 @@ CUSTOM_FIELD_FETCH_WORKERS = 8
 PAGE_SIZE = 250
 MAX_RETRIES = 4
 RETRY_BACKOFF_SECONDS = 2
+# Backoff doubles each attempt (2s, 4s, 8s) rather than growing linearly, and
+# a Retry-After header wins over the computed delay when the API sends one.
+# Capped so one absurd Retry-After can't park the job for the rest of its
+# timeout budget.
+MAX_RETRY_SLEEP_SECONDS = 120
+# (connect, read). A run makes thousands of requests over several minutes;
+# without a connect timeout a single black-holed TCP connect could hang the
+# stage until the workflow's timeout-minutes killed it.
+REQUEST_TIMEOUT_SECONDS = (10, 60)
+
+# Status codes worth another attempt. 500 is included alongside the 502/503/504
+# gateway family: this API has returned transient 500s under load, and a real
+# server-side bug would still surface after MAX_RETRIES rather than be hidden.
+# Everything else (400, 401, 403, 404, ...) is a request problem that retrying
+# cannot fix, so it raises immediately.
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 # Hard backstop against a runaway pagination loop (e.g. if `hasMore` never
 # goes false for some reason) — 500 pages * PAGE_SIZE is far more than any
 # expected dataset here, so hitting this means something is genuinely wrong
@@ -96,28 +138,61 @@ class TeamworkClient:
         self.session.headers.update({"Accept": "application/json"})
 
     def _get(self, path, params):
+        """GET a Teamwork endpoint, retrying what is worth retrying.
+
+        Retries transport failures (dropped connections, timeouts, bodies cut
+        off mid-transfer) and the transient status codes in
+        RETRYABLE_STATUS_CODES, backing off exponentially and honouring
+        Retry-After when the API sends one. Anything else raises on the first
+        response, since no number of retries fixes a 401 or a 404.
+        """
         url = f"{self.base_url}{path}"
         last_error = None
+
         for attempt in range(1, MAX_RETRIES + 1):
-            response = self.session.get(url, params=params, timeout=60)
-            if response.status_code == 200:
-                return response.json()
-            if response.status_code in (429, 502, 503, 504):
+            retry_after = None
+            try:
+                response = self.session.get(
+                    url, params=params, timeout=REQUEST_TIMEOUT_SECONDS
+                )
+                if response.status_code == 200:
+                    return response.json()
+                if response.status_code not in RETRYABLE_STATUS_CODES:
+                    raise TeamworkAPIError(
+                        "GET", url, response.status_code, response.text
+                    )
                 last_error = TeamworkAPIError(
                     "GET", url, response.status_code, response.text
                 )
-                sleep_for = RETRY_BACKOFF_SECONDS * attempt
-                logger.warning(
-                    "Teamwork API %s on attempt %d/%d, retrying in %ds: %s",
-                    response.status_code,
-                    attempt,
-                    MAX_RETRIES,
-                    sleep_for,
-                    url,
-                )
-                time.sleep(sleep_for)
-                continue
-            raise TeamworkAPIError("GET", url, response.status_code, response.text)
+                retry_after = _retry_after_seconds(response)
+                reason = f"HTTP {response.status_code}"
+            except RETRYABLE_EXCEPTIONS as exc:
+                last_error = exc
+                reason = type(exc).__name__
+
+            if attempt == MAX_RETRIES:
+                break
+
+            sleep_for = RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            if retry_after is not None:
+                sleep_for = max(sleep_for, retry_after)
+            sleep_for = min(sleep_for, MAX_RETRY_SLEEP_SECONDS)
+            logger.warning(
+                "Teamwork API %s on attempt %d/%d, retrying in %ds: %s",
+                reason,
+                attempt,
+                MAX_RETRIES,
+                sleep_for,
+                url,
+            )
+            time.sleep(sleep_for)
+
+        logger.error(
+            "Teamwork API gave up after %d attempts: %s (%s)",
+            MAX_RETRIES,
+            url,
+            last_error,
+        )
         raise last_error
 
     def _paginate(self, path, params, item_key):

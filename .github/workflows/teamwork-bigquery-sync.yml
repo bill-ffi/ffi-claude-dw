@@ -60,6 +60,9 @@ on:
 
 permissions:
   contents: read
+  # Needed only by the failure-reporting steps at the end of the job, which
+  # open (or close) an issue so an unattended scheduled failure is visible.
+  issues: write
 
 # Prevents two runs from overlapping if a manual run and a scheduled run
 # happen to land at the same time.
@@ -126,3 +129,56 @@ jobs:
           else
             python sync.py $SHRINK_FLAG
           fi
+
+      # A scheduled run has nobody watching it: before this, a failure was
+      # silent apart from GitHub's default email to the workflow author, which
+      # is easy to miss and goes to one person. Manual runs are deliberately
+      # excluded — somebody clicked the button and is looking at the result.
+      #
+      # Repeated failures comment on the existing issue rather than opening a
+      # new one every 12 hours.
+      - name: Report a failed scheduled run
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          gh label create sync-failure --color B60205             --description "A scheduled Teamwork -> BigQuery sync failed" --force || true
+          cat > "$RUNNER_TEMP/issue-body.md" <<EOF
+          The scheduled Teamwork → BigQuery sync failed.
+
+          - **Run:** $RUN_URL
+          - **Commit:** \`$COMMIT_SHA\`
+
+          The BigQuery tables keep their previous contents. The pipeline fails a
+          stage rather than writing bad data, and refuses outright to empty or
+          gut a full-replace table, so stale data is the worst case here — not
+          missing data.
+
+          **What to look at:** open the run above and find the \`RUN_SUMMARY\`
+          line at the end of the log. It reports every stage's status, and for a
+          failed stage the error. \`task_pull_project_scope\` and \`rows_dropped\`
+          explain any surprising row counts.
+
+          This issue closes itself when a scheduled run next succeeds.
+          EOF
+          EXISTING=$(gh issue list --label sync-failure --state open --limit 1             --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body-file "$RUNNER_TEMP/issue-body.md"
+            echo "Commented on existing issue #$EXISTING"
+          else
+            gh issue create --title "Scheduled Teamwork → BigQuery sync failed"               --label sync-failure --body-file "$RUNNER_TEMP/issue-body.md"
+          fi
+
+      - name: Close the failure issue once a scheduled run succeeds
+        if: success() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          OPEN=$(gh issue list --label sync-failure --state open --json number --jq '.[].number')
+          for N in $OPEN; do
+            gh issue close "$N" --comment "Recovered — the scheduled sync succeeded: $RUN_URL"
+            echo "Closed #$N"
+          done
