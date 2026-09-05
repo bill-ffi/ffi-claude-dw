@@ -26,6 +26,7 @@ python sync.py --explain-task-scope                # print which projects the ta
 There is no automated test suite (no pytest, no test directory). Verification is done by:
 - Running `--dry-run` and checking its per-endpoint diagnostics (pagination sanity check, Activity custom-field diagnostic, project-category diagnostic, client/company diagnostic all print `[OK]`/`[FAIL]`).
 - Running a real sync and inspecting the `RUN_SUMMARY` JSON log line at the end for per-table row counts and resolution stats (e.g. `rows_with_category_name`, `clients_resolved`, `activity.method`).
+- When writing ad-hoc verification SQL, avoid BigQuery reserved words as column aliases — `rows` is reserved (the `ROWS BETWEEN` window-frame keyword) and fails unless backticked. Use `total_rows`. Same trap: `range`, `groups`, `hash`, `window`, `partition`.
 - For `views.py` changes: compile-check with `python -m py_compile views.py`, then render and eyeball the generated SQL via `views.build_view_sql(project_id, dataset)` before running `--create-views` against the live BigQuery project — there's no local BigQuery emulator, so SQL correctness is verified by reading the rendered text and, for date/branching logic, simulating it in a throwaway Python script before shipping.
 
 ## Architecture
