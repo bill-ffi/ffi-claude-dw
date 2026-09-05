@@ -142,7 +142,10 @@ a completed task that never got an Activity value isn't actionable
 anymore, so it shouldn't count toward (or pad) a tasklist's cluster.
 Assumes the Teamwork status string for a completed task is exactly
 `'completed'` (lowercase, as returned by the tasks endpoint) — worth
-confirming against a known-completed task's row in BigQuery.
+confirming against a known-completed task's row in BigQuery. The filter is
+written `COALESCE(t.status, '') != 'completed'` rather than
+`t.status != 'completed'`, so a task with a NULL status counts as
+still-open rather than vanishing — see "Known gaps".
 
 **Assignee names, not IDs.** The task-level views
 (missing_activity_with_time, missing_estimate, recurring_compliance)
@@ -414,6 +417,108 @@ the attached service account directly). Say the word and I'll wire it up.
   - **Reading the cron in Eastern terms** is the reliable check, since the
     requirement is always expressed in local time while the cron is always
     UTC: `04:15Z = 00:15 EDT`, `16:15Z = 12:15 EDT`.
+- **Two view predicates silently dropped NULL rows (fixed 2026-09-05).**
+  In SQL a comparison against NULL yields NULL, not TRUE, and a `WHERE`
+  clause keeps only rows that evaluate TRUE. So an unguarded predicate
+  doesn't merely fail to match a NULL row — it removes it from the report
+  entirely, which is backwards for an exception view whose whole job is
+  surfacing incomplete data.
+  - **`v_exception_missing_activty_no_time`**: `t.status != 'completed'`
+    excluded every task whose `status` is NULL. An unknown status is
+    precisely *not* a known-completed one, so those tasks should count
+    toward a tasklist's cluster of three. Now
+    `COALESCE(t.status, '') != 'completed'`.
+  - **`v_exception_missing_estimate`** — the same class, found by auditing
+    every predicate rather than fixing only the one reported. The exemption
+    reads `NOT (category = 'Non-Monthly' AND tasklist_name IN (...))`.
+    `NULL IN (...)` is NULL, so `TRUE AND NULL` is NULL and `NOT NULL` is
+    NULL: a Non-Monthly task with **no tasklist name** was dropped rather
+    than flagged for its missing estimate. An unnamed tasklist is not one
+    of the three exempt ones, so it should be flagged. Now
+    `COALESCE(t.tasklist_name, '') IN UNNEST(...)`.
+  - **Impact depends on whether these columns are ever NULL in practice.**
+    Both come straight from `raw.get(...)` on the tasks payload, so they
+    are populated on normal rows; this is a correctness fix to the SQL, not
+    a claim that any count will move. Check with:
+    `SELECT COUNTIF(status IS NULL) AS null_status,
+    COUNTIF(tasklist_name IS NULL) AS null_tasklist FROM tasks;`
+  - **Guarded against recurrence**: `tests/test_views.py` now fails on *any*
+    inequality against a string literal anywhere in the generated SQL that
+    lacks a NULL guard, not just these two.
+  - Requires `--create-views` to take effect.
+- **Three known-gaps entries were deleted by a later doc edit (restored
+  2026-09-05).** The alerting, retries, and full-replace-guard entries above
+  vanished from this file between commits `e962e22` and `98e712f`. Cause: the
+  schedule-revert edit rewrote a *span* of this section by index — replacing
+  everything between two anchor strings — and those three entries happened to
+  sit inside it. The code was never affected, only its record here. Recovered
+  verbatim from `e962e22`. **Edit this file by replacing a specific known
+  string, never a span between two anchors** — a span silently takes whatever
+  drifted into it.
+- **A failed scheduled run was silent (fixed 2026-09-04).** Nobody watches a
+  cron run. A failure produced GitHub's default email to the workflow author
+  and nothing else — easy to miss, and going to one person. Since the sync
+  now *refuses* to write bad data rather than writing it, "loud" only helps
+  if somebody hears it.
+  - The workflow now opens a GitHub issue labelled `sync-failure` when a
+    **scheduled** run fails, and closes it when a scheduled run next
+    succeeds. Repeated failures comment on the open issue rather than
+    opening a new one every 12 hours.
+  - Manual `workflow_dispatch` runs are deliberately excluded — somebody
+    clicked the button and is watching the result; an issue would be noise.
+  - Needs `issues: write`, which is why the workflow's `permissions:` block
+    is no longer `contents: read` alone. No new secrets: it uses the
+    built-in `github.token`.
+- **Retries only covered four status codes and no transport failures (fixed
+  2026-09-04).** `_get()` retried 429/502/503/504 and nothing else, so a
+  single dropped connection, read timeout, or body cut off mid-transfer —
+  across the thousands of requests one run makes — killed the whole stage.
+  - **Now retried**: `ConnectionError`, `Timeout`, `ChunkedEncodingError`,
+    `ContentDecodingError`, and a JSON decode failure (a truncated body
+    looks like `ValueError`, not an HTTP error). Plus HTTP 500 alongside the
+    gateway family — this API has returned transient 500s, and a genuine
+    server bug still surfaces after `MAX_RETRIES`.
+  - **Still never retried**: 400, 401, 403, 404 and friends. No number of
+    retries fixes a bad request, so those raise on the first response.
+  - **Backoff** is now exponential (2s, 4s, 8s) rather than linear, honours
+    a `Retry-After` header when the API sends one, and caps any single wait
+    at `MAX_RETRY_SLEEP_SECONDS` (120) so one absurd `Retry-After` can't
+    park the job. The old code also slept after its *final* attempt before
+    giving up; it no longer does.
+  - **Timeouts** are now `(connect, read) = (10, 60)`. There was no connect
+    timeout at all, so a black-holed TCP connect could hang a stage until
+    the workflow's `timeout-minutes` killed it.
+- **A full-replace table could be silently emptied by a bad pull (fixed
+  2026-09-04).** `projects`, `tasks` and `users` are truncate-and-reload, so
+  `truncate_and_load()` wrote whatever the pull returned. If Teamwork
+  returned `200` with zero items — an API blip, not a real result — the
+  table was emptied (a `logger.warning`, nothing more), every view built on
+  it went blank, and the stage still reported `"status": "success"` so the
+  run exited 0 and the workflow went green. `WRITE_TRUNCATE` leaves no
+  prior version to fall back to. Worse, an empty `projects` pull cascaded:
+  the task scope came out empty, so `tasks` was emptied in the same run.
+  - **Fix**: `truncate_and_load()` now refuses two cases outright —
+    - **zero rows**, unconditionally (`EmptyLoadRefused`). There is no flag
+      to override this; nothing legitimately empties these tables.
+    - **a shrink past `MIN_REPLACE_ROWS_RATIO`** (0.5 — more than half the
+      rows disappearing), via `SuspiciousShrinkRefused`. The prior count
+      comes from table metadata (`num_rows`), so the check costs no query.
+  - **The escape hatch**: a deliberate scope reduction — moving
+    `ARCHIVED_PROJECT_TASKS_CUTOFF` forward, say — legitimately shrinks a
+    table. Run `python sync.py --allow-shrink`, or tick **"Permit a
+    full-replace table to shrink by more than half"** in the Actions
+    workflow. That flag relaxes the shrink guard only; the zero-row refusal
+    still stands.
+  - **Same hazard on timelogs, handled differently**: an empty pull over a
+    populated window would delete those rows and insert nothing.
+    `replace_timelogs_window()` now refuses that, but *only* when the
+    window currently holds rows — an empty window is legitimate when
+    backfilling a month with no activity, so that case just logs and
+    returns 0.
+  - **Failure is loud, and partial by design**: the refusal raises, so that
+    stage records `"status": "failed"` with the reason and the run exits 1.
+    The table keeps its previous contents. Other stages still run, as they
+    already did.
 - **Retroactive timelogs against a closed month were never ingested
   (fixed 2026-09-04).** The normal run replaced only the *current*
   calendar month, so the moment the month rolled over in `SYNC_TIMEZONE`,
