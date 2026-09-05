@@ -118,6 +118,45 @@ class TestBusinessWeekShape:
         assert "GREATEST(" in sql["v_user_weekly_billable_hours"]
 
 
+class TestNullSafePredicates:
+    """In SQL a comparison against NULL yields NULL, not TRUE, and a WHERE
+    clause keeps only rows that are TRUE — so an unguarded predicate
+    silently drops rows whose column is NULL, which is the opposite of what
+    an exception report should do.
+    """
+
+    def test_not_completed_filter_is_null_safe(self, sql):
+        body = sql["v_exception_missing_activty_no_time"]
+        assert "COALESCE(t.status, '') != 'completed'" in body
+
+    def test_no_bare_status_inequality_survives(self, sql):
+        # `t.status != 'completed'` dropped every NULL-status task.
+        for name, body in sql.items():
+            assert not re.search(r"(?<!\)\s)t\.status\s*(!=|<>)\s*'", body), name
+
+    def test_estimate_exemption_is_null_safe(self, sql):
+        # NULL IN (...) is NULL, so TRUE AND NULL is NULL, and NOT NULL is
+        # NULL: a Non-Monthly task with no tasklist name was dropped rather
+        # than flagged.
+        body = sql["v_exception_missing_estimate"]
+        assert "COALESCE(t.tasklist_name, '')" in body
+
+    def test_no_column_is_compared_to_a_literal_without_a_null_guard(self, sql):
+        """General guard against reintroducing this class anywhere."""
+        offenders = []
+        for name, body in sql.items():
+            for line in body.splitlines():
+                stripped = line.strip()
+                if not re.search(r"(!=|<>)\s*'", stripped):
+                    continue
+                if "COALESCE" in stripped or "IS DISTINCT FROM" in stripped:
+                    continue
+                offenders.append(f"{name}: {stripped}")
+        assert offenders == [], (
+            "inequality against a literal with no NULL guard:\n" + "\n".join(offenders)
+        )
+
+
 class TestSqlStringArray:
     def test_renders_a_bigquery_array_literal(self):
         assert views._sql_string_array(["a", "b"]) == "['a', 'b']"

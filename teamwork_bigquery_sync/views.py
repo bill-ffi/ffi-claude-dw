@@ -215,6 +215,13 @@ WHERE t.activity IS NULL
     # Refinement per your instruction: a completed task missing "Activity"
     # is done and isn't going to get one — only count still-open tasks
     # toward the tasklist's cluster.
+    #
+    # COALESCE, not a bare `t.status != 'completed'`: in SQL, NULL != 'x'
+    # evaluates to NULL rather than TRUE, and a WHERE clause keeps only
+    # rows that are TRUE. So a task whose status is NULL was being dropped
+    # from this view entirely — the opposite of the intent, since an
+    # unknown status is precisely not a known-completed one. Same reasoning
+    # as the tasklist exemption in missing_estimate below.
     views["v_exception_missing_activty_no_time"] = f"""
 CREATE OR REPLACE VIEW {fqn("v_exception_missing_activty_no_time")} AS
 SELECT
@@ -231,12 +238,18 @@ JOIN {projects} p ON p.project_id = t.project_id
 {proj_owner_join}
 WHERE t.activity IS NULL
   AND p.category_name IN UNNEST({monitored})
-  AND t.status != 'completed'
+  AND COALESCE(t.status, '') != 'completed'
   AND NOT {has_no_activity_time_col}
 GROUP BY p.project_id, p.name, p.category_name, p.client_name, proj_owner, t.tasklist_id, t.tasklist_name
 HAVING COUNT(*) >= 3
 """
 
+    # COALESCE on tasklist_name for the same reason as the status filter
+    # above: `NULL IN (...)` is NULL, so `TRUE AND NULL` is NULL, and
+    # `NOT NULL` is NULL — meaning a Non-Monthly task with no tasklist name
+    # was silently dropped from this view instead of being flagged. An
+    # unnamed tasklist is not one of the three exempt ones, so it should be
+    # flagged.
     views["v_exception_missing_estimate"] = f"""
 CREATE OR REPLACE VIEW {fqn("v_exception_missing_estimate")} AS
 SELECT
@@ -265,7 +278,7 @@ WHERE (t.estimate_minutes IS NULL OR t.estimate_minutes = 0)
   AND p.category_name IN UNNEST({monitored})
   AND NOT (
     p.category_name = '{ESTIMATE_EXEMPT_CATEGORY}'
-    AND t.tasklist_name IN UNNEST({exempt_tasklists})
+    AND COALESCE(t.tasklist_name, '') IN UNNEST({exempt_tasklists})
   )
 """
 
