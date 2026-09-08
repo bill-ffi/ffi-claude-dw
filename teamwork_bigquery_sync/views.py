@@ -652,6 +652,25 @@ WHERE b.today_order <= 5
     # v_user_daily_billable_hours_base so the two reports agree on which week
     # a date belongs to — Looker's own week grouping would default to Monday
     # and quietly disagree.
+    # Money columns, per an explicit decision: billable_rate (client-facing
+    # revenue) is exposed, cost_rate is not. Cost is comp-adjacent, same
+    # caution as users.user_cost/user_rate, and leaving it out lets this view
+    # be shared more widely than the users table.
+    #
+    # !! billable_rate's UNITS ARE UNVERIFIED !!
+    # transform.normalize_timelog passes Teamwork's billableRate straight
+    # through, while the sibling userRate/userCost on the people endpoint
+    # were confirmed to arrive in CENTS and are divided by 100 there. Nobody
+    # has checked which billableRate is. If it is also cents, every
+    # billable_amount is 100x too large. That would be a bug in transform.py,
+    # not here — this view just multiplies hours by whatever the column
+    # holds. Verify one entry against a rate you know before trusting a
+    # revenue total, and if it is cents, fix it in transform.py and re-sync
+    # rather than dividing in the SQL.
+    #
+    # billable_amount is NULL (not 0) for non-billable entries and for a
+    # billable entry with no rate. SUM skips NULLs, so a missing rate
+    # understates revenue rather than inventing zero-value billable work.
     views["v_timelog_detail"] = f"""
 CREATE OR REPLACE VIEW {fqn("v_timelog_detail")} AS
 SELECT
@@ -670,6 +689,13 @@ SELECT
   END AS billable_status,
   tl.description AS timelog_description,
   tl.is_locked,
+
+  -- UNITS ARE UNVERIFIED: see the note above this view in views.py before
+  -- publishing any revenue figure from these two columns.
+  tl.billable_rate,
+  CASE
+    WHEN tl.is_billable IS TRUE THEN (tl.minutes / 60) * tl.billable_rate
+  END AS billable_amount,
 
   -- who the time belongs to, and who entered it
   tl.user_id,

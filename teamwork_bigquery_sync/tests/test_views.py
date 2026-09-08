@@ -213,12 +213,33 @@ class TestTimelogDetailView:
         # field for Looker's per-viewer filtering.
         assert "u.email AS user_email" in sql["v_timelog_detail"]
 
-    def test_does_not_expose_rate_or_cost_columns(self, sql):
-        # billable_rate/cost_rate are comp-adjacent; excluded deliberately
-        # so this view can be shared more widely than the users table.
+    def test_exposes_billable_rate_but_never_cost(self, sql):
+        # cost_rate is comp-adjacent; excluding it lets this view be shared
+        # more widely than the users table.
         body = sql["v_timelog_detail"]
-        for col in ("billable_rate", "cost_rate", "user_cost", "user_rate"):
-            assert col not in body, f"{col} present — see README on sensitivity"
+        assert "tl.billable_rate" in body
+        # Check the column reference, not the bare word: prose in a comment
+        # is not an exposure.
+        for col in ("cost_rate", "user_cost", "user_rate"):
+            assert f"tl.{col}" not in body and f"u.{col}" not in body, col
+
+    def test_billable_amount_only_counts_billable_entries(self, sql):
+        # Non-billable time must not contribute revenue, and a missing rate
+        # must yield NULL rather than a zero that looks like real data.
+        body = sql["v_timelog_detail"]
+        assert "WHEN tl.is_billable IS TRUE THEN (tl.minutes / 60) * tl.billable_rate" in body
+        assert "AS billable_amount" in body
+        start = body.index("WHEN tl.is_billable IS TRUE THEN (tl.minutes")
+        amount = body[start:body.index("AS billable_amount")]
+        assert "ELSE" not in amount, "an ELSE branch would fabricate a value for non-billable time"
+
+    def test_unverified_rate_units_are_flagged_in_the_source(self, sql):
+        # billableRate is passed through unconverted while the sibling
+        # userRate was confirmed to arrive in cents. Until that is checked,
+        # the warning must stay next to the column.
+        import inspect
+        source = inspect.getsource(views.build_view_sql)
+        assert "UNITS ARE UNVERIFIED" in source
 
 
 class TestSqlStringArray:

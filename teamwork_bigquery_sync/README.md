@@ -272,10 +272,39 @@ quietly disagree.
 on this view (a timelog has exactly one user, so it is a clean exact-match
 field — unlike the task-based views, see above).
 
-**Deliberately excluded**: `timelogs.billable_rate` and `cost_rate`. Those
-are comp-adjacent, same caution as `users.user_cost`/`user_rate`, and
-leaving them out lets this view be shared more widely than the `users`
-table. Say the word if a margin or realisation report needs them.
+**Money columns**: `billable_rate` and a derived `billable_amount`
+(`hours x rate`, computed **only** where `is_billable IS TRUE`) are
+included. `cost_rate` is **not** — it is comp-adjacent, same caution as
+`users.user_cost`/`user_rate`, and leaving it out lets this view be shared
+more widely than the `users` table. Margin analysis would need it; ask.
+
+`billable_amount` is NULL, not 0, for non-billable entries and for a
+billable entry with no rate. `SUM` skips NULLs, so a missing rate
+understates revenue rather than inventing zero-value billable work.
+
+> ⚠️ **`billable_rate`'s units are unverified — check before publishing any
+> revenue figure.** `transform.normalize_timelog()` passes Teamwork's
+> `billableRate` straight through, whereas the sibling `userRate`/`userCost`
+> on the people endpoint were confirmed to arrive in **cents** and are
+> divided by 100 there (see `transform.normalize_user()`). Nobody has
+> checked which `billableRate` is. If it is also cents, every
+> `billable_amount` is **100x too large**.
+>
+> That would be a bug in `transform.py`, not in this view — the view just
+> multiplies hours by whatever the column holds. To check, pick a person and
+> a rate you know:
+>
+> ```sql
+> SELECT user_name, billable_rate, COUNT(*) AS total_rows
+> FROM `radiant-rig-284611.teamwork_data.v_timelog_detail`
+> WHERE billable_rate IS NOT NULL
+> GROUP BY 1, 2 ORDER BY total_rows DESC LIMIT 20;
+> ```
+>
+> If the rates come back as e.g. `15000` for someone billed at $150/hr, it
+> is cents. The fix is one line in `transform.py` plus a re-sync — **not** a
+> division in the SQL, which would leave the underlying table wrong for
+> every other consumer.
 
 **Cost note**: this view is unbounded — it reads all of `timelogs` on every
 query, and that table is neither partitioned nor clustered. A Looker report
