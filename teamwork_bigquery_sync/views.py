@@ -122,6 +122,7 @@ VIEW_NAMES = [
     "v_user_daily_billable_hours_base",
     "v_user_weekly_billable_hours",
     "v_timelog_detail",
+    "v_exception_time_without_task",
 ]
 
 
@@ -739,6 +740,79 @@ LEFT JOIN {tasks} tk ON tk.task_id = tl.task_id
 LEFT JOIN {users} u ON u.user_id = tl.user_id
 LEFT JOIN {users} lb ON lb.user_id = tl.logged_by_user_id
 {proj_owner_join}
+"""
+
+    # Exception rule: time posted straight to a project with no task at all.
+    # Teamwork permits it, but it leaves the work undescribed — no tasklist,
+    # no Activity, nothing to roll up against — so it is worth surfacing.
+    #
+    # Built ON v_timelog_detail rather than re-deriving from timelogs, so
+    # "no task" has one definition and any fix to the joins or the derived
+    # hours propagates here automatically. That makes ordering matter:
+    # v_timelog_detail must exist first, and create_or_replace_views()
+    # iterates this dict in insertion order, so this entry stays after it.
+    #
+    # The filter is `task_id IS NULL` rather than a string comparison
+    # against task_join_status. Same population, but it cannot silently
+    # break if that label's wording is ever edited.
+    #
+    # Scope is SITE-WIDE, not restricted to MONITORED_CATEGORIES — following
+    # v_exception_long_time_entries rather than rules 1/2/5. Untasked time on
+    # an internal or uncategorised project is just as much a gap in the
+    # record as on a billable one.
+    #
+    # WINDOW: from the start of the PRIOR quarter onward, with no upper
+    # bound. In practice that is "prior quarter + current QTD", since there
+    # is normally no data after today. The upper bound is deliberately left
+    # off rather than capped at CURRENT_DATE: a timelog dated in the future
+    # is itself an anomaly, and an exception report should show it rather
+    # than hide it. quarter_bucket splits the two periods for reporting.
+    views["v_exception_time_without_task"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_exception_time_without_task")} AS
+WITH bounds AS (
+  SELECT
+    DATE_TRUNC(CURRENT_DATE('{REPORTING_TIMEZONE}'), QUARTER) AS current_quarter_start,
+    DATE_SUB(
+      DATE_TRUNC(CURRENT_DATE('{REPORTING_TIMEZONE}'), QUARTER), INTERVAL 1 QUARTER
+    ) AS prior_quarter_start
+)
+SELECT
+  d.timelog_id,
+  d.log_date,
+  DATE_TRUNC(d.log_date, QUARTER) AS log_quarter_start,
+  CONCAT(
+    CAST(EXTRACT(YEAR FROM d.log_date) AS STRING), '-Q',
+    CAST(EXTRACT(QUARTER FROM d.log_date) AS STRING)
+  ) AS quarter_label,
+  CASE
+    WHEN d.log_date >= b.current_quarter_start THEN 'Current QTD'
+    ELSE 'Prior quarter'
+  END AS quarter_bucket,
+
+  d.user_id,
+  d.user_name,
+  d.user_email,
+  d.logged_by_user_id,
+  d.logged_by_name,
+
+  d.project_id,
+  d.project_name,
+  d.category_name,
+  d.client_name,
+  d.proj_owner,
+  d.project_status,
+  d.project_is_archived,
+
+  d.minutes,
+  d.hours,
+  d.is_billable,
+  d.billable_status,
+  d.timelog_description,
+  d.synced_at
+FROM {fqn("v_timelog_detail")} d
+CROSS JOIN bounds b
+WHERE d.task_id IS NULL
+  AND d.log_date >= b.prior_quarter_start
 """
 
     return views

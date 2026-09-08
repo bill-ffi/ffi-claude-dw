@@ -102,14 +102,14 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
 
 ## Exception reporting views
 
-Five BigQuery views, one per quality-control rule, meant to be the direct
-data source for Looker Studio reports for leadership — each one is
-filterable by user / project / client / tasklist directly off its columns
-(no extra joins needed in Looker). Plus three more that aren't exception
-rules — `v_usermins` (see "External reference data" below) and the user
-report's `v_user_daily_billable_hours_base` / `v_user_weekly_billable_hours`
-(see "User report" below). All eight are defined in `views.py`;
-created/updated via:
+Seven BigQuery views, meant to be the direct data source for Looker Studio
+reports for leadership — each one is filterable by user / project / client /
+tasklist directly off its columns (no extra joins needed in Looker). Plus
+four more that aren't exception rules: `v_usermins` (see "External reference
+data" below), the user report's `v_user_daily_billable_hours_base` /
+`v_user_weekly_billable_hours` (see "User report" below), and
+`v_timelog_detail` (see "Drill-down reporting" below). **Eleven** views in
+total, all defined in `views.py`; created/updated via:
 
 ```
 python sync.py --create-views
@@ -128,6 +128,7 @@ independent of the normal sync schedule.
 | `v_exception_missing_estimate` | Tasks with `estimate_minutes` NULL or 0 | Monitored categories only, minus the Client Management / Client Management v2 / HR Advisory tasklist exception within Non-Monthly |
 | `v_exception_billable_time_internal_projects` | Billable timelogs (`minutes > 0`) posted to an internal-category project | `FFI Internal Projects`, `Functional`, or `Individual` category only |
 | `v_exception_long_time_entries` | Timelogs over 2 hours | All projects (not category-scoped) |
+| `v_exception_time_without_task` | Time posted straight to a project with no task at all — no tasklist, no Activity, nothing to roll the work up against | All projects (not category-scoped); **windowed to the prior quarter + current QTD** |
 | `v_exception_recurring_compliance` | Top-level tasks (no `parent_task_id`) in a "Books Maintenance"-category project with no `sequence_id` | Books Maintenance category only; sub-tasks excluded since they inherit recurrence from their parent and don't carry their own `sequence_id` |
 
 **Missing-activity split into two views.** Originally one view
@@ -228,6 +229,46 @@ made to turn the rules as discussed into SQL, not confirmed facts):
   categories — it checks every billable and non-billable timelog site-wide,
   since excess time logged anywhere seemed worth surfacing. Say the word if
   this should be scoped down to match the other rules instead.
+
+### Untasked time: `v_exception_time_without_task`
+
+Teamwork allows logging time straight to a project without naming a task.
+That leaves the work undescribed — no tasklist, no Activity, nothing to roll
+it up against — so this view surfaces it.
+
+**Built on `v_timelog_detail`, not on `timelogs`.** "No task" therefore has
+a single definition, and any fix to the underlying joins or the derived
+`hours` propagates here for free. That makes creation order matter:
+`v_timelog_detail` must exist first, and `create_or_replace_views()`
+iterates the dict in insertion order, so this entry stays after it. A test
+asserts that ordering.
+
+The filter is `d.task_id IS NULL`, not a string comparison against
+`task_join_status`. Same population, but it cannot silently break if that
+label's wording is ever edited.
+
+**Window: from the start of the prior quarter onward**, evaluated in
+`REPORTING_TIMEZONE`. In practice that is "prior quarter + current QTD",
+since there is normally no data after today.
+
+- `quarter_bucket` splits the two periods (`Current QTD` / `Prior quarter`)
+  so a Looker report can show them side by side, and `quarter_label`
+  (e.g. `2026-Q3`) gives a clean grouping dimension.
+- **There is deliberately no upper bound.** Capping at `CURRENT_DATE` would
+  hide a timelog dated in the future — which is itself an anomaly worth
+  seeing on an exception report. Verified against the quarter boundaries
+  before shipping, including the January case where the window has to reach
+  back into the prior year (on 2027-01-15 the window opens at 2026-10-01).
+
+**Scope is site-wide**, not restricted to `MONITORED_CATEGORIES` —
+following `v_exception_long_time_entries` rather than rules 1/2/5. Untasked
+time on an internal or uncategorised project is as much a gap in the record
+as on a billable one. Say the word if it should be narrowed.
+
+Every row carries `user_name`, `user_email`, `project_name`, `client_name`,
+`proj_owner`, `hours`, `billable_status` and the timelog's own description,
+so a follow-up can go straight to the person and the project without
+another join.
 
 ### Drill-down reporting: `v_timelog_detail`
 

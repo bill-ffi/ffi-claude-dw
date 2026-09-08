@@ -242,6 +242,78 @@ class TestTimelogDetailView:
         assert "UNITS ARE UNVERIFIED" in source
 
 
+class TestTimeWithoutTaskView:
+    """Exception rule: time posted to a project with no task at all."""
+
+    NAME = "v_exception_time_without_task"
+
+    def test_is_registered_and_renders(self, sql):
+        assert self.NAME in views.VIEW_NAMES
+        assert self.NAME in sql
+
+    def test_is_created_after_the_view_it_reads_from(self, sql):
+        # BigQuery needs the referenced view to exist already, and
+        # create_or_replace_views() iterates this dict in insertion order.
+        order = list(sql)
+        assert order.index("v_timelog_detail") < order.index(self.NAME)
+
+    def test_layers_on_the_detail_view_rather_than_re_deriving(self, sql):
+        body = sql[self.NAME]
+        assert "FROM `radiant-rig-284611.teamwork_data.v_timelog_detail` d" in body
+        # Re-joining the base tables here would duplicate the definition of
+        # "no task" and let the two drift.
+        for table in ("timelogs", "tasks", "users", "projects"):
+            assert f".{table}` " not in body, f"re-derives from {table}"
+
+    def test_filters_on_the_column_not_the_label(self, sql):
+        # Same population as task_join_status = 'No task (project-level
+        # time)', but cannot break if that wording is edited.
+        body = sql[self.NAME]
+        assert "WHERE d.task_id IS NULL" in body
+        assert "task_join_status" not in body
+
+    def test_window_starts_at_the_prior_quarter(self, sql):
+        body = sql[self.NAME]
+        assert "INTERVAL 1 QUARTER" in body
+        assert "AS prior_quarter_start" in body
+        assert "d.log_date >= b.prior_quarter_start" in body
+
+    def test_window_has_no_upper_bound(self, sql):
+        # Deliberate: a future-dated timelog is itself an anomaly and an
+        # exception report should surface it, not hide it behind a
+        # CURRENT_DATE ceiling.
+        body = sql[self.NAME]
+        assert "log_date <=" not in body and "log_date <" not in body
+
+    def test_quarters_are_evaluated_in_the_reporting_timezone(self, sql):
+        # A bare CURRENT_DATE() would flip the quarter boundary early every
+        # evening, exactly as it did in the user-hours views.
+        body = sql[self.NAME]
+        assert not re.search(r"CURRENT_DATE\(\s*\)", body)
+        zones = re.findall(r"CURRENT_DATE\('([^']+)'\)", body)
+        assert zones and set(zones) == {views.REPORTING_TIMEZONE}
+
+    def test_splits_current_qtd_from_prior_quarter(self, sql):
+        body = sql[self.NAME]
+        assert "'Current QTD'" in body and "'Prior quarter'" in body
+        assert "AS quarter_bucket" in body
+        assert "d.log_date >= b.current_quarter_start THEN 'Current QTD'" in body
+
+    def test_is_site_wide_not_category_scoped(self, sql):
+        # Follows v_exception_long_time_entries: untasked time on an
+        # internal project is as much a gap as on a billable one.
+        body = sql[self.NAME]
+        for category in views.MONITORED_CATEGORIES:
+            assert f"'{category}'" not in body
+
+    def test_carries_the_columns_a_follow_up_needs(self, sql):
+        body = sql[self.NAME]
+        for col in ("user_name", "user_email", "project_name", "client_name",
+                    "proj_owner", "hours", "billable_status",
+                    "timelog_description", "quarter_label"):
+            assert col in body, col
+
+
 class TestSqlStringArray:
     def test_renders_a_bigquery_array_literal(self):
         assert views._sql_string_array(["a", "b"]) == "['a', 'b']"
