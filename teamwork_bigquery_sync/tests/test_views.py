@@ -157,6 +157,70 @@ class TestNullSafePredicates:
         )
 
 
+class TestTimelogDetailView:
+    """A wide drill-down over every time entry, for Looker Studio."""
+
+    def test_is_registered_and_renders(self, sql):
+        assert "v_timelog_detail" in views.VIEW_NAMES
+        assert "v_timelog_detail" in sql
+
+    def test_joins_all_four_tables(self, sql):
+        body = sql["v_timelog_detail"]
+        assert "FROM `radiant-rig-284611.teamwork_data.timelogs` tl" in body
+        for table in ("projects", "tasks", "users"):
+            assert f"`radiant-rig-284611.teamwork_data.{table}`" in body, table
+
+    def test_every_join_is_a_left_join(self, sql):
+        # An inner join anywhere would silently drop time entries — the one
+        # thing a drill-down over timelogs must never do.
+        body = sql["v_timelog_detail"]
+        joins = re.findall(r"^(\w*\s*JOIN)\s", body, re.M)
+        assert joins and all(j.strip().startswith("LEFT") for j in joins), joins
+
+    def test_surfaces_the_reporting_columns_asked_for(self, sql):
+        body = sql["v_timelog_detail"]
+        for col in ("project_name", "user_name", "tasklist_name", "activity"):
+            assert f"AS {col}" in body or f".{col}," in body, col
+
+    def test_explains_why_task_columns_are_blank(self, sql):
+        # Blank task fields mean either project-level time or a task outside
+        # the tasks-table scope; a report cannot tell those apart otherwise.
+        body = sql["v_timelog_detail"]
+        assert "AS task_join_status" in body
+        assert "No task (project-level time)" in body
+        assert "Task outside tasks-table scope" in body
+
+    def test_hours_are_derived_from_minutes_not_the_rounded_column(self, sql):
+        # timelogs.hours is stored pre-rounded to 4dp; summing it across tens
+        # of thousands of rows accumulates the rounding.
+        body = sql["v_timelog_detail"]
+        assert "tl.minutes / 60 AS hours" in body
+        assert "tl.hours" not in body
+
+    def test_billable_status_covers_the_null_case(self, sql):
+        # A NULL boolean drops out of both sides of a Looker Yes/No filter.
+        body = sql["v_timelog_detail"]
+        assert "AS billable_status" in body
+        assert "'Unknown'" in body
+
+    def test_week_matches_the_house_sunday_start_convention(self, sql):
+        body = sql["v_timelog_detail"]
+        assert "DATE_TRUNC(tl.log_date, WEEK) AS log_week_start" in body
+        assert "WEEK(MONDAY)" not in body
+
+    def test_carries_user_email_for_looker_row_level_security(self, sql):
+        # A timelog has exactly one user, so this is a clean exact-match
+        # field for Looker's per-viewer filtering.
+        assert "u.email AS user_email" in sql["v_timelog_detail"]
+
+    def test_does_not_expose_rate_or_cost_columns(self, sql):
+        # billable_rate/cost_rate are comp-adjacent; excluded deliberately
+        # so this view can be shared more widely than the users table.
+        body = sql["v_timelog_detail"]
+        for col in ("billable_rate", "cost_rate", "user_cost", "user_rate"):
+            assert col not in body, f"{col} present — see README on sensitivity"
+
+
 class TestSqlStringArray:
     def test_renders_a_bigquery_array_literal(self):
         assert views._sql_string_array(["a", "b"]) == "['a', 'b']"

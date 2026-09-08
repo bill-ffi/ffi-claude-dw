@@ -121,6 +121,7 @@ VIEW_NAMES = [
     "v_usermins",
     "v_user_daily_billable_hours_base",
     "v_user_weekly_billable_hours",
+    "v_timelog_detail",
 ]
 
 
@@ -611,6 +612,107 @@ CROSS JOIN bounds b
 LEFT JOIN current_week_pace cwp ON cwp.user_id = m.user_id
 WHERE b.today_order <= 5
   AND db.day_order >= b.today_order
+"""
+
+    # Not an exception rule and not part of the user-hours report — a wide,
+    # unfiltered drill-down over every time entry, meant as a Looker Studio
+    # data source for ad-hoc slicing by project, client, person, tasklist and
+    # Activity. One row per timelog, always: a timelog has exactly one user,
+    # one project and at most one task, and `tasks` is de-duplicated by
+    # task_id in the pipeline, so none of these joins can fan out.
+    #
+    # Three things this view does that the two exception views above do not,
+    # because a drill-down surfaces rows those rules filter away:
+    #
+    #  1. `task_join_status` explains WHY the task columns are blank on a
+    #     row. They can be blank for two completely different reasons and a
+    #     report that cannot tell them apart will read one as the other:
+    #       - the time was logged against a project with no task at all
+    #         (Teamwork permits this), or
+    #       - the task exists in Teamwork but not in our `tasks` table,
+    #         because that table is scoped to active projects plus those
+    #         archived on/after ARCHIVED_PROJECT_TASKS_CUTOFF (823 of 1,889
+    #         projects as of 2026-09-04), while `timelogs` is scoped only by
+    #         date and so covers all of them.
+    #     Without this column, "Activity is blank" looks like a compliance
+    #     problem when it is often just an out-of-scope project.
+    #
+    #  2. `hours` is computed here as minutes/60 rather than reading
+    #     timelogs.hours, which the pipeline stores pre-rounded to 4 decimal
+    #     places. Rounding per row is harmless when reading one entry and
+    #     accumulates when Looker SUMs tens of thousands. minutes is the
+    #     value Teamwork actually holds, so it is the one to aggregate from.
+    #
+    #  3. `billable_status` is a string, not the raw boolean. is_billable can
+    #     be NULL, and a NULL boolean in Looker silently drops out of both
+    #     sides of a Yes/No filter. The raw boolean is kept alongside it for
+    #     anyone who wants it.
+    #
+    # log_week_start uses the same Sunday-start week as
+    # v_user_daily_billable_hours_base so the two reports agree on which week
+    # a date belongs to — Looker's own week grouping would default to Monday
+    # and quietly disagree.
+    views["v_timelog_detail"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_timelog_detail")} AS
+SELECT
+  -- the time entry
+  tl.timelog_id,
+  tl.log_date,
+  DATE_TRUNC(tl.log_date, WEEK) AS log_week_start,
+  DATE_TRUNC(tl.log_date, MONTH) AS log_month,
+  tl.minutes,
+  tl.minutes / 60 AS hours,
+  tl.is_billable,
+  CASE
+    WHEN tl.is_billable IS TRUE THEN 'Billable'
+    WHEN tl.is_billable IS FALSE THEN 'Non-billable'
+    ELSE 'Unknown'
+  END AS billable_status,
+  tl.description AS timelog_description,
+  tl.is_locked,
+
+  -- who the time belongs to, and who entered it
+  tl.user_id,
+  u.full_name AS user_name,
+  u.email AS user_email,
+  u.user_type,
+  u.is_deleted AS user_is_deleted,
+  tl.logged_by_user_id,
+  lb.full_name AS logged_by_name,
+
+  -- project and client
+  p.project_id,
+  p.name AS project_name,
+  p.category_name,
+  p.client_name,
+  {proj_owner_col},
+  p.status AS project_status,
+  (p.archived_at IS NOT NULL) AS project_is_archived,
+
+  -- task detail (see task_join_status before treating a blank as a finding)
+  tl.task_id,
+  tk.name AS task_name,
+  tk.tasklist_id,
+  tk.tasklist_name,
+  tk.activity,
+  tk.status AS task_status,
+  tk.estimate_minutes,
+  tk.due_date AS task_due_date,
+  tk.parent_task_id,
+  tk.sequence_id,
+  CASE
+    WHEN tl.task_id IS NULL THEN 'No task (project-level time)'
+    WHEN tk.task_id IS NULL THEN 'Task outside tasks-table scope'
+    ELSE 'Task matched'
+  END AS task_join_status,
+
+  tl.synced_at
+FROM {timelogs} tl
+LEFT JOIN {projects} p ON p.project_id = tl.project_id
+LEFT JOIN {tasks} tk ON tk.task_id = tl.task_id
+LEFT JOIN {users} u ON u.user_id = tl.user_id
+LEFT JOIN {users} lb ON lb.user_id = tl.logged_by_user_id
+{proj_owner_join}
 """
 
     return views

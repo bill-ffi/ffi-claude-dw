@@ -229,6 +229,60 @@ made to turn the rules as discussed into SQL, not confirmed facts):
   since excess time logged anywhere seemed worth surfacing. Say the word if
   this should be scoped down to match the other rules instead.
 
+### Drill-down reporting: `v_timelog_detail`
+
+Not an exception rule and not part of the user-hours report — a wide,
+unfiltered Looker Studio data source with **one row per time entry**,
+joined out to project, client, person, tasklist and Activity. 35 columns.
+
+Grain is guaranteed one row per timelog: a timelog has exactly one user,
+one project and at most one task, and `tasks` is de-duplicated by `task_id`
+in the pipeline, so no join can fan out. Every join is a `LEFT JOIN` — an
+inner join anywhere would silently drop time entries, which is the one
+thing a drill-down over timelogs must never do.
+
+Three things it does differently from the two exception views, because a
+drill-down surfaces rows those rules filter away:
+
+- **`task_join_status`** — explains *why* the task columns are blank on a
+  row, which they can be for two unrelated reasons:
+  `'No task (project-level time)'` (Teamwork allows logging time straight
+  to a project) versus `'Task outside tasks-table scope'` (the task exists
+  in Teamwork but `tasks` covers only active projects plus those archived
+  on/after the cutoff — 823 of 1,889 projects — while `timelogs` is scoped
+  only by date and so spans all of them). **Without this column a blank
+  Activity reads as a compliance failure when it is often just an
+  out-of-scope project.** Filter to `'Task matched'` before drawing any
+  conclusion about Activity coverage.
+- **`hours` is computed as `minutes / 60`**, not read from `timelogs.hours`,
+  which the pipeline stores pre-rounded to 4 decimal places. Per-row
+  rounding is invisible on one entry and accumulates when Looker SUMs tens
+  of thousands. `minutes` is what Teamwork actually holds.
+- **`billable_status`** is a string (`Billable` / `Non-billable` /
+  `Unknown`) because `is_billable` can be NULL, and a NULL boolean drops
+  out of *both* sides of a Looker Yes/No filter. The raw boolean is kept
+  alongside it.
+
+`log_week_start` uses the same Sunday-start week as
+`v_user_daily_billable_hours_base`, so the two reports agree on which week
+a date belongs to — Looker's own week grouping defaults to Monday and would
+quietly disagree.
+
+`user_email` is included, so Looker's per-viewer row-level security works
+on this view (a timelog has exactly one user, so it is a clean exact-match
+field — unlike the task-based views, see above).
+
+**Deliberately excluded**: `timelogs.billable_rate` and `cost_rate`. Those
+are comp-adjacent, same caution as `users.user_cost`/`user_rate`, and
+leaving them out lets this view be shared more widely than the `users`
+table. Say the word if a margin or realisation report needs them.
+
+**Cost note**: this view is unbounded — it reads all of `timelogs` on every
+query, and that table is neither partitioned nor clustered. A Looker report
+without a date filter will full-scan it each refresh. Partitioning
+`timelogs` on `log_date` is the fix and needs a one-off table rebuild; see
+"Known gaps".
+
 ### External reference data: `v_usermins`
 
 `v_usermins` is not an exception rule — it's a reference view joining
