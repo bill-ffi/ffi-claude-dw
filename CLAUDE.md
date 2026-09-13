@@ -62,7 +62,7 @@ The seven exception/QC rule views (`v_exception_*`) are mostly simple and self-c
 
 **Creation order matters.** `create_or_replace_views()` iterates the dict returned by `build_view_sql()` in insertion order, and BigQuery requires a referenced view to already exist. Two views read from others: `v_user_weekly_billable_hours` (from `v_user_daily_billable_hours_base` and `v_usermins`) and `v_exception_time_without_task` (from `v_timelog_detail`). Add a dependent view *after* what it reads, and add a test asserting the ordering — `tests/test_views.py` has examples.
 
-`views.py`'s `create_or_replace_views()` only creates/updates views listed in `VIEW_NAMES` — it never drops a view removed from that list. Retiring a view means both removing it from `VIEW_NAMES` *and* manually running `DROP VIEW` in BigQuery, and checking first whether anything in Looker Studio is still pointed at the old name.
+`views.py`'s `create_or_replace_views()` only creates/updates views listed in `VIEW_NAMES` — it never drops a view removed from that list. Retiring a view means both removing it from `VIEW_NAMES` *and* manually running `DROP VIEW` in BigQuery, and checking first whether anything in Looker Studio is still pointed at the old name. Every `--create-views` run now reports orphans (views in the dataset but not in `VIEW_NAMES`) via `views.list_orphan_views()`, logged and carried in `RUN_SUMMARY` as `orphaned_views` — informational, never fatal. Two orphans went unnoticed for months before this existed; see README "Known gaps".
 
 ### The external Google Sheet dependency
 

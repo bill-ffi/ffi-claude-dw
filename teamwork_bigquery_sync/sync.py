@@ -887,10 +887,16 @@ def run_full_sync(cfg, allow_shrink=False):
 
 
 def run_create_views(cfg):
-    """(Re)creates the five exception/QC reporting views. Safe to re-run —
+    """(Re)creates every reporting view in views.VIEW_NAMES. Safe to re-run —
     views are just saved queries, this doesn't touch table data. Does not
     require the full sync's tables to have just been refreshed; it only
     needs them to exist (which ensure_all_tables() guarantees).
+
+    Also reports any ORPHANED views: ones still present in the dataset that
+    VIEW_NAMES no longer lists, and which therefore stopped being maintained
+    without anything saying so. Informational — orphans never fail the run,
+    since dropping a view is a decision that needs a look at Looker Studio
+    first.
     """
     bq_client = bigquery_sync.get_client(cfg.gcp_project_id)
     dataset_ref = bigquery_sync.ensure_dataset(
@@ -902,11 +908,29 @@ def run_create_views(cfg):
     for view_name, status in results.items():
         print(f"  {view_name}: {status}")
 
+    orphans = views.list_orphan_views(bq_client, cfg.gcp_project_id, cfg.bq_dataset)
+    if orphans:
+        logger.warning(
+            "%d view(s) exist in %s but are no longer in VIEW_NAMES: %s. They are "
+            "frozen at their last-written SQL while still querying live tables, so "
+            "they can return fresh-looking numbers from obsolete logic. Check "
+            "Looker Studio, then DROP VIEW them.",
+            len(orphans),
+            cfg.bq_dataset,
+            ", ".join(orphans),
+        )
+        print(f"\n  WARNING: {len(orphans)} orphaned view(s) not in VIEW_NAMES:")
+        for name in orphans:
+            print(f"    {name}  (unmaintained — check Looker Studio, then DROP VIEW)")
+    elif orphans == []:
+        print("\n  No orphaned views — the dataset matches VIEW_NAMES.")
+
     summary = {
         "mode": "create_views",
         "gcp_project_id": cfg.gcp_project_id,
         "bq_dataset": cfg.bq_dataset,
         "views": results,
+        "orphaned_views": orphans,
     }
     logger.info("RUN_SUMMARY %s", json.dumps(summary, default=str))
 

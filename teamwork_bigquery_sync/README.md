@@ -883,24 +883,48 @@ the attached service account directly). Say the word and I'll wire it up.
   delays are still unacceptable after this change, the documented
   fallback is Cloud Scheduler + Cloud Run (see "Scheduling" above), which
   doesn't share GitHub's best-effort queue.
-- **Retired user-report views — drop order matters.**
-  `v_user_daily_billable_hours_long`, `_wide`, `v_user_daily_billable_hours_trend_long`,
-  `_wide`, and `v_user_current_week_hybrid` were all replaced by
-  `v_user_daily_billable_hours_base` / `v_user_weekly_billable_hours` (see
-  "User report" above). `--create-views` does not drop views removed from
-  `VIEW_NAMES` — the old ones stay live in BigQuery until manually
-  dropped. **Before dropping `v_user_daily_billable_hours_wide`
-  specifically**: it was already wired into a live "Team Hours" Combo
-  chart in Looker Studio — rebuild that chart against
-  `v_user_weekly_billable_hours` first, then drop the 5 old views (safe
-  to drop the other 4 immediately; nothing was built against them yet).
-- **Retired `v_exception_missing_activity` — same drop caveat.** Replaced
-  by `v_exception_missing_activity_with_time` and
-  `v_exception_missing_activty_no_time` (see "Exception reporting views"
-  above). `--create-views` won't drop the old view — check whether any
-  Looker Studio report is still pointed at
-  `v_exception_missing_activity` and repoint it before running
-  `DROP VIEW` on it in BigQuery.
+- **Retired views — all now dropped, and orphans are self-reporting
+  (closed 2026-09-13).** `--create-views` never drops a view removed from
+  `VIEW_NAMES`, so a retired view stays live in BigQuery *frozen at its
+  last-written SQL while still querying the live tables* — returning
+  fresh-looking numbers from obsolete logic, with nothing announcing it.
+
+  | Retired view | Replaced by | Status |
+  |---|---|---|
+  | `v_user_daily_billable_hours_long` | `v_user_weekly_billable_hours` | dropped |
+  | `v_user_daily_billable_hours_wide` | `v_user_weekly_billable_hours` | dropped (after its "Team Hours" Combo chart was rebuilt) |
+  | `v_user_daily_billable_hours_trend_long` | `v_user_weekly_billable_hours` | dropped |
+  | `v_user_daily_billable_hours_trend_wide` | `v_user_weekly_billable_hours` | dropped |
+  | `v_user_current_week_hybrid` | `v_user_weekly_billable_hours` | dropped |
+  | **`v_user_daily_billable_hours_trend`** | `v_user_weekly_billable_hours` | dropped 2026-09-13 |
+  | `v_exception_missing_activity` | `..._with_time` + `..._activty_no_time` | dropped 2026-09-13 |
+
+  - **How the last two survived**: this list originally named the five
+    `_long`/`_wide`/`hybrid` views but **not**
+    `v_user_daily_billable_hours_trend` — the original trend view that
+    `_trend_long`/`_trend_wide` had replaced one commit earlier (`fc55e9f`).
+    It was orphaned before the retirement note was written, so it never made
+    the checklist and outlived the cleanup that removed its own successors.
+    It was eventually spotted by eye in a BigQuery console screenshot,
+    months later. `v_exception_missing_activity` was on the list but had
+    simply not been actioned.
+  - **Why that mattered**: the stale trend view still carried
+    `DATE_TRUNC(..., WEEK(MONDAY))` — a Monday-start business week, against
+    the Sunday-start convention every current view uses — and a bare
+    `CURRENT_DATE()`, the UTC bug fixed everywhere else on 2026-09-04.
+    Anything charting from it disagreed with `v_user_weekly_billable_hours`
+    about which week a Sunday belonged to.
+  - **Now automated**: `views.list_orphan_views()` queries
+    `INFORMATION_SCHEMA.VIEWS` and every `--create-views` run reports any
+    view present in the dataset but absent from `VIEW_NAMES` — logged, and
+    carried in `RUN_SUMMARY` as `orphaned_views`. Only VIEWS are listed, so
+    the native tables and the externally-managed Google Sheet table never
+    appear. It returns `null` rather than an empty list if the check itself
+    fails, since a false "clean" would be worse than an admitted failure.
+  - **Orphans never fail the run.** Dropping a view is a decision that needs
+    a look at Looker Studio first: retiring one still means removing it from
+    `VIEW_NAMES`, repointing any report that uses it, and then running
+    `DROP VIEW` by hand.
 - **Endpoint paths.** All four (`PROJECTS_PATH`, `TASKS_PATH`,
   `TIMELOGS_PATH`, `PROJECT_BUDGETS_PATH`) have now returned real data in a
   live `--dry-run` against this account.

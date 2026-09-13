@@ -314,6 +314,63 @@ class TestTimeWithoutTaskView:
             assert col in body, col
 
 
+class TestOrphanViewDetection:
+    """create_or_replace_views() never drops anything, so a view retired from
+    VIEW_NAMES stays live in BigQuery, frozen at its last SQL but still
+    querying live tables. Two went unnoticed for months until they turned up
+    in a console screenshot."""
+
+    class FakeQueryJob:
+        def __init__(self, rows, raises=None):
+            self._rows, self._raises = rows, raises
+
+        def result(self):
+            if self._raises:
+                raise self._raises
+            return [(name,) for name in self._rows]
+
+    class FakeClient:
+        def __init__(self, rows=(), raises=None):
+            self.rows, self.raises, self.sql = rows, raises, None
+
+        def query(self, sql):
+            self.sql = sql
+            return TestOrphanViewDetection.FakeQueryJob(self.rows, self.raises)
+
+    def test_clean_dataset_reports_an_empty_list(self):
+        client = self.FakeClient(rows=views.VIEW_NAMES)
+        assert views.list_orphan_views(client, "p", "d") == []
+
+    def test_identifies_views_missing_from_view_names(self):
+        client = self.FakeClient(
+            rows=list(views.VIEW_NAMES) + ["v_exception_missing_activity",
+                                           "v_user_daily_billable_hours_trend"]
+        )
+        assert views.list_orphan_views(client, "p", "d") == [
+            "v_exception_missing_activity",
+            "v_user_daily_billable_hours_trend",
+        ]
+
+    def test_a_managed_view_absent_from_bigquery_is_not_an_orphan(self):
+        # Orphans are one-directional: extra views in the dataset, not
+        # missing ones. A missing managed view is recreated on the next run.
+        client = self.FakeClient(rows=list(views.VIEW_NAMES)[:-1])
+        assert views.list_orphan_views(client, "p", "d") == []
+
+    def test_queries_information_schema_for_views_only(self):
+        # Restricting to VIEWS keeps the four native tables and the
+        # externally-managed Google Sheet table out of the result.
+        client = self.FakeClient(rows=views.VIEW_NAMES)
+        views.list_orphan_views(client, "myproj", "mydata")
+        assert "`myproj.mydata.INFORMATION_SCHEMA.VIEWS`" in client.sql
+
+    def test_returns_none_rather_than_a_false_clean_when_the_check_fails(self):
+        # Reporting "no orphans" because the query errored would be worse
+        # than admitting the check could not run.
+        client = self.FakeClient(raises=RuntimeError("permission denied"))
+        assert views.list_orphan_views(client, "p", "d") is None
+
+
 class TestSqlStringArray:
     def test_renders_a_bigquery_array_literal(self):
         assert views._sql_string_array(["a", "b"]) == "['a', 'b']"

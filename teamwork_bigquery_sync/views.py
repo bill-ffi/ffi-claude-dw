@@ -818,6 +818,40 @@ WHERE d.task_id IS NULL
     return views
 
 
+def list_orphan_views(bq_client, project_id, dataset):
+    """Views that exist in the dataset but are no longer in VIEW_NAMES.
+
+    `create_or_replace_views()` never drops anything, so a view retired from
+    VIEW_NAMES stays live in BigQuery, frozen at whatever SQL it last had —
+    while still querying the live tables. That is the dangerous shape: it
+    returns fresh-looking numbers from obsolete logic, and nothing announces
+    it. Two of these were found by eye in a console screenshot months after
+    the fact; one of them still carried a Monday-start business week and a
+    bare CURRENT_DATE(), both long since fixed everywhere else.
+
+    Only VIEWS are listed, so the externally-managed Google Sheet table
+    (ANCILLARY_USER_INFO_TABLE) and the four native tables never appear here.
+
+    Returns a sorted list, [] if the dataset is clean, or None if the check
+    itself could not run — reporting a false "clean" would be worse than
+    admitting the check failed.
+    """
+    sql = (
+        f"SELECT table_name FROM `{project_id}.{dataset}.INFORMATION_SCHEMA.VIEWS` "
+        "ORDER BY table_name"
+    )
+    try:
+        existing = {row[0] for row in bq_client.query(sql).result()}
+    except Exception as exc:
+        logger.warning(
+            "Could not list existing views to check for orphans (%s) — "
+            "this is informational only and does not affect the views just created.",
+            exc,
+        )
+        return None
+    return sorted(existing - set(VIEW_NAMES))
+
+
 def create_or_replace_views(bq_client, project_id, dataset):
     """Creates (or updates) every view in VIEW_NAMES. Views are just saved
     queries — this is cheap and safe to re-run any time the rule constants
