@@ -339,29 +339,42 @@ more widely than the `users` table. Margin analysis would need it; ask.
 billable entry with no rate. `SUM` skips NULLs, so a missing rate
 understates revenue rather than inventing zero-value billable work.
 
-> ⚠️ **`billable_rate`'s units are unverified — check before publishing any
-> revenue figure.** `transform.normalize_timelog()` passes Teamwork's
-> `billableRate` straight through, whereas the sibling `userRate`/`userCost`
-> on the people endpoint were confirmed to arrive in **cents** and are
-> divided by 100 there (see `transform.normalize_user()`). Nobody has
-> checked which `billableRate` is. If it is also cents, every
-> `billable_amount` is **100x too large**.
->
-> That would be a bug in `transform.py`, not in this view — the view just
-> multiplies hours by whatever the column holds. To check, pick a person and
-> a rate you know:
->
-> ```sql
-> SELECT user_name, billable_rate, COUNT(*) AS total_rows
-> FROM `radiant-rig-284611.teamwork_data.v_timelog_detail`
-> WHERE billable_rate IS NOT NULL
-> GROUP BY 1, 2 ORDER BY total_rows DESC LIMIT 20;
-> ```
->
-> If the rates come back as e.g. `15000` for someone billed at $150/hr, it
-> is cents. The fix is one line in `transform.py` plus a re-sync — **not** a
-> division in the SQL, which would leave the underlying table wrong for
-> every other consumer.
+**`billable_rate`'s units were verified against known rates on 2026-09-14:
+it arrives in dollars, so `billable_amount` is correct as published.**
+
+This is worth stating explicitly because **the two money fields on this
+account do not agree with each other**, and the inconsistency looks like a
+bug in either direction:
+
+| Field | Endpoint | Arrives as | Handled in |
+|---|---|---|---|
+| `billableRate` | `time.json` | **dollars** | passed through unchanged |
+| `userRate` / `userCost` | `people.json` | **cents** | divided by 100 in `transform.normalize_user()` |
+
+So `transform.normalize_timelog()` passing `billableRate` straight through
+is **correct, not an oversight**, and the `/100` in `normalize_user()` is
+equally correct. Do not "make them consistent" by adding a division to
+`normalize_timelog()` — that would make every revenue figure 100x too
+small — and do not remove the one in `normalize_user()`. This is Teamwork's
+inconsistency, not the pipeline's, and it is the same class of per-endpoint
+surprise as the item-key casing noted above: confirm units per endpoint
+rather than generalizing from a sibling field.
+
+To re-check after any Teamwork-side change, pick a person whose rate you
+know:
+
+```sql
+SELECT user_name, billable_rate, COUNT(*) AS total_rows
+FROM `radiant-rig-284611.teamwork_data.v_timelog_detail`
+WHERE billable_rate IS NOT NULL
+GROUP BY 1, 2 ORDER BY total_rows DESC LIMIT 20;
+```
+
+`150` for someone billed at $150/hr is dollars (the current, expected
+state); `15000` would mean it had switched to cents, and the fix would then
+be one line in `transform.py` plus a re-sync — **not** a division in the
+SQL, which would leave the underlying table wrong for every other
+consumer.
 
 **Cost note**: this view is unbounded — it reads all of `timelogs` on every
 query, and that table is neither partitioned nor clustered. A Looker report
