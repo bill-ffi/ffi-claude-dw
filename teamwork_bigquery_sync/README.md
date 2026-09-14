@@ -125,7 +125,7 @@ independent of the normal sync schedule.
 |---|---|---|
 | `v_exception_missing_activity_with_time` | Tasks with no "Activity" value set AND at least one timelog (`minutes > 0`) posted against them — the more urgent half of the old missing_activity rule, since this is billable work happening with no Activity value | Monitored categories only |
 | `v_exception_missing_activty_no_time` | Tasklist-level rollup of **still-open** tasks (`status != 'completed'`) with no "Activity" value set AND no time posted — one row per tasklist, `missing_activity_no_time_task_count`, only surfaced where that count is 3 or more (a single untouched task isn't noteworthy; a cluster is) | Monitored categories only |
-| `v_exception_missing_estimate` | Tasks with `estimate_minutes` NULL or 0 | Monitored categories only, minus the Client Management / Client Management v2 / HR Advisory tasklist exception within Non-Monthly |
+| `v_exception_missing_estimate` | Tasks with `estimate_minutes` NULL or 0; carries `has_parent_task` (sub-task vs top-level) | Monitored categories only, minus the Client Management / Client Management v2 / HR Advisory tasklist exception within Non-Monthly |
 | `v_exception_billable_time_internal_projects` | Billable timelogs (`minutes > 0`) posted to an internal-category project | `FFI Internal Projects`, `Functional`, or `Individual` category only |
 | `v_exception_long_time_entries` | Timelogs over 2 hours | All projects (not category-scoped) |
 | `v_exception_time_without_task` | Time posted straight to a project with no task at all — no tasklist, no Activity, nothing to roll the work up against | All projects (not category-scoped); **windowed to the prior quarter + current QTD** |
@@ -147,6 +147,22 @@ confirming against a known-completed task's row in BigQuery. The filter is
 written `COALESCE(t.status, '') != 'completed'` rather than
 `t.status != 'completed'`, so a task with a NULL status counts as
 still-open rather than vanishing — see "Known gaps".
+
+**`has_parent_task`** — on `v_exception_missing_estimate` only. Boolean,
+`TRUE` where `tasks.parent_task_id IS NOT NULL`, i.e. the task is a
+**sub-task**; `FALSE` for a top-level task. Added so the missing-estimate
+report can separate the two, since an estimate on a parent and an estimate
+on each of its sub-tasks are different expectations.
+
+This is the same test `v_exception_recurring_compliance` already uses to
+mean "top-level" (`t.parent_task_id IS NULL`), just inverted — the two rules
+agree on what a parent is.
+
+Deliberately **not** derived from `sequence_id`, which is the
+recurring-series identifier and a different thing entirely: sub-tasks
+inherit recurrence from their parent and carry no `sequence_id` of their
+own, so the two columns are close to mutually exclusive. A test asserts the
+derivation so it cannot quietly drift.
 
 **Assignee names, not IDs.** The task-level views
 (missing_activity_with_time, missing_estimate, recurring_compliance)

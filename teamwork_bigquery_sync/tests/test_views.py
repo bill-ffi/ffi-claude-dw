@@ -118,6 +118,43 @@ class TestBusinessWeekShape:
         assert "GREATEST(" in sql["v_user_weekly_billable_hours"]
 
 
+class TestMissingEstimateHasParentTask:
+    """has_parent_task on v_exception_missing_estimate: TRUE for a sub-task,
+    FALSE for a top-level task."""
+
+    NAME = "v_exception_missing_estimate"
+
+    def test_column_is_present(self, sql):
+        assert "AS has_parent_task" in sql[self.NAME]
+
+    def test_derived_from_parent_task_id_not_sequence_id(self, sql):
+        # sequence_id is the recurring-series identifier and unrelated:
+        # sub-tasks inherit recurrence and carry no sequence_id of their own,
+        # so deriving from it would make this column close to the inverse of
+        # what its name says.
+        body = sql[self.NAME]
+        assert "(t.parent_task_id IS NOT NULL) AS has_parent_task" in body
+        assert "sequence_id IS NOT NULL) AS has_parent_task" not in body
+
+    def test_agrees_with_the_recurring_rule_on_what_a_parent_is(self, sql):
+        # v_exception_recurring_compliance uses `parent_task_id IS NULL` to
+        # mean "top-level". This is that test inverted; the two must not
+        # drift apart.
+        assert "t.parent_task_id IS NULL" in sql["v_exception_recurring_compliance"]
+        assert "(t.parent_task_id IS NOT NULL) AS has_parent_task" in sql[self.NAME]
+
+    def test_is_a_boolean_expression_not_the_raw_id(self, sql):
+        # A bare parent_task_id would surface as a number in Looker rather
+        # than a Yes/No dimension.
+        assert "t.parent_task_id," not in sql[self.NAME]
+
+    def test_only_this_view_gained_the_column(self, sql):
+        # The request was scoped to the missing-estimate rule.
+        others = [n for n, b in sql.items()
+                  if n != self.NAME and "has_parent_task" in b]
+        assert others == [], others
+
+
 class TestNullSafePredicates:
     """In SQL a comparison against NULL yields NULL, not TRUE, and a WHERE
     clause keeps only rows that are TRUE — so an unguarded predicate

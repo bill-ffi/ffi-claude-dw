@@ -246,6 +246,14 @@ GROUP BY p.project_id, p.name, p.category_name, p.client_name, proj_owner, t.tas
 HAVING COUNT(*) >= 3
 """
 
+    # has_parent_task: TRUE for a sub-task, FALSE for a top-level task.
+    # Same test v_exception_recurring_compliance already uses to mean
+    # "top-level" (`t.parent_task_id IS NULL`), just inverted — so the two
+    # rules agree on what a parent is. Deliberately NOT derived from
+    # sequence_id, which is the recurring-series identifier and unrelated:
+    # sub-tasks inherit recurrence from their parent and carry no
+    # sequence_id of their own, so the two are close to mutually exclusive.
+    #
     # COALESCE on tasklist_name for the same reason as the status filter
     # above: `NULL IN (...)` is NULL, so `TRUE AND NULL` is NULL, and
     # `NOT NULL` is NULL — meaning a Non-Monthly task with no tasklist name
@@ -266,6 +274,7 @@ SELECT
   t.name AS task_name,
   t.status,
   t.estimate_minutes,
+  (t.parent_task_id IS NOT NULL) AS has_parent_task,
   {assignee_names},
   {has_time_logged_col},
   t.due_date,
