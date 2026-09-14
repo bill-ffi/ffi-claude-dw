@@ -131,6 +131,57 @@ independent of the normal sync schedule.
 | `v_exception_time_without_task` | Time posted straight to a project with no task at all — no tasklist, no Activity, nothing to roll the work up against | All projects (not category-scoped); **windowed to the prior quarter + current QTD** |
 | `v_exception_recurring_compliance` | Top-level tasks (no `parent_task_id`) in a "Books Maintenance"-category project with no `sequence_id` | Books Maintenance category only; sub-tasks excluded since they inherit recurrence from their parent and don't carry their own `sequence_id` |
 
+### `v_task_review` — the data-hygiene review surface
+
+One row per task, every task **open and completed** whose project is not
+archived. Unlike the `v_exception_*` rules it **asserts no policy and flags
+nothing**: it exposes the dimensions and a set of `has_*`/`is_*` booleans, and
+the reviewer decides what counts as a problem by combining filters in Looker
+Studio. "Show me Books Maintenance tasks for this client, assigned to nobody,
+with no estimate" is a filter combination here, not a new view.
+
+Requested filter dimensions, all present: `proj_owner`, `project_name`,
+`assignee_names`, `client_name`, `category_name`, `tasklist_name`, `task_name`,
+`is_recurring`, `has_estimate`, `has_time_logged`.
+
+Added beyond the request, in rough order of how often they earn their place:
+
+| Column | Why |
+|---|---|
+| `task_url` | Teamwork deep link. A review tool people act on is far more useful when the fix is one click from the finding. |
+| `has_assignee` / `assignee_count` | Unassigned work is usually the highest-value hygiene gap, and it isn't visible from any of the requested filters. |
+| `has_activity` / `activity` | The same gap the two `missing_activity` rules chase, here as a filter instead of a fixed rule. |
+| `has_due_date`, `is_overdue`, `days_overdue` | Scheduling hygiene. `is_overdue` is false for completed tasks — a late-but-finished task is not actionable. |
+| `logged_hours`, `billable_logged_hours`, `time_entry_count` | Turns `has_time_logged` from a yes/no into "how much". |
+| `estimate_variance_hours`, `pct_of_estimate_used`, `is_over_estimate` | Estimate quality, the natural follow-on to `has_estimate`. |
+| `days_since_updated`, `days_since_last_time`, `last_time_logged_date` | Staleness — an open task untouched for months is a different finding from one with a missing field. |
+| `has_description`, `is_private`, `has_parent_task`, `priority`, `progress_pct` | Cheap dimensions that make the filter set materially more expressive. |
+| `task_status`, `is_completed`, `project_status`, `project_is_billable` | Needed to separate the open and completed halves, since both are in scope. |
+| `hygiene_gap_count` | Convenience only — counts five unambiguous gaps so a reviewer can sort worst-first. The individual booleans are the source of truth. |
+
+**Deliberately excluded**: `cost_rate`, `user_cost`, `user_rate`. Same caution
+as `v_timelog_detail` — leaving comp-adjacent columns out lets this view be
+shared more widely than the `users` table. A test enforces it.
+
+**Grain is one row per task**, per your instruction: assignees are concatenated
+into a single `assignee_names` string. Task counts are therefore always
+correct with no dedupe step, but **an assignee filter in Looker Studio must be
+a "Text contains" control, not an exact-match dropdown** — the distinct values
+are combinations ("Bob, Jane") rather than people. The alternative considered
+was fanning out one row per task-per-assignee, which gives a clean dropdown but
+double-counts every multi-assignee task; that trade was declined.
+
+> ⚠️ **`has_time_logged` means "no time in *loaded* history", not "never".**
+> `timelogs` holds only what the pipeline has ingested, which currently begins
+> **2026-01-01**. A task whose only time was posted before then reads
+> `has_time_logged = FALSE`, and `days_since_last_time` is NULL. Before
+> concluding an older task was never worked, widen the history with
+> `--backfill-months`. Every column derived from time inherits this.
+
+A task whose project row is missing entirely also passes the archived filter
+(the project join is a `LEFT JOIN`). That is the intended direction for a
+review tool: an orphaned task surfaces rather than silently disappearing.
+
 **Missing-activity split into two views.** Originally one view
 (`v_exception_missing_activity`), split per your instruction into
 `v_exception_missing_activity_with_time` (task-level, time already posted —

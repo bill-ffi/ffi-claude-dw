@@ -58,7 +58,9 @@ Anything in `views.py` that asks "what is today?" must use `CURRENT_DATE(REPORTI
 
 The seven exception/QC rule views (`v_exception_*`) are mostly simple and self-contained — each is a standalone `CREATE OR REPLACE VIEW` string in `views.py`, parameterized by module-level constants (`MONITORED_CATEGORIES`, `INTERNAL_CATEGORIES`, `ESTIMATE_EXEMPT_TASKLISTS`, `RECURRING_REQUIRED_CATEGORY`, `LONG_ENTRY_THRESHOLD_HOURS`, `LONG_ENTRY_EXEMPT_TASK_IDS`) — change the rule's scope via these constants, not by hand-editing the generated SQL. The exception is `v_exception_time_without_task`, which reads from `v_timelog_detail` instead of re-deriving "no task" from `timelogs`, and so depends on creation order (below).
 
-**Eleven views in total**: seven `v_exception_*` rules, plus `v_usermins`, `v_user_daily_billable_hours_base`, `v_user_weekly_billable_hours` and `v_timelog_detail`.
+**Twelve views in total**: seven `v_exception_*` rules, plus `v_usermins`, `v_user_daily_billable_hours_base`, `v_user_weekly_billable_hours`, `v_timelog_detail` and `v_task_review`.
+
+`v_task_review` is the task-side counterpart to `v_timelog_detail`: one row per task, every task (open *and* completed) whose project is not archived, carrying the `has_*`/`is_*` booleans a data-hygiene reviewer filters on. It asserts no policy — unlike the `v_exception_*` rules it flags nothing on its own. Grain is one row per task with assignees concatenated into a string, so task counts are always correct but an assignee filter in Looker Studio must be "Text contains", not an exact-match dropdown.
 
 **Creation order matters.** `create_or_replace_views()` iterates the dict returned by `build_view_sql()` in insertion order, and BigQuery requires a referenced view to already exist. Two views read from others: `v_user_weekly_billable_hours` (from `v_user_daily_billable_hours_base` and `v_usermins`) and `v_exception_time_without_task` (from `v_timelog_detail`). Add a dependent view *after* what it reads, and add a test asserting the ordering — `tests/test_views.py` has examples.
 

@@ -51,6 +51,20 @@ class TestReportingTimezone:
         offenders = [n for n, b in sql.items() if re.search(r"CURRENT_DATE\(\s*\)", b)]
         assert offenders == [], f"bare CURRENT_DATE() in: {offenders}"
 
+    def test_no_single_argument_date_on_a_timestamp_column(self, sql):
+        """DATE(ts) converts in UTC; DATE(ts, tz) is required.
+
+        Same trap as bare CURRENT_DATE(), one level down: subtracting a
+        UTC-derived date from CURRENT_DATE(REPORTING_TIMEZONE) reads a day off
+        for anything stamped 20:00-23:59 ET. Every TIMESTAMP column in this
+        schema ends in _at, so a single-argument DATE() over one is the bug.
+        """
+        offenders = []
+        for name, body in sql.items():
+            if re.search(r"DATE\(\s*\w+\.\w*_at\s*\)", body):
+                offenders.append(name)
+        assert offenders == [], f"DATE(timestamp) without a timezone in: {offenders}"
+
     def test_every_current_date_is_timezone_qualified(self, sql):
         body = sql["v_user_weekly_billable_hours"]
         zones = re.findall(r"CURRENT_DATE\('([^']+)'\)", body)
@@ -184,11 +198,26 @@ class TestMissingEstimateHasParentTask:
         # than a Yes/No dimension.
         assert "t.parent_task_id," not in sql[self.NAME]
 
-    def test_only_this_view_gained_the_column(self, sql):
-        # The request was scoped to the missing-estimate rule.
+    def test_column_is_confined_to_an_explicit_allowlist(self, sql):
+        """Originally scoped to the missing-estimate rule alone.
+
+        v_task_review was added later and carries the same column as a filter
+        dimension, deliberately. This stays an allowlist rather than being
+        dropped: the point is that the column appears only where someone
+        decided it should, so a third view picking it up by copy-paste still
+        fails here and has to be justified.
+        """
+        allowed = {self.NAME, "v_task_review"}
         others = [n for n, b in sql.items()
-                  if n != self.NAME and "has_parent_task" in b]
+                  if n not in allowed and "has_parent_task" in b]
         assert others == [], others
+
+    def test_every_view_with_the_column_derives_it_identically(self, sql):
+        """Two views answering "is this a sub-task" must not drift apart."""
+        carriers = [n for n, b in sql.items() if "AS has_parent_task" in b]
+        assert len(carriers) >= 2
+        for name in carriers:
+            assert "(t.parent_task_id IS NOT NULL) AS has_parent_task" in sql[name], name
 
 
 class TestNullSafePredicates:
@@ -450,3 +479,118 @@ class TestSqlStringArray:
 
     def test_escapes_embedded_quotes(self):
         assert "\\'" in views._sql_string_array(["O'Brien"])
+
+
+class TestTaskReviewView:
+    """v_task_review: a wide, one-row-per-task hygiene surface.
+
+    Scope was specified as every task -- open AND completed -- whose project
+    is not archived, at one row per task with assignees concatenated.
+    """
+
+    NAME = "v_task_review"
+
+    def test_view_is_registered(self):
+        assert self.NAME in views.VIEW_NAMES
+
+    def test_requested_filter_dimensions_are_all_present(self, sql):
+        """Every dimension named in the request must be filterable."""
+        body = sql[self.NAME]
+        for col in (
+            "AS proj_owner",
+            "AS project_name",
+            "AS assignee_names",
+            "p.client_name",
+            "p.category_name",
+            "t.tasklist_name",
+            "AS task_name",
+            "AS is_recurring",
+            "AS has_estimate",
+            "AS has_time_logged",
+        ):
+            assert col in body, col
+
+    def test_scope_is_non_archived_projects_with_no_status_filter(self, sql):
+        """Open and completed tasks both, projects not archived."""
+        body = sql[self.NAME]
+        assert "WHERE p.archived_at IS NULL" in body
+        # A task-status filter would silently drop the completed half.
+        assert "t.status != 'completed'" not in body
+        assert "COALESCE(t.status, '') != 'completed'\nWHERE" not in body
+        # ...but status must still be exposed so it can be filtered in Looker.
+        assert "t.status AS task_status" in body
+
+    def test_grain_is_one_row_per_task(self, sql):
+        """Assignees resolve in a correlated subquery, never a joined UNNEST.
+
+        A top-level UNNEST of assignee_user_ids would fan out one row per
+        assignee and silently double every task count on multi-assignee tasks.
+        """
+        body = sql[self.NAME]
+        head = body.split("FROM ", 1)[1] if "FROM " in body else body
+        tail = head[head.index("`") :] if "`" in head else head
+        assert "JOIN UNNEST(t.assignee_user_ids)" not in tail
+        assert "CROSS JOIN UNNEST" not in tail
+        assert "AS assignee_names" in body
+
+    def test_boolean_flags_are_null_safe(self, sql):
+        """A NULL status or description must not swallow the row's flag."""
+        body = sql[self.NAME]
+        assert "COALESCE(t.status, '') = 'completed'" in body
+        assert "COALESCE(t.description, '') != ''" in body
+        assert "COALESCE(ARRAY_LENGTH(t.assignee_user_ids), 0)" in body
+
+    def test_estimate_comparisons_are_null_not_zero_without_an_estimate(self, sql):
+        """An un-estimated task must not read as exactly on budget.
+
+        Emitting 0 would let SUM(estimate_variance_hours) pull toward zero as
+        though those tasks had come in on target; NULL is skipped instead.
+        """
+        body = sql[self.NAME]
+        assert "AS estimate_variance_hours" in body
+        assert "AS pct_of_estimate_used" in body
+        assert "SAFE_DIVIDE(" in body, "a plain / risks divide-by-zero"
+
+    def test_time_columns_come_from_one_aggregate_not_per_column_subqueries(self, sql):
+        """Six correlated subqueries would re-scan timelogs six times a task."""
+        body = sql[self.NAME]
+        assert "WITH task_time AS (" in body
+        assert "LEFT JOIN task_time tt ON tt.task_id = t.task_id" in body
+
+    def test_zero_minute_entries_do_not_count_as_time_logged(self, sql):
+        body = sql[self.NAME]
+        assert "tl.minutes > 0" in body
+
+    def test_uses_the_reporting_timezone_for_every_date_question(self, sql):
+        """Overdue and staleness are "as of today" and must not ask UTC."""
+        body = sql[self.NAME]
+        assert f"CURRENT_DATE('{views.REPORTING_TIMEZONE}')" in body
+        assert f"DATE(t.updated_at, '{views.REPORTING_TIMEZONE}')" in body
+
+    def test_completed_tasks_are_never_overdue(self, sql):
+        """Overdue means actionable; a late-but-finished task is not a finding."""
+        body = sql[self.NAME]
+        overdue = body[body.index("AS is_overdue") - 400 : body.index("AS is_overdue")]
+        assert "COALESCE(t.status, '') != 'completed'" in overdue
+
+    def test_comp_adjacent_columns_are_not_exposed(self, sql):
+        """Same caution as v_timelog_detail: this view gets shared widely."""
+        body = sql[self.NAME]
+        for col in ("u.cost_rate", "tl.cost_rate", "user_cost", "user_rate"):
+            assert col not in body, col
+
+    def test_hygiene_gap_count_only_counts_documented_gaps(self, sql):
+        """It must not quietly encode a policy about time logging.
+
+        "No time logged" is normal for a task not yet started, so counting it
+        would make the score meaningless on any healthy backlog.
+        """
+        body = sql[self.NAME]
+        gap = body[body.index("AS hygiene_gap_count") - 600 : body.index("AS hygiene_gap_count")]
+        assert "assignee_user_ids" in gap
+        assert "estimate_minutes" in gap
+        assert "activity" in gap
+        assert "due_date" in gap
+        assert "description" in gap
+        assert "tt.logged_hours" not in gap
+        assert "has_time_logged" not in gap

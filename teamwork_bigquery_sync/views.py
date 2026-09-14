@@ -136,6 +136,7 @@ VIEW_NAMES = [
     "v_user_weekly_billable_hours",
     "v_timelog_detail",
     "v_exception_time_without_task",
+    "v_task_review",
 ]
 
 
@@ -855,6 +856,181 @@ FROM {fqn("v_timelog_detail")} d
 CROSS JOIN bounds b
 WHERE d.task_id IS NULL
   AND d.log_date >= b.prior_quarter_start
+"""
+
+    # A wide, one-row-per-task review surface for data hygiene: "show me every
+    # task where X is missing". Not an exception rule -- it asserts no policy
+    # and flags nothing on its own. It exposes the raw dimensions and a set of
+    # has_/is_ booleans, and the person reviewing decides what counts as a
+    # problem by combining filters in Looker Studio.
+    #
+    # Scope, per your instruction: every task -- open AND completed -- whose
+    # project is not archived. Completed tasks are in deliberately; a completed
+    # task with no time logged or no estimate is still a hygiene finding.
+    # Because the project join is a LEFT JOIN, a task whose project row is
+    # missing entirely also passes the filter. That is the safe direction for a
+    # review tool: an orphaned task surfaces rather than silently disappearing.
+    #
+    # Grain is one row per task, per your instruction -- assignees are
+    # concatenated into a single string by {assignee_names}, the same trade-off
+    # the other task views make. Task counts are therefore always correct with
+    # no dedupe step, but an assignee filter in Looker Studio must be a "Text
+    # contains" control, not an exact-match dropdown, because the distinct
+    # values are combinations ("Bob, Jane") rather than people.
+    #
+    # Time columns come from one pre-aggregated CTE joined once, rather than a
+    # correlated subquery per column: six time-derived columns as six EXISTS/
+    # SUM subqueries would re-scan timelogs six times per task.
+    #
+    # CAVEAT on has_time_logged and every column derived from it: `timelogs`
+    # only holds history the pipeline has actually loaded, which currently
+    # begins 2026-01-01. A task whose only time was posted before then reads
+    # has_time_logged = FALSE. Treat "no time logged" as "no time in loaded
+    # history", and widen it with --backfill-months before drawing a
+    # conclusion about an older task.
+    views["v_task_review"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_task_review")} AS
+WITH task_time AS (
+  SELECT
+    tl.task_id,
+    SUM(tl.minutes) / 60 AS logged_hours,
+    SUM(IF(tl.is_billable, tl.minutes, 0)) / 60 AS billable_logged_hours,
+    COUNT(*) AS time_entry_count,
+    COUNT(DISTINCT tl.user_id) AS time_contributor_count,
+    MIN(tl.log_date) AS first_time_logged_date,
+    MAX(tl.log_date) AS last_time_logged_date
+  FROM {timelogs} tl
+  WHERE tl.task_id IS NOT NULL AND tl.minutes > 0
+  GROUP BY tl.task_id
+)
+SELECT
+  -- identity, and a way back to the record so a reviewer can fix it
+  t.task_id,
+  t.name AS task_name,
+  t.web_link AS task_url,
+
+  -- project and client context
+  p.project_id,
+  p.name AS project_name,
+  {proj_owner_col},
+  p.category_name,
+  p.client_name,
+  p.status AS project_status,
+  p.is_billable AS project_is_billable,
+
+  -- where the task sits
+  t.tasklist_id,
+  t.tasklist_name,
+  t.parent_task_id,
+  (t.parent_task_id IS NOT NULL) AS has_parent_task,
+
+  -- who owns the work
+  {assignee_names},
+  COALESCE(ARRAY_LENGTH(t.assignee_user_ids), 0) AS assignee_count,
+  COALESCE(ARRAY_LENGTH(t.assignee_user_ids), 0) > 0 AS has_assignee,
+
+  -- state
+  t.status AS task_status,
+  (COALESCE(t.status, '') = 'completed') AS is_completed,
+  t.priority,
+  t.progress_pct,
+  t.is_private,
+
+  -- recurrence: Teamwork's native mechanism, shared sequence_id per series
+  t.sequence_id,
+  (t.sequence_id IS NOT NULL) AS is_recurring,
+
+  -- the Activity custom field
+  t.activity,
+  (t.activity IS NOT NULL) AS has_activity,
+
+  -- estimate
+  t.estimate_minutes,
+  t.estimate_minutes / 60 AS estimate_hours,
+  (COALESCE(t.estimate_minutes, 0) > 0) AS has_estimate,
+
+  -- dates
+  t.start_date,
+  t.due_date,
+  (t.due_date IS NOT NULL) AS has_due_date,
+  (
+    t.due_date IS NOT NULL
+    AND COALESCE(t.status, '') != 'completed'
+    AND t.due_date < CURRENT_DATE('{REPORTING_TIMEZONE}')
+  ) AS is_overdue,
+  IF(
+    t.due_date IS NOT NULL
+      AND COALESCE(t.status, '') != 'completed'
+      AND t.due_date < CURRENT_DATE('{REPORTING_TIMEZONE}'),
+    DATE_DIFF(CURRENT_DATE('{REPORTING_TIMEZONE}'), t.due_date, DAY),
+    NULL
+  ) AS days_overdue,
+
+  -- time actually posted (see the has_time_logged caveat above)
+  COALESCE(tt.logged_hours, 0) AS logged_hours,
+  COALESCE(tt.billable_logged_hours, 0) AS billable_logged_hours,
+  COALESCE(tt.time_entry_count, 0) AS time_entry_count,
+  COALESCE(tt.time_contributor_count, 0) AS time_contributor_count,
+  (tt.task_id IS NOT NULL) AS has_time_logged,
+  tt.first_time_logged_date,
+  tt.last_time_logged_date,
+
+  -- estimate vs actual. NULL, not 0, where there is no estimate to compare
+  -- against: SUM skips NULLs, so an un-estimated task cannot drag a variance
+  -- total toward zero as though it had come in exactly on budget.
+  IF(
+    COALESCE(t.estimate_minutes, 0) > 0,
+    COALESCE(tt.logged_hours, 0) - (t.estimate_minutes / 60),
+    NULL
+  ) AS estimate_variance_hours,
+  IF(
+    COALESCE(t.estimate_minutes, 0) > 0,
+    ROUND(100 * SAFE_DIVIDE(COALESCE(tt.logged_hours, 0), t.estimate_minutes / 60), 1),
+    NULL
+  ) AS pct_of_estimate_used,
+  (
+    COALESCE(t.estimate_minutes, 0) > 0
+    AND COALESCE(tt.logged_hours, 0) > (t.estimate_minutes / 60)
+  ) AS is_over_estimate,
+
+  -- staleness
+  t.created_at,
+  t.updated_at,
+  -- DATE(timestamp) alone converts in UTC; the second argument is required
+  -- or this subtracts a UTC-derived date from an Eastern one and reads a day
+  -- off for anything updated 20:00-23:59 ET. Same trap as an unqualified
+  -- current-date call, one level down.
+  DATE_DIFF(
+    CURRENT_DATE('{REPORTING_TIMEZONE}'),
+    DATE(t.updated_at, '{REPORTING_TIMEZONE}'),
+    DAY
+  ) AS days_since_updated,
+  IF(
+    tt.last_time_logged_date IS NOT NULL,
+    DATE_DIFF(CURRENT_DATE('{REPORTING_TIMEZONE}'), tt.last_time_logged_date, DAY),
+    NULL
+  ) AS days_since_last_time,
+  (COALESCE(t.description, '') != '') AS has_description,
+
+  -- Convenience only, so a reviewer can sort worst-first: how many of the
+  -- five unambiguous gaps below this task has. The individual booleans above
+  -- are the source of truth -- this asserts no policy about which gaps matter
+  -- on which task, and deliberately does not count "no time logged", which is
+  -- normal for a task not yet started.
+  (
+    CAST(COALESCE(ARRAY_LENGTH(t.assignee_user_ids), 0) = 0 AS INT64)
+    + CAST(COALESCE(t.estimate_minutes, 0) = 0 AS INT64)
+    + CAST(t.activity IS NULL AS INT64)
+    + CAST(t.due_date IS NULL AS INT64)
+    + CAST(COALESCE(t.description, '') = '' AS INT64)
+  ) AS hygiene_gap_count,
+
+  t.synced_at
+FROM {tasks} t
+LEFT JOIN {projects} p ON p.project_id = t.project_id
+LEFT JOIN {users} owner ON owner.user_id = p.owner_id
+LEFT JOIN task_time tt ON tt.task_id = t.task_id
+WHERE p.archived_at IS NULL
 """
 
     return views
