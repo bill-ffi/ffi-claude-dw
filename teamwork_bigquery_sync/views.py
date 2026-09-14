@@ -69,6 +69,19 @@ RECURRING_REQUIRED_CATEGORY = "Books Maintenance"
 
 LONG_ENTRY_THRESHOLD_HOURS = 2
 
+# Timelog task_ids the long-entry rule never flags, however many hours they
+# carry. 47878044 is the single task every PTO entry on this account posts
+# against: a full PTO day is logged as 8 hours, so it clears the 2-hour
+# threshold by definition, and staff pre-post PTO before taking the leave, so
+# it clears it for dates that haven't happened yet. Neither is the data-entry
+# problem this rule looks for.
+#
+# Scoped to the task rather than to a project category deliberately: PTO is the
+# only thing posting to this task, so exempting it silences exactly the false
+# positives and nothing else. A category exemption would also hide genuine
+# over-long entries sitting elsewhere in the same category.
+LONG_ENTRY_EXEMPT_TASK_IDS = [47878044]
+
 # The business timezone the user-hours report's "has today happened yet?"
 # logic is evaluated in.
 #
@@ -130,6 +143,10 @@ def _sql_string_array(values):
     return "[" + ", ".join("'" + v.replace("'", "\\'") + "'" for v in values) + "]"
 
 
+def _sql_int_array(values):
+    return "[" + ", ".join(str(int(v)) for v in values) + "]"
+
+
 def build_view_sql(project_id, dataset):
     """Returns {view_name: CREATE OR REPLACE VIEW sql} for every view in VIEW_NAMES."""
 
@@ -144,6 +161,22 @@ def build_view_sql(project_id, dataset):
     monitored = _sql_string_array(MONITORED_CATEGORIES)
     internal = _sql_string_array(INTERNAL_CATEGORIES)
     exempt_tasklists = _sql_string_array(ESTIMATE_EXEMPT_TASKLISTS)
+
+    # Excluded by task_id, NULL-safely. `tl.task_id NOT IN UNNEST(...)` would
+    # be wrong here: timelogs.task_id is NULLABLE (project-level time carries
+    # no task), and in SQL `NULL NOT IN (...)` evaluates to NULL, not TRUE, so
+    # a bare NOT IN would silently drop every no-task entry over the threshold
+    # from this report. COALESCE to a sentinel no real task_id can take keeps
+    # those rows in. Built conditionally because `UNNEST([])` has no inferable
+    # element type in BigQuery and fails to compile.
+    if LONG_ENTRY_EXEMPT_TASK_IDS:
+        long_entry_exempt_tasks = (
+            "\n  AND COALESCE(tl.task_id, -1) NOT IN UNNEST("
+            + _sql_int_array(LONG_ENTRY_EXEMPT_TASK_IDS)
+            + ")"
+        )
+    else:
+        long_entry_exempt_tasks = ""
 
     # A task can have multiple assignees (assignee_user_ids is repeated).
     # Rather than fan out one row per assignee via UNNEST + JOIN (which
@@ -352,7 +385,7 @@ LEFT JOIN {projects} p ON p.project_id = tl.project_id
 LEFT JOIN {tasks} tk ON tk.task_id = tl.task_id
 LEFT JOIN {users} u ON u.user_id = tl.user_id
 {proj_owner_join}
-WHERE tl.hours > {LONG_ENTRY_THRESHOLD_HOURS}
+WHERE tl.hours > {LONG_ENTRY_THRESHOLD_HOURS}{long_entry_exempt_tasks}
 """
 
     views["v_exception_recurring_compliance"] = f"""

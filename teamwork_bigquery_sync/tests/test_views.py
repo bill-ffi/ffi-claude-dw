@@ -85,6 +85,42 @@ class TestRuleConstantsReachTheSql:
     def test_long_entry_threshold_is_interpolated(self, sql):
         assert f"> {views.LONG_ENTRY_THRESHOLD_HOURS}" in sql["v_exception_long_time_entries"]
 
+    def test_exempt_task_ids_are_excluded_from_the_long_entry_rule(self, sql):
+        body = sql["v_exception_long_time_entries"]
+        for task_id in views.LONG_ENTRY_EXEMPT_TASK_IDS:
+            assert str(task_id) in body
+        assert "NOT IN UNNEST(" in body
+
+    def test_long_entry_task_exemption_is_null_safe(self, sql):
+        """timelogs.task_id is NULLABLE -- project-level time carries no task.
+
+        `NULL NOT IN (...)` is NULL, not TRUE, so a bare NOT IN would drop
+        every no-task entry over the threshold out of this report. The
+        exclusion must compare a COALESCEd value, never the raw column.
+        """
+        body = sql["v_exception_long_time_entries"]
+        assert "COALESCE(tl.task_id, -1) NOT IN UNNEST(" in body
+        assert "tl.task_id NOT IN UNNEST(" not in body
+
+    def test_long_entry_sentinel_cannot_collide_with_a_real_task_id(self):
+        """The COALESCE sentinel must be a value no Teamwork task_id can take."""
+        assert all(task_id > 0 for task_id in views.LONG_ENTRY_EXEMPT_TASK_IDS)
+
+    def test_exempt_task_list_empty_emits_no_predicate(self, monkeypatch):
+        """UNNEST([]) has no inferable element type and fails to compile."""
+        monkeypatch.setattr(views, "LONG_ENTRY_EXEMPT_TASK_IDS", [])
+        body = views.build_view_sql("p", "d")["v_exception_long_time_entries"]
+        assert "NOT IN UNNEST(" not in body
+        assert "UNNEST([])" not in body
+
+    def test_task_exemption_applies_only_to_the_long_entry_rule(self, sql):
+        """PTO is exempt from the long-entry rule, not hidden account-wide."""
+        for name, body in sql.items():
+            if name == "v_exception_long_time_entries":
+                continue
+            for task_id in views.LONG_ENTRY_EXEMPT_TASK_IDS:
+                assert str(task_id) not in body, name
+
     def test_estimate_exemption_is_scoped_to_its_category(self, sql):
         body = sql["v_exception_missing_estimate"]
         assert f"'{views.ESTIMATE_EXEMPT_CATEGORY}'" in body

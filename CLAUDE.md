@@ -56,7 +56,7 @@ The user-hours reporting views follow a base-then-union pattern, not one monolit
 
 Anything in `views.py` that asks "what is today?" must use `CURRENT_DATE(REPORTING_TIMEZONE)`, never bare `CURRENT_DATE()` — the bare form returns the UTC date and misclassified 17% of every week (all of 20:00-23:59 ET) until 2026-09-04. See README "Known gaps".
 
-The seven exception/QC rule views (`v_exception_*`) are mostly simple and self-contained — each is a standalone `CREATE OR REPLACE VIEW` string in `views.py`, parameterized by module-level constants (`MONITORED_CATEGORIES`, `INTERNAL_CATEGORIES`, `ESTIMATE_EXEMPT_TASKLISTS`, `RECURRING_REQUIRED_CATEGORY`, `LONG_ENTRY_THRESHOLD_HOURS`) — change the rule's scope via these constants, not by hand-editing the generated SQL. The exception is `v_exception_time_without_task`, which reads from `v_timelog_detail` instead of re-deriving "no task" from `timelogs`, and so depends on creation order (below).
+The seven exception/QC rule views (`v_exception_*`) are mostly simple and self-contained — each is a standalone `CREATE OR REPLACE VIEW` string in `views.py`, parameterized by module-level constants (`MONITORED_CATEGORIES`, `INTERNAL_CATEGORIES`, `ESTIMATE_EXEMPT_TASKLISTS`, `RECURRING_REQUIRED_CATEGORY`, `LONG_ENTRY_THRESHOLD_HOURS`, `LONG_ENTRY_EXEMPT_TASK_IDS`) — change the rule's scope via these constants, not by hand-editing the generated SQL. The exception is `v_exception_time_without_task`, which reads from `v_timelog_detail` instead of re-deriving "no task" from `timelogs`, and so depends on creation order (below).
 
 **Eleven views in total**: seven `v_exception_*` rules, plus `v_usermins`, `v_user_daily_billable_hours_base`, `v_user_weekly_billable_hours` and `v_timelog_detail`.
 

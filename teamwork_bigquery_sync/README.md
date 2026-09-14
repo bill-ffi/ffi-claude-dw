@@ -127,7 +127,7 @@ independent of the normal sync schedule.
 | `v_exception_missing_activty_no_time` | Tasklist-level rollup of **still-open** tasks (`status != 'completed'`) with no "Activity" value set AND no time posted — one row per tasklist, `missing_activity_no_time_task_count`, only surfaced where that count is 3 or more (a single untouched task isn't noteworthy; a cluster is) | Monitored categories only |
 | `v_exception_missing_estimate` | Tasks with `estimate_minutes` NULL or 0; carries `has_parent_task` (sub-task vs top-level) | Monitored categories only, minus the Client Management / Client Management v2 / HR Advisory tasklist exception within Non-Monthly |
 | `v_exception_billable_time_internal_projects` | Billable timelogs (`minutes > 0`) posted to an internal-category project | `FFI Internal Projects`, `Functional`, or `Individual` category only |
-| `v_exception_long_time_entries` | Timelogs over 2 hours | All projects (not category-scoped) |
+| `v_exception_long_time_entries` | Timelogs over 2 hours | All projects (not category-scoped), minus `LONG_ENTRY_EXEMPT_TASK_IDS` |
 | `v_exception_time_without_task` | Time posted straight to a project with no task at all — no tasklist, no Activity, nothing to roll the work up against | All projects (not category-scoped); **windowed to the prior quarter + current QTD** |
 | `v_exception_recurring_compliance` | Top-level tasks (no `parent_task_id`) in a "Books Maintenance"-category project with no `sequence_id` | Books Maintenance category only; sub-tasks excluded since they inherit recurrence from their parent and don't carry their own `sequence_id` |
 
@@ -548,6 +548,32 @@ entirely (Cloud Run uses an attached service account, so the key never
 leaves GCP).
 
 ## Known gaps / things to verify before relying on this
+
+- **PTO trips the long-entry rule, so its task is exempted (2026-09-14).**
+  Staff log a full PTO day as 8 hours against a single task
+  (`task_id 47878044`), and post it *before* taking the leave. Both halves
+  collide with `v_exception_long_time_entries`, which flags anything over
+  `LONG_ENTRY_THRESHOLD_HOURS` with no date bound: every PTO day was a
+  standing false positive, and appeared ahead of the absence. The rule now
+  excludes `LONG_ENTRY_EXEMPT_TASK_IDS`.
+  - Scoped to the **task**, not the project category, because PTO is the only
+    thing posting to that task. A category exemption would also have hidden
+    genuine over-long entries elsewhere in the same category.
+  - **The exclusion is `COALESCE(tl.task_id, -1) NOT IN UNNEST(...)`, and the
+    COALESCE is load-bearing.** `timelogs.task_id` is NULLABLE (project-level
+    time carries no task — 78 such rows as of this date), and in SQL
+    `NULL NOT IN (...)` evaluates to NULL, not TRUE. A bare
+    `tl.task_id NOT IN UNNEST(...)` would therefore have silently dropped
+    every untasked entry over the threshold out of the report — the same NULL
+    trap already recorded for `status` and `tasklist_name` below. Three tests
+    pin this, including one asserting the bare form is *absent*.
+  - Forward-dated time is expected on this account generally, and is **not**
+    a data-entry error. It cannot reach `v_user_weekly_billable_hours`: both
+    branches are bounded (`actual` is `week_start < current_week_start`, the
+    other pins the current week). It *is* present in
+    `v_user_daily_billable_hours_base`, which is deliberately unbounded — any
+    new view reading from that base must bound dates itself if a future week
+    would distort it.
 
 - **Cron was changed away from its intended times and back (2026-09-04).**
   A round of review changed the schedule from `15 4,16 * * *` to
