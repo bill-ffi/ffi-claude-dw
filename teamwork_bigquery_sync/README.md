@@ -500,7 +500,9 @@ Cron: `15 4,16 * * *` — 04:15 and 16:15 UTC.
 | 04:15 | 00:15 | 23:15 *(previous day)* |
 | 16:15 | 12:15 | 11:15 |
 
-- **Evenly spaced**, 12 hours apart.
+- **Evenly spaced on paper**, 12 hours apart — but see the delay data
+  below: in practice *nothing fires on time*, and the real gaps run
+  9.3-15.2h.
 - **Cron is UTC and DST-unaware**, so the Eastern clock times shift by an
   hour once the clocks change. That drift is **accepted deliberately** —
   holding midnight/noon Eastern year-round would mean firing at all four
@@ -509,19 +511,22 @@ Cron: `15 4,16 * * *` — 04:15 and 16:15 UTC.
   refresh justifies. Say the word if it ever does matter.
 - **`schedule:` only fires from the default branch (`main`).** A cron edit
   on a feature branch does nothing until merged.
-- **The `:15` offset is deliberate** — see "Known gaps" for the measured
-  delay data behind it.
+- **The `:15` offset was a mitigation that did not work.** Measured over 19
+  consecutive firings: median delay 4h 22m, and *not one run fired on
+  time*. See "Known gaps" for the full data. The effective schedule is
+  roughly **05:00 and 15:00 ET**, not midnight and noon.
 - `SYNC_TIMEZONE` (`America/New_York`, a workflow env var) controls the
   calendar months of the timelogs window. It is independent of the cron's
   UTC timing — the two are not linked automatically.
 - `timeout-minutes: 60` bounds the job. A hung run would otherwise hold the
   `concurrency` group and silently stall every later scheduled sync.
 
-If GitHub Actions' scheduling reliability continues to be a problem after
-the on-the-hour fix, **Cloud Scheduler + Cloud Run** is the documented
-fallback: real timing guarantees GitHub's best-effort scheduler doesn't
-give, and the service account key never has to leave GCP (Cloud Run can use
-the attached service account directly). Say the word and I'll wire it up.
+**Cloud Scheduler + Cloud Run is the recommended next step**, no longer a
+speculative fallback — the delay data below is now strong enough to justify
+it. Two benefits: real timing guarantees that GitHub's best-effort scheduler
+does not give, and the GCP service-account key stops being a GitHub secret
+entirely (Cloud Run uses an attached service account, so the key never
+leaves GCP).
 
 ## Known gaps / things to verify before relying on this
 
@@ -853,7 +858,7 @@ the attached service account directly). Say the word and I'll wire it up.
     alongside active/current/late/upcoming/completed. It's actually a
     separate `archivedAt` timestamp field (`projects.archived_at` in
     BigQuery), unrelated to `status`.
-- **Scheduled-run delays (partially mitigated, not fully solved).**
+- **Scheduled-run delays — the `:15` mitigation was tried and disproven.**
   The original cron (`0 5,17 * * *`, firing exactly on the hour) was
   investigated after noticing a run at an unexpected time. Pulled via the
   GitHub Actions API (`created_at` on each `event=schedule` run — precise,
@@ -877,12 +882,50 @@ the attached service account directly). Say the word and I'll wire it up.
   hours, when a healthy twice-daily schedule should hold a steady ~12.
   This is more than GitHub's documented "top-of-the-hour congestion"
   effect (typically minutes, not hours) would explain on its own.
-  **Mitigation applied**: moved the cron off `:00` to `15 4,16 * * *`
-  (04:15/16:15 UTC) — a cheap, documented best practice, but not
-  guaranteed to eliminate multi-hour delays given the severity above. If
-  delays are still unacceptable after this change, the documented
-  fallback is Cloud Scheduler + Cloud Run (see "Scheduling" above), which
-  doesn't share GitHub's best-effort queue.
+  **Mitigation applied 2026-09-04**: moved the cron off `:00` to
+  `15 4,16 * * *` — a cheap, documented best practice.
+
+  **It did not work. Measured over the 19 consecutive firings from
+  2026-09-05 to 2026-09-14:**
+
+  | | before (`0 5,17`, 9 runs) | after (`15 4,16`, 19 runs) |
+  |---|---|---|
+  | median delay | 4h 46m | **4h 22m** |
+  | minimum delay | 0h 10m | **1h 59m** |
+  | maximum delay | 8h 16m | **9h 36m** |
+  | fired within 30 min of schedule | 1 of 9 | **0 of 19** |
+  | delayed more than 2 hours | 8 of 9 | **18 of 19** |
+
+  The median barely moved and the *best* case got worse — under the old
+  schedule at least one run was prompt; since the change, none have been.
+  Moving off `:00` is therefore disproven for this repo; do not re-try it,
+  and do not attempt to "tune" the cron to compensate, because the delay
+  varies by 2-3.5 hours *within* each slot and any such tuning would encode
+  a dependency on GitHub's current congestion pattern.
+
+  The delay is also **slot-specific and systematic**, not random noise:
+
+  | Slot | Actually fires (UTC) | In Eastern | Delay range |
+  |---|---|---|---|
+  | 04:15 | 08:37-09:48 | 04:37-05:48 ET | 4h 22m - 5h 34m |
+  | 16:15 | 18:14-19:55 | 14:14-15:55 ET | 2h 00m - 3h 40m |
+
+  So the **effective** schedule is roughly 05:00 and 15:00 ET, not midnight
+  and noon, and real gaps run 9.3-15.2h rather than a steady 12h.
+
+  **What this does and does not cost.** There is *no correctness impact*:
+  the rolling two-month timelog window makes delay harmless at month
+  boundaries, and task scope is computed at run time. All 19 runs succeeded,
+  in 72-159s each, with `rows_dropped` all zero and `activity.method` still
+  `bulk_sideload`. What it costs is freshness and predictability — worst
+  case the data is ~15 hours stale, and a report opened at 1pm ET expecting
+  a midday refresh is showing numbers from ~5am.
+
+  **Next step: Cloud Scheduler + Cloud Run** (see "Scheduling" above). The
+  evidence now justifies escalating rather than tuning further. A cheaper
+  stopgap, if that is deferred, is simply adding more cron slots — four a
+  day instead of two cuts worst-case staleness from ~15h to ~7h without
+  fixing predictability at all.
 - **Retired views — all now dropped, and orphans are self-reporting
   (closed 2026-09-13).** `--create-views` never drops a view removed from
   `VIEW_NAMES`, so a retired view stays live in BigQuery *frozen at its
