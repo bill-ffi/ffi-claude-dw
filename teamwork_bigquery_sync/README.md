@@ -521,7 +521,10 @@ Cron: `15 4,16 * * *` — 04:15 and 16:15 UTC.
 - `timeout-minutes: 60` bounds the job. A hung run would otherwise hold the
   `concurrency` group and silently stall every later scheduled sync.
 
-**Cloud Scheduler + Cloud Run is the recommended next step**, no longer a
+**Cloud Scheduler + Cloud Run is the recommended next step** — planned in
+detail in [`docs/cloud-run-migration.md`](../docs/cloud-run-migration.md),
+including a blocker (the shared `timelogs__staging` table) that must be
+fixed in code before any cutover, no longer a
 speculative fallback — the delay data below is now strong enough to justify
 it. Two benefits: real timing guarantees that GitHub's best-effort scheduler
 does not give, and the GCP service-account key stops being a GitHub secret
