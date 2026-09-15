@@ -285,3 +285,58 @@ class TestTaskWebLink:
             base_url=self.BASE,
         )
         assert row["web_link"] == self.BASE + "/app/tasks/50621302"
+
+
+class TestProjectWebLink:
+    """projects.web_link is constructed, like tasks.web_link.
+
+    v3 returns no meta.webLink on the projects payload either -- confirmed
+    2026-09-15, 0 of 1,890 rows. Format confirmed against the live account:
+    {site}/app/projects/{project_id}/tasks/list.
+    """
+
+    BASE = "https://forwardfinancialintelligenceinc.teamwork.com"
+
+    def test_builds_the_confirmed_url_format(self):
+        assert transform.project_web_link(self.BASE, 1392468) == (
+            self.BASE + "/app/projects/1392468/tasks/list"
+        )
+
+    def test_lands_on_the_task_list_page_not_the_project_overview(self):
+        """The landing spot is a deliberate choice, not an accident.
+
+        /app/projects/<id> is the overview and is a different page. Someone
+        tidying this up later would plausibly shorten it; this fails if they do.
+        """
+        link = transform.project_web_link(self.BASE, 1392468)
+        assert link.endswith("/tasks/list")
+        assert link != self.BASE + "/app/projects/1392468"
+
+    def test_trailing_slash_on_base_url_does_not_double(self):
+        assert transform.project_web_link(self.BASE + "/", 1392468) == (
+            self.BASE + "/app/projects/1392468/tasks/list"
+        )
+
+    def test_missing_half_yields_none_not_a_broken_url(self):
+        assert transform.project_web_link(None, 1392468) is None
+        assert transform.project_web_link("", 1392468) is None
+        assert transform.project_web_link(self.BASE, None) is None
+        assert transform.project_web_link(self.BASE, "") is None
+
+    def test_normalize_project_populates_web_link(self):
+        row = transform.normalize_project(
+            {"id": 1392468, "name": "Monthly Close"}, {}, {}, {}, base_url=self.BASE
+        )
+        assert row["web_link"] == self.BASE + "/app/projects/1392468/tasks/list"
+
+    def test_web_link_is_none_when_no_base_url_is_supplied(self):
+        row = transform.normalize_project(
+            {"id": 1392468, "name": "Monthly Close"}, {}, {}, {}
+        )
+        assert row["web_link"] is None
+
+    def test_project_and_task_links_are_different_shapes(self):
+        """A copy-paste between the two helpers would make one of them wrong."""
+        assert transform.project_web_link(self.BASE, 7) != transform.task_web_link(
+            self.BASE, 7
+        )

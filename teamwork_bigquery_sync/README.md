@@ -640,10 +640,15 @@ leaves GCP).
     recoverable, a column of links that look valid and 404 is not. Populates
     on the next full sync — `--create-views` alone will not fill it, because
     the value lives in the `tasks` table.
-  - **`projects.web_link` is still empty** — the project URL format has not
-    been confirmed and is deliberately not guessed by analogy to the task one.
-    Confirm it the same way (open a project, read the address bar) before
-    wiring `normalize_project()`.
+  - **Fixed for `projects` too (2026-09-15).** `transform.project_web_link()`
+    builds `{base_url}/app/projects/{project_id}/tasks/list`, also confirmed
+    against the live account. Note the path: it lands on the project's **task
+    List page**, not the project overview at `/app/projects/{id}`, per the
+    stated preference — that is where someone reviewing a project's work wants
+    to arrive. It is a deliberate landing spot, not a longer-than-necessary
+    URL; a test fails if it is shortened. The two helpers are intentionally
+    separate rather than one parameterized builder, because the shapes differ
+    and a shared one invites getting a suffix wrong for both at once.
 
 - **PTO trips the long-entry rule, so its task is exempted (2026-09-14).**
   Staff log a full PTO day as 8 hours against a single task

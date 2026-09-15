@@ -86,7 +86,13 @@ def task_project_id(raw):
     )
 
 
-def normalize_project(raw, category_names_by_id, budgets_by_project_id, client_names_by_id=None):
+def normalize_project(
+    raw,
+    category_names_by_id,
+    budgets_by_project_id,
+    client_names_by_id=None,
+    base_url=None,
+):
     if raw.get("status") == "deleted" or raw.get("deletedAt"):
         return None
 
@@ -123,7 +129,13 @@ def normalize_project(raw, category_names_by_id, budgets_by_project_id, client_n
         "budget_used": budget_used,
         "budget_left": budget_left,
         "tag_ids": raw.get("tagIds") or [],
-        "web_link": (raw.get("meta") or {}).get("webLink"),
+        # Constructed, not read off the payload -- see project_web_link().
+        # The meta fallback only covers the no-base_url case; it has never
+        # produced a value in practice.
+        "web_link": (
+            project_web_link(base_url, raw.get("id"))
+            or (raw.get("meta") or {}).get("webLink")
+        ),
         "created_at": raw.get("createdAt"),
         "created_by": raw.get("createdBy"),
         "updated_at": raw.get("updatedAt"),
@@ -133,6 +145,29 @@ def normalize_project(raw, category_names_by_id, budgets_by_project_id, client_n
         "archived_at": raw.get("archivedAt"),
         "synced_at": utc_now_iso(),
     }
+
+
+def project_web_link(base_url, project_id):
+    """Teamwork's own URL for a project, constructed rather than read off the payload.
+
+    Same story as task_web_link(): v3 returns no `meta.webLink` on the projects
+    payload either -- confirmed 2026-09-15, 0 of 1,890 rows -- so this column
+    was empty on every run since it was added.
+
+    Lands on the project's **task List page**, not the project overview, per
+    the stated preference: that is where someone reviewing a project's work
+    wants to arrive. Format confirmed against the live account:
+
+        https://<site>.teamwork.com/app/projects/<project_id>/tasks/list
+
+    Do not "simplify" this to /app/projects/<id>. That is a different page (the
+    overview) and the landing spot is deliberate.
+    """
+    if not base_url or project_id is None or project_id == "":
+        return None
+    return "{}/app/projects/{}/tasks/list".format(
+        str(base_url).rstrip("/"), project_id
+    )
 
 
 def task_web_link(base_url, task_id):

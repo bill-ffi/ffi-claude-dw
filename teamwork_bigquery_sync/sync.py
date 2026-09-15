@@ -561,7 +561,12 @@ def sync_projects(tw_client, bq_client, dataset_ref, allow_shrink=False):
 
     rows = []
     for raw in raw_projects:
-        row = transform.normalize_project(raw, category_names, budgets_by_project, client_names)
+        # base_url off the client, as in sync_tasks(): projects.web_link is
+        # built from it (transform.project_web_link).
+        row = transform.normalize_project(
+            raw, category_names, budgets_by_project, client_names,
+            base_url=tw_client.base_url,
+        )
         if row is not None:
             rows.append(row)
 
