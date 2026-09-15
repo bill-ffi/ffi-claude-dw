@@ -718,7 +718,11 @@ def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids, allow_s
         if project_id not in task_pull_project_ids:
             dropped["out_of_scope"] += 1
             continue
-        row = transform.normalize_task(raw, task_pull_project_ids)
+        # base_url comes off the client rather than being threaded down from
+        # cfg: tasks.web_link is built from it (transform.task_web_link).
+        row = transform.normalize_task(
+            raw, task_pull_project_ids, base_url=tw_client.base_url
+        )
         if row is None:
             continue
         if row["task_id"] in rows_by_task_id:

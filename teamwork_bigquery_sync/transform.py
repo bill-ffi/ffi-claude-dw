@@ -135,7 +135,34 @@ def normalize_project(raw, category_names_by_id, budgets_by_project_id, client_n
     }
 
 
-def normalize_task(raw, in_scope_project_ids):
+def task_web_link(base_url, task_id):
+    """Teamwork's own URL for a task, constructed rather than read off the payload.
+
+    v3 does not return `meta.webLink` on the tasks payload -- confirmed
+    2026-09-15, 0 of 14,595 rows carried one -- so the expression this column
+    used to read was always None and the column materialized empty on every
+    run since it was added. See README "Known gaps".
+
+    The address is deterministic from the id, so building it removes the
+    dependency on Teamwork returning a link at all. Format confirmed against
+    the live account:
+
+        https://<site>.teamwork.com/app/tasks/<task_id>
+
+    `base_url` is config.teamwork_base_url (the site root, no API path), which
+    is why this is built here and not in views.py -- the subdomain is a secret
+    (TEAMWORK_BASE_URL) and does not belong in the repo.
+
+    Returns None rather than a malformed URL when either half is missing: an
+    empty column is recoverable, a column of broken links that look valid is
+    not.
+    """
+    if not base_url or task_id is None or task_id == "":
+        return None
+    return "{}/app/tasks/{}".format(str(base_url).rstrip("/"), task_id)
+
+
+def normalize_task(raw, in_scope_project_ids, base_url=None):
     if raw.get("deletedAt"):
         return None
 
@@ -169,7 +196,13 @@ def normalize_task(raw, in_scope_project_ids):
         # this needs a follow-up call per task. Defaults to None so the
         # column always exists even if that enrichment step fails/is skipped.
         "activity": None,
-        "web_link": (raw.get("meta") or {}).get("webLink"),
+        # Constructed, not read off the payload -- see task_web_link().
+        # The meta fallback is kept only for the case where base_url is
+        # absent; it has never produced a value in practice.
+        "web_link": (
+            task_web_link(base_url, raw.get("id"))
+            or (raw.get("meta") or {}).get("webLink")
+        ),
         "created_at": raw.get("createdAt"),
         "created_by": raw.get("createdByUserId") or raw.get("createdBy"),
         "updated_at": raw.get("updatedAt") or raw.get("dateUpdated"),

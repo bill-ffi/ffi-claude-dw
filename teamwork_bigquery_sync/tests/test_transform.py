@@ -225,3 +225,63 @@ class TestLookupMaps:
             [{"projectId": 1, "capacity": 5}, {"project": {"id": 1}}, {"capacity": 9}]
         )
         assert len(grouped[1]) == 2 and list(grouped) == [1]
+
+
+class TestTaskWebLink:
+    """tasks.web_link is constructed, not read off the payload.
+
+    v3 returns no meta.webLink on the tasks payload -- confirmed against live
+    data on 2026-09-15, 0 of 14,595 rows -- so the old expression silently
+    produced NULL for every task since the column was added. Format confirmed
+    against the live account: {site}/app/tasks/{task_id}.
+    """
+
+    BASE = "https://forwardfinancialintelligenceinc.teamwork.com"
+
+    def test_builds_the_confirmed_url_format(self):
+        assert transform.task_web_link(self.BASE, 50621302) == (
+            self.BASE + "/app/tasks/50621302"
+        )
+
+    def test_trailing_slash_on_base_url_does_not_double(self):
+        assert transform.task_web_link(self.BASE + "/", 50621302) == (
+            self.BASE + "/app/tasks/50621302"
+        )
+
+    def test_missing_half_yields_none_not_a_broken_url(self):
+        """An empty column is recoverable; links that look valid but 404 are not."""
+        assert transform.task_web_link(None, 50621302) is None
+        assert transform.task_web_link("", 50621302) is None
+        assert transform.task_web_link(self.BASE, None) is None
+        assert transform.task_web_link(self.BASE, "") is None
+
+    def test_normalize_task_populates_web_link_without_the_payload_key(self):
+        """The whole point: no meta.webLink present, link still produced."""
+        row = transform.normalize_task(
+            {"id": 50621302, "projectId": 7, "name": "Reconcile bank feed"},
+            None,
+            base_url=self.BASE,
+        )
+        assert row["web_link"] == self.BASE + "/app/tasks/50621302"
+
+    def test_web_link_is_none_when_no_base_url_is_supplied(self):
+        """Callers that don't pass one must not get a malformed link."""
+        row = transform.normalize_task(
+            {"id": 50621302, "projectId": 7, "name": "Reconcile bank feed"}, None
+        )
+        assert row["web_link"] is None
+
+    def test_constructed_link_wins_over_a_payload_meta_value(self):
+        """If Teamwork ever starts returning one, the deterministic form still
+        governs, so the column cannot become a mix of two formats."""
+        row = transform.normalize_task(
+            {
+                "id": 50621302,
+                "projectId": 7,
+                "name": "Reconcile bank feed",
+                "meta": {"webLink": "https://stale.example.com/whatever"},
+            },
+            None,
+            base_url=self.BASE,
+        )
+        assert row["web_link"] == self.BASE + "/app/tasks/50621302"

@@ -613,6 +613,38 @@ leaves GCP).
 
 ## Known gaps / things to verify before relying on this
 
+- **`web_link` is empty on BOTH `tasks` and `projects`, and always has been
+  (confirmed 2026-09-15).** Measured: 0 of 14,595 tasks and 0 of 1,890
+  projects carry a value. `transform.normalize_task()` and
+  `normalize_project()` both read it as
+  `(raw.get("meta") or {}).get("webLink")`, and Teamwork v3 does not return a
+  `meta.webLink` on either payload. A missing dict key yields `None`, so this
+  never raised — the column simply materialized empty on every run since it
+  was added, and nothing noticed until `v_task_review` exposed it as
+  `task_url` and a `WHERE task_url IS NOT NULL` returned zero rows.
+  - Same root cause as the `included`-sideload and item-key-casing entries
+    below: **a payload key that was assumed rather than confirmed**. The
+    defensive pattern this repo uses elsewhere — try candidate keys, log a
+    warning when none match — would have surfaced it on the first run.
+  - The fix is to **construct** the URL from `task_id` / `project_id` and
+    `config.teamwork_base_url` rather than fetch it, which removes the
+    dependency on Teamwork returning a link at all. It belongs in
+    `transform.py` so it lands in the tables for every consumer — **not** in
+    `views.py`, which would put the Teamwork subdomain in the repo when it is
+    currently a GitHub secret (`TEAMWORK_BASE_URL`).
+  - **Fixed for `tasks` (2026-09-15).** `transform.task_web_link()` builds
+    `{base_url}/app/tasks/{task_id}`, a format confirmed against a real task
+    in the live account rather than assumed. `base_url` is taken off
+    `tw_client.base_url` in `sync_tasks()` rather than threaded down from
+    `cfg`. It returns `None` when either half is missing: an empty column is
+    recoverable, a column of links that look valid and 404 is not. Populates
+    on the next full sync — `--create-views` alone will not fill it, because
+    the value lives in the `tasks` table.
+  - **`projects.web_link` is still empty** — the project URL format has not
+    been confirmed and is deliberately not guessed by analogy to the task one.
+    Confirm it the same way (open a project, read the address bar) before
+    wiring `normalize_project()`.
+
 - **PTO trips the long-entry rule, so its task is exempted (2026-09-14).**
   Staff log a full PTO day as 8 hours against a single task
   (`task_id 47878044`), and post it *before* taking the leave. Both halves
