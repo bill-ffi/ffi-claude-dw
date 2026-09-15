@@ -626,6 +626,26 @@ leaves GCP).
     below: **a payload key that was assumed rather than confirmed**. The
     defensive pattern this repo uses elsewhere — try candidate keys, log a
     warning when none match — would have surfaced it on the first run.
+  - **The systemic fix: every run now reports fill rates.** Each stage measures
+    the columns listed in `schemas.ALWAYS_POPULATED_COLUMNS` on the rows it is
+    about to write and carries `fill_rates` + `underfilled_columns` in its
+    `RUN_SUMMARY` block, logging a `WARNING` for anything below
+    `schemas.MIN_FILL_RATE` (1.0). This would have caught both `web_link`
+    columns on their very first run instead of months later. Costs one
+    in-memory pass over rows already held; no extra BigQuery reads.
+    - **Warns, never fails** — same posture as the orphaned-views check. A
+      column that stops populating is a signal for a human, not a reason to
+      abandon a sync that is otherwise writing good data.
+    - The declared list is deliberately **conservative**: only structurally
+      always-present columns. `category_name` (1,885/1,890), `activity`,
+      `estimate_minutes`, `due_date` and `tasklist_name` are legitimately
+      sparse and are excluded, because a warning that fires every run is one
+      nobody reads. Tests assert both halves — that every declared column
+      really exists in its schema (a typo would read 0.0 forever) and that the
+      known-sparse columns stay out.
+    - If a declared column turns out to have legitimate NULLs, **remove it
+      from the list** as a documented decision rather than lowering
+      `MIN_FILL_RATE`, which protects every other column too.
   - The fix is to **construct** the URL from `task_id` / `project_id` and
     `config.teamwork_base_url` rather than fetch it, which removes the
     dependency on Teamwork returning a link at all. It belongs in

@@ -520,6 +520,33 @@ def run_explain_task_scope(cfg):
     return 0
 
 
+def fill_rate_report(table, rows):
+    """Fill rates for `table`'s always-populated columns, for the stage summary.
+
+    Exists because both web_link columns sat at 0% for months while every run
+    reported success -- see README "Known gaps". Measured on the rows about to
+    be written, so it adds one in-memory pass and no BigQuery reads.
+
+    Warns but never fails: like the orphaned-views check, this is a signal for
+    a human, and a column that stops populating is not a reason to abandon a
+    sync that is otherwise writing good data. The WARNING is what surfaces in
+    the Actions log; `underfilled_columns` in RUN_SUMMARY is what a later
+    reader greps for.
+    """
+    columns = schemas.ALWAYS_POPULATED_COLUMNS.get(table, ())
+    rates = transform.fill_rates(rows, columns)
+    underfilled = transform.underfilled_columns(rates, schemas.MIN_FILL_RATE)
+    if underfilled:
+        logger.warning(
+            "%s: %d column(s) below a %.0f%% fill rate: %s",
+            table,
+            len(underfilled),
+            schemas.MIN_FILL_RATE * 100,
+            ", ".join(f"{c}={rates[c]:.1%}" for c in underfilled),
+        )
+    return {"fill_rates": rates, "underfilled_columns": underfilled}
+
+
 def sync_projects(tw_client, bq_client, dataset_ref, allow_shrink=False):
     raw_projects, included = tw_client.list_projects()
     raw_budgets = tw_client.list_project_budgets()
@@ -598,6 +625,7 @@ def sync_projects(tw_client, bq_client, dataset_ref, allow_shrink=False):
         "status": "success",
         "rows_pulled": len(raw_projects),
         "rows_written": written,
+        **fill_rate_report(schemas.PROJECTS_TABLE, rows),
         "categories_resolved": len(category_names),
         "rows_with_category_name": rows_with_category_name,
         "clients_resolved": len(client_names),
@@ -774,6 +802,7 @@ def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids, allow_s
         "rows_written": written,
         "projects_in_scope": len(task_pull_project_ids),
         "rows_dropped": dropped,
+        **fill_rate_report(schemas.TASKS_TABLE, rows),
         "activity": activity_stats,
     }
 
@@ -790,6 +819,7 @@ def sync_users(tw_client, bq_client, dataset_ref, allow_shrink=False):
         "status": "success",
         "rows_pulled": len(raw_users),
         "rows_written": written,
+        **fill_rate_report(schemas.USERS_TABLE, rows),
     }
 
 
@@ -822,6 +852,7 @@ def sync_timelogs_for_window(tw_client, bq_client, gcp_project_id, dataset_id, w
         "status": "success",
         "rows_pulled": len(raw_timelogs),
         "rows_written": written,
+        **fill_rate_report(schemas.TIMELOGS_TABLE, rows),
         "window": [window_start.isoformat(), window_end_exclusive.isoformat()],
         "months_covered": _months_in_window(window_start, window_end_exclusive),
     }

@@ -124,3 +124,36 @@ USERS_SCHEMA = [
     bigquery.SchemaField("updated_at", "TIMESTAMP"),
     bigquery.SchemaField("synced_at", "TIMESTAMP", mode="REQUIRED"),
 ]
+
+
+# Columns that should carry a value on every row, per table.
+#
+# Exists because tasks.web_link and projects.web_link were NULL on 100% of rows
+# for months without anything noticing: they read a payload key Teamwork v3
+# does not return, a missing dict key yields None, and the sync reported
+# success every run. See README "Known gaps". sync.py measures the fill rate of
+# these columns on the rows it is about to write and reports them in
+# RUN_SUMMARY, warning when one is below MIN_FILL_RATE.
+#
+# This list is deliberately CONSERVATIVE. Only columns that are structurally
+# always present belong here -- an id, a name, a timestamp the API always
+# stamps, a value this pipeline constructs itself. Business-optional fields do
+# not: category_name (1,885/1,890), activity, estimate_minutes, due_date and
+# tasklist_name are all legitimately sparse, and listing them would produce a
+# warning on every run, which trains everyone to ignore the warning that
+# matters. Resolution-dependent counts that already have their own stat
+# (rows_with_category_name, clients_resolved) stay where they are.
+#
+# If a column here turns out to have legitimate NULLs, REMOVE IT from this list
+# as a documented decision rather than lowering MIN_FILL_RATE -- the threshold
+# protects every other column too.
+ALWAYS_POPULATED_COLUMNS = {
+    PROJECTS_TABLE: ("project_id", "name", "status", "web_link", "created_at"),
+    TASKS_TABLE: ("task_id", "project_id", "name", "status", "web_link", "created_at"),
+    USERS_TABLE: ("user_id", "full_name"),
+    TIMELOGS_TABLE: ("timelog_id", "user_id", "project_id", "log_date", "minutes"),
+}
+
+# Fill rate below which a column is reported as underfilled. 1.0 because the
+# columns above are chosen to be always-present; anything less is a finding.
+MIN_FILL_RATE = 1.0

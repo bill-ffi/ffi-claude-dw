@@ -451,3 +451,46 @@ def build_budgets_by_project(budgets):
             continue
         by_project.setdefault(project_id, []).append(budget)
     return by_project
+
+
+def _is_populated(value):
+    """Whether a row's value counts as present.
+
+    None and whitespace-only strings are empty. 0, 0.0 and False are NOT --
+    they are real values, and treating them as missing would flag every
+    zero-minute timelog and every non-billable entry. An empty repeated field
+    is empty.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() != ""
+    if isinstance(value, (list, tuple, dict, set)):
+        return len(value) > 0
+    return True
+
+
+def fill_rates(rows, columns):
+    """{column: fraction of rows where it is populated}, rounded to 4 places.
+
+    Measured on the rows about to be written, so it costs one pass over data
+    already in memory rather than a query against BigQuery afterwards.
+
+    Returns {} for no rows: a fill rate over zero rows is undefined, and
+    reporting 0.0 would look identical to a column that failed to populate.
+    An empty pull is already caught by the write guards in bigquery_sync.
+    """
+    if not rows:
+        return {}
+    total = len(rows)
+    return {
+        column: round(
+            sum(1 for row in rows if _is_populated(row.get(column))) / total, 4
+        )
+        for column in columns
+    }
+
+
+def underfilled_columns(rates, minimum):
+    """Columns whose fill rate is below `minimum`, sorted for stable output."""
+    return sorted(column for column, rate in rates.items() if rate < minimum)
