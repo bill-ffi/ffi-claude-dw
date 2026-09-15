@@ -157,7 +157,7 @@ Added beyond the request, in rough order of how often they earn their place:
 | `days_since_updated`, `days_since_last_time`, `last_time_logged_date` | Staleness — an open task untouched for months is a different finding from one with a missing field. |
 | `has_description`, `is_private`, `has_parent_task`, `priority`, `progress_pct` | Cheap dimensions that make the filter set materially more expressive. |
 | `task_status`, `is_completed`, `project_status`, `project_is_billable` | Needed to separate the open and completed halves, since both are in scope. |
-| `hygiene_gap_count` | Convenience only — counts five unambiguous gaps so a reviewer can sort worst-first. The individual booleans are the source of truth. |
+| `hygiene_gap_count` | Convenience only — counts **four** gaps (no assignee, no estimate, no activity, no due date) so a reviewer can sort worst-first. The individual booleans are the source of truth. `has_description` and `has_time_logged` are deliberately **not** counted: both are near-constants here (~90% of open tasks have no description, measured 2026-09-14), so including them offsets every score instead of discriminating between tasks. Both remain filter columns. |
 
 **Deliberately excluded**: `cost_rate`, `user_cost`, `user_rate`. Same caution
 as `v_timelog_detail` — leaving comp-adjacent columns out lets this view be

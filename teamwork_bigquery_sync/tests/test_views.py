@@ -579,18 +579,35 @@ class TestTaskReviewView:
         for col in ("u.cost_rate", "tl.cost_rate", "user_cost", "user_rate"):
             assert col not in body, col
 
-    def test_hygiene_gap_count_only_counts_documented_gaps(self, sql):
-        """It must not quietly encode a policy about time logging.
-
-        "No time logged" is normal for a task not yet started, so counting it
-        would make the score meaningless on any healthy backlog.
-        """
+    def _gap_expression(self, sql):
+        """The CAST terms summed into hygiene_gap_count, comment excluded."""
         body = sql[self.NAME]
-        gap = body[body.index("AS hygiene_gap_count") - 600 : body.index("AS hygiene_gap_count")]
-        assert "assignee_user_ids" in gap
-        assert "estimate_minutes" in gap
-        assert "activity" in gap
-        assert "due_date" in gap
-        assert "description" in gap
-        assert "tt.logged_hours" not in gap
+        stop = body.index("AS hygiene_gap_count")
+        begin = body.rindex("CAST(", 0, stop)
+        begin = body.rindex("(", 0, body.rindex("CAST(COALESCE(ARRAY_LENGTH", 0, stop))
+        return body[begin:stop]
+
+    def test_hygiene_gap_count_sums_exactly_the_four_documented_gaps(self, sql):
+        gap = self._gap_expression(sql)
+        for term in ("assignee_user_ids", "estimate_minutes", "activity", "due_date"):
+            assert term in gap, term
+        assert gap.count("CAST(") == 4, gap
+
+    def test_near_constant_flags_stay_out_of_the_count(self, sql):
+        """A term that is almost always 1 offsets every score rather than
+        discriminating between tasks, which is what the count is for.
+
+        description: ~90% of open tasks have none (measured 2026-09-14).
+        time logged: "none yet" is normal for a task not yet started, and it
+        inherits the loaded-history floor. Both stay as filter columns.
+        """
+        gap = self._gap_expression(sql)
+        assert "description" not in gap
+        assert "logged_hours" not in gap
         assert "has_time_logged" not in gap
+
+    def test_excluded_flags_are_still_available_as_columns(self, sql):
+        """Dropping them from the score must not drop them from the view."""
+        body = sql[self.NAME]
+        assert "AS has_description" in body
+        assert "AS has_time_logged" in body

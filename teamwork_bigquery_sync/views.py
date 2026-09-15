@@ -1013,16 +1013,26 @@ SELECT
   (COALESCE(t.description, '') != '') AS has_description,
 
   -- Convenience only, so a reviewer can sort worst-first: how many of the
-  -- five unambiguous gaps below this task has. The individual booleans above
-  -- are the source of truth -- this asserts no policy about which gaps matter
-  -- on which task, and deliberately does not count "no time logged", which is
-  -- normal for a task not yet started.
+  -- four gaps below this task has. The individual booleans above are the
+  -- source of truth -- this asserts no policy about which gaps matter on
+  -- which task.
+  --
+  -- Two flags are deliberately NOT counted, both because they are near-
+  -- constants on this account and a term that is almost always 1 (or almost
+  -- always 0) adds an offset rather than discriminating between tasks:
+  --
+  --   has_description -- measured 2026-09-14, ~90% of open tasks have no
+  --     description, so counting it added ~1 to nearly every score and
+  --     compressed the range that makes sorting worst-first useful.
+  --   has_time_logged -- "no time yet" is normal for a task not yet started,
+  --     and it also inherits the loaded-history floor (see the caveat above).
+  --
+  -- Both remain available as standalone filter columns.
   (
     CAST(COALESCE(ARRAY_LENGTH(t.assignee_user_ids), 0) = 0 AS INT64)
     + CAST(COALESCE(t.estimate_minutes, 0) = 0 AS INT64)
     + CAST(t.activity IS NULL AS INT64)
     + CAST(t.due_date IS NULL AS INT64)
-    + CAST(COALESCE(t.description, '') = '' AS INT64)
   ) AS hygiene_gap_count,
 
   t.synced_at
