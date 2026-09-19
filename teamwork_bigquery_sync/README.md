@@ -613,6 +613,37 @@ leaves GCP).
 
 ## Known gaps / things to verify before relying on this
 
+- **Project budgets were stored in cents, not dollars (fixed 2026-09-19).**
+  `budget_capacity` and `budget_used` come from the budgets endpoint's
+  `capacity`/`capacityUsed`, which Teamwork returns as integer **cents**, and
+  were passed straight through — so every budget figure read 100x too large.
+  Confirmed by hand against three projects before changing anything.
+  `transform.cents_to_dollars()` now converts on the way in, and `budget_left`
+  derives from the converted values (equivalent to converting the difference).
+  - **This is the third money field with its own unit, and the three do not
+    agree.** That makes it a rule rather than a quirk:
+
+    | Field | Endpoint | Arrives as | Treatment |
+    |---|---|---|---|
+    | `userRate` / `userCost` | `people.json` | cents | `/100` |
+    | `capacity` / `capacityUsed` | `budgets.json` | cents | `/100` |
+    | `billableRate` | `time.json` | **dollars** | passed through |
+
+    **Confirm the unit per endpoint against a known value; never infer it from
+    a sibling field.** Applying `cents_to_dollars()` to `billableRate` would
+    understate every revenue figure by 100x — a test asserts it stays
+    unconverted, specifically to stop someone "finishing the job".
+  - `projects` is truncate-and-reload, so one full sync corrected all rows;
+    no backfill was needed.
+  - **`budget_type` is deliberately NOT captured.** Teamwork also supports
+    *time* budgets, whose `capacity` is **minutes** — on which this conversion
+    would be wrong. Every budget checked on this account is financial, and
+    sourcing a type column means guessing a payload key, which is the exact
+    mistake that produced the two dead `web_link` columns. If a time budget is
+    ever configured, the symptom is a project whose budget reads as an
+    implausibly small dollar figure; confirm the payload key first, then
+    convert conditionally.
+
 - **`web_link` is empty on BOTH `tasks` and `projects`, and always has been
   (confirmed 2026-09-15).** Measured: 0 of 14,595 tasks and 0 of 1,890
   projects carry a value. `transform.normalize_task()` and

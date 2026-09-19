@@ -340,3 +340,89 @@ class TestProjectWebLink:
         assert transform.project_web_link(self.BASE, 7) != transform.task_web_link(
             self.BASE, 7
         )
+
+
+class TestCentsToDollars:
+    """Teamwork money fields that arrive as integer cents.
+
+    Confirmed by hand against the live account: project budgets on
+    2026-09-19 (three projects), userRate/userCost earlier. billableRate on
+    timelogs arrives in DOLLARS and must not be divided -- Teamwork is
+    inconsistent per endpoint. See README "Known gaps".
+    """
+
+    def test_converts_cents_to_dollars(self):
+        assert transform.cents_to_dollars(150000) == 1500.0
+
+    def test_zero_stays_zero_rather_than_becoming_null(self):
+        """A zero budget is a real value, not a missing one."""
+        assert transform.cents_to_dollars(0) == 0.0
+
+    def test_none_passes_through(self):
+        assert transform.cents_to_dollars(None) is None
+
+    def test_numeric_string_is_accepted(self):
+        assert transform.cents_to_dollars("15000") == 150.0
+
+    def test_non_numeric_returns_none_with_a_warning(self, caplog):
+        """One malformed amount must not kill the run."""
+        with caplog.at_level("WARNING"):
+            assert transform.cents_to_dollars("not a number") is None
+        assert "numeric cents" in caplog.text
+
+
+class TestProjectBudgetUnits:
+    RAW = {"id": 1, "name": "Monthly Close"}
+
+    def _budgets(self, capacity, used):
+        return {
+            1: [{
+                "status": "ACTIVE", "startDate": "2026-01-01",
+                "capacity": capacity, "capacityUsed": used,
+            }]
+        }
+
+    def test_capacity_and_used_are_stored_in_dollars(self):
+        row = transform.normalize_project(self.RAW, {}, self._budgets(150000, 45000), {})
+        assert row["budget_capacity"] == 1500.0
+        assert row["budget_used"] == 450.0
+
+    def test_budget_left_is_the_dollar_difference(self):
+        """Converting then subtracting must equal subtracting then converting."""
+        row = transform.normalize_project(self.RAW, {}, self._budgets(150000, 45000), {})
+        assert row["budget_left"] == 1050.0
+        assert row["budget_left"] == row["budget_capacity"] - row["budget_used"]
+
+    def test_a_fully_spent_budget_reads_zero_left(self):
+        row = transform.normalize_project(self.RAW, {}, self._budgets(150000, 150000), {})
+        assert row["budget_left"] == 0.0
+
+    def test_an_overspent_budget_goes_negative_rather_than_clamping(self):
+        row = transform.normalize_project(self.RAW, {}, self._budgets(100000, 150000), {})
+        assert row["budget_left"] == -500.0
+
+    def test_no_budget_leaves_all_three_null(self):
+        row = transform.normalize_project(self.RAW, {}, {}, {})
+        assert row["budget_capacity"] is None
+        assert row["budget_used"] is None
+        assert row["budget_left"] is None
+
+
+class TestMoneyUnitsDifferPerEndpoint:
+    """The rule the repo learned three times: confirm units per endpoint."""
+
+    def test_user_rate_and_cost_are_converted_from_cents(self):
+        row = transform.normalize_user({"id": 1, "userCost": 7500, "userRate": 15000})
+        assert row["user_cost"] == 75.0
+        assert row["user_rate"] == 150.0
+
+    def test_timelog_billable_rate_is_NOT_converted(self):
+        """billableRate arrives in dollars. Dividing it understates revenue 100x.
+
+        This is the guard against someone seeing cents_to_dollars() applied to
+        budgets and users and "finishing the job" on timelogs.
+        """
+        row = transform.normalize_timelog(
+            {"id": 1, "date": "2026-09-01", "minutes": 60, "billableRate": 150}
+        )
+        assert row["billable_rate"] == 150

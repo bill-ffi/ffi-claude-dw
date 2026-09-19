@@ -27,6 +27,10 @@ PROJECTS_SCHEMA = [
     # Sourced from the project-budgets endpoint. A project can have more than
     # one budget (e.g. recurring monthly time budgets); we take the one with
     # status ACTIVE and the latest start date as "the current budget".
+    #
+    # DOLLARS. Teamwork returns `capacity`/`capacityUsed` as integer cents;
+    # transform.cents_to_dollars() converts on the way in (confirmed by hand
+    # against three projects, 2026-09-19). Do not divide again downstream.
     bigquery.SchemaField("budget_capacity", "FLOAT64"),
     bigquery.SchemaField("budget_used", "FLOAT64"),
     bigquery.SchemaField("budget_left", "FLOAT64"),

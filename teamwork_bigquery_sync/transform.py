@@ -27,6 +27,36 @@ def utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def cents_to_dollars(value):
+    """A Teamwork money field that arrives as integer cents, stored as dollars.
+
+    Confirmed against the live account, never inferred:
+      - project budgets (`capacity`, `capacityUsed`) -- cents, verified by
+        hand against three projects on 2026-09-19.
+      - people (`userRate`, `userCost`) -- cents, verified earlier.
+
+    Deliberately NOT applied everywhere money appears. `timelogs.billableRate`
+    arrives in DOLLARS on this account and dividing it would understate every
+    revenue figure by 100x. Teamwork is inconsistent per endpoint, so confirm
+    the unit for each new money field rather than copying a sibling's
+    treatment. See README "Known gaps".
+
+    0 converts to 0.0 rather than None -- a zero budget is a real value.
+    A non-numeric value returns None with a warning rather than raising: the
+    sync should not die over one malformed amount, and the fill-rate check
+    will surface the resulting gap.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value) / 100.0
+    except (TypeError, ValueError):
+        logger.warning(
+            "Expected a numeric cents amount, got %r; storing NULL", value
+        )
+        return None
+
+
 def pick_current_budget(budgets_for_project):
     """A project can have several budgets (e.g. recurring monthly time
     budgets). Prefer the ACTIVE one; among ties, the latest start date.
@@ -100,8 +130,10 @@ def normalize_project(
     category_id = raw.get("categoryId") or _ref_id(raw.get("category"))
     company_id = raw.get("companyId") or _ref_id(raw.get("company"))
     budget = pick_current_budget(budgets_by_project_id.get(project_id, []))
-    budget_capacity = budget.get("capacity") if budget else None
-    budget_used = budget.get("capacityUsed") if budget else None
+    # Cents on the wire; see cents_to_dollars(). budget_left is derived from
+    # the converted values, which is equivalent to converting the difference.
+    budget_capacity = cents_to_dollars(budget.get("capacity") if budget else None)
+    budget_used = cents_to_dollars(budget.get("capacityUsed") if budget else None)
     budget_left = (
         budget_capacity - budget_used
         if budget_capacity is not None and budget_used is not None
@@ -297,8 +329,8 @@ def normalize_user(raw):
         # userCost/userRate come back from Teamwork in cents (confirmed by
         # cross-checking against userRates[...].amount, which is in dollars,
         # on a live sample) — divide down to actual currency units.
-        "user_cost": raw.get("userCost") / 100.0 if raw.get("userCost") is not None else None,
-        "user_rate": raw.get("userRate") / 100.0 if raw.get("userRate") is not None else None,
+        "user_cost": cents_to_dollars(raw.get("userCost")),
+        "user_rate": cents_to_dollars(raw.get("userRate")),
         "created_at": raw.get("createdAt"),
         "updated_at": raw.get("updatedAt"),
         "synced_at": utc_now_iso(),
