@@ -137,6 +137,7 @@ VIEW_NAMES = [
     "v_timelog_detail",
     "v_exception_time_without_task",
     "v_task_review",
+    "v_project_detail",
 ]
 
 
@@ -1040,6 +1041,148 @@ FROM {tasks} t
 LEFT JOIN {projects} p ON p.project_id = t.project_id
 LEFT JOIN {users} owner ON owner.user_id = p.owner_id
 LEFT JOIN task_time tt ON tt.task_id = t.task_id
+WHERE p.archived_at IS NULL
+"""
+
+    # One row per ACTIVE project -- the projects-side counterpart to
+    # v_timelog_detail and v_task_review. Exists mainly because the raw
+    # `projects` table is a poor Looker Studio source: owner_id, created_by
+    # and completed_by are bare user ids rather than names, and tag_ids is a
+    # REPEATED column the connector cannot handle.
+    #
+    # Scope is `archived_at IS NULL`, the same predicate v_task_review uses,
+    # so the two views can never disagree about which projects exist. On this
+    # account `status = 'active'` is perfectly collinear with it, so the two
+    # spellings currently select the same 219 projects; a test asserts the
+    # predicate matches v_task_review's rather than letting them drift. The
+    # raw `status` stays exposed as a column for filtering.
+    #
+    # Deliberately NOT carried:
+    #   tag_ids -- REPEATED, and no tags table is ingested, so the only thing
+    #     this could emit is a string of bare ids with no names. Useless as a
+    #     Looker dimension; a tag lookup would be new ingestion work.
+    #   health -- best-effort on the standard payload and empty in practice
+    #     (see schemas.py). Shipping a column that is NULL on every row is the
+    #     exact failure the two web_link columns represented.
+    #   cost_rate / user_cost / user_rate -- comp-adjacent, same caution as
+    #     v_timelog_detail, so this view can be shared more widely.
+    #
+    # Rollups come from two pre-aggregated CTEs, each grouped by project_id and
+    # therefore at most one row per project, so the LEFT JOINs cannot fan out
+    # and the view stays one row per project without a DISTINCT.
+    views["v_project_detail"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_project_detail")} AS
+WITH project_tasks AS (
+  SELECT
+    t.project_id,
+    COUNT(*) AS task_count,
+    COUNTIF(COALESCE(t.status, '') = 'completed') AS completed_task_count,
+    COUNTIF(COALESCE(t.status, '') != 'completed') AS open_task_count
+  FROM {tasks} t
+  WHERE t.project_id IS NOT NULL
+  GROUP BY t.project_id
+),
+project_time AS (
+  SELECT
+    tl.project_id,
+    SUM(tl.minutes) / 60 AS logged_hours,
+    SUM(IF(tl.is_billable, tl.minutes, 0)) / 60 AS billable_logged_hours,
+    COUNT(*) AS time_entry_count,
+    MAX(tl.log_date) AS last_time_logged_date
+  FROM {timelogs} tl
+  WHERE tl.project_id IS NOT NULL AND tl.minutes > 0
+  GROUP BY tl.project_id
+)
+SELECT
+  -- identity, and a way into the record
+  p.project_id,
+  p.name AS project_name,
+  p.web_link AS project_url,
+  p.description,
+
+  -- client and classification
+  p.client_name,
+  p.company_id,
+  p.category_name,
+  p.status AS project_status,
+  p.sub_status,
+  p.is_billable AS project_is_billable,
+
+  -- people, resolved to names: the main reason this view exists
+  owner.full_name AS proj_owner,
+  creator.full_name AS created_by_name,
+  completer.full_name AS completed_by_name,
+
+  -- dates and state
+  p.start_date,
+  p.end_date,
+  p.created_at,
+  p.updated_at,
+  p.completed_at,
+  (p.completed_at IS NOT NULL) AS is_completed,
+  (
+    p.end_date IS NOT NULL
+    AND p.completed_at IS NULL
+    AND p.end_date < CURRENT_DATE('{REPORTING_TIMEZONE}')
+  ) AS is_past_end_date,
+  -- DATE(timestamp) alone converts in UTC; the timezone argument is required
+  -- or this subtracts a UTC-derived date from an Eastern one.
+  DATE_DIFF(
+    CURRENT_DATE('{REPORTING_TIMEZONE}'),
+    DATE(p.updated_at, '{REPORTING_TIMEZONE}'),
+    DAY
+  ) AS days_since_updated,
+
+  -- budget, in DOLLARS (transform.cents_to_dollars converts on ingest)
+  p.budget_capacity,
+  p.budget_used,
+  p.budget_left,
+  (COALESCE(p.budget_capacity, 0) > 0) AS has_budget,
+  -- NULL, not 0, without a budget: SUM skips NULLs, so an un-budgeted project
+  -- cannot drag an average toward zero as though it had spent nothing.
+  IF(
+    COALESCE(p.budget_capacity, 0) > 0,
+    ROUND(100 * SAFE_DIVIDE(p.budget_used, p.budget_capacity), 1),
+    NULL
+  ) AS pct_of_budget_used,
+  (
+    COALESCE(p.budget_capacity, 0) > 0
+    AND COALESCE(p.budget_used, 0) > p.budget_capacity
+  ) AS is_over_budget,
+
+  -- task rollup. Counts every task the pipeline holds for the project; the
+  -- tasks table covers active projects in full, so this is complete here.
+  COALESCE(pt.task_count, 0) AS task_count,
+  COALESCE(pt.open_task_count, 0) AS open_task_count,
+  COALESCE(pt.completed_task_count, 0) AS completed_task_count,
+
+  -- time rollup.
+  --
+  -- CAVEAT: these count only time the pipeline has LOADED, which currently
+  -- begins 2026-01-01, so any project worked before then is understated.
+  -- They also do not reconcile with budget_used above and are not meant to:
+  -- budget_used is Teamwork's own budget tracking, while these are summed
+  -- from our timelogs. Use budget_used for budget consumption and these for
+  -- "what did we actually record against this project".
+  COALESCE(ptm.logged_hours, 0) AS logged_hours,
+  COALESCE(ptm.billable_logged_hours, 0) AS billable_logged_hours,
+  COALESCE(ptm.time_entry_count, 0) AS time_entry_count,
+  ptm.last_time_logged_date,
+  IF(
+    ptm.last_time_logged_date IS NOT NULL,
+    DATE_DIFF(
+      CURRENT_DATE('{REPORTING_TIMEZONE}'), ptm.last_time_logged_date, DAY
+    ),
+    NULL
+  ) AS days_since_last_time,
+
+  p.synced_at
+FROM {projects} p
+LEFT JOIN {users} owner ON owner.user_id = p.owner_id
+LEFT JOIN {users} creator ON creator.user_id = p.created_by
+LEFT JOIN {users} completer ON completer.user_id = p.completed_by
+LEFT JOIN project_tasks pt ON pt.project_id = p.project_id
+LEFT JOIN project_time ptm ON ptm.project_id = p.project_id
 WHERE p.archived_at IS NULL
 """
 

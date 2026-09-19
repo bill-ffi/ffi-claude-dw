@@ -611,3 +611,85 @@ class TestTaskReviewView:
         body = sql[self.NAME]
         assert "AS has_description" in body
         assert "AS has_time_logged" in body
+
+
+class TestProjectDetailView:
+    """v_project_detail: one row per ACTIVE project, for Looker Studio.
+
+    Exists because the raw projects table is a poor direct source: bare user
+    ids instead of names, and a REPEATED tag_ids column the connector cannot
+    handle.
+    """
+
+    NAME = "v_project_detail"
+
+    def test_view_is_registered(self):
+        assert self.NAME in views.VIEW_NAMES
+
+    def test_scope_matches_v_task_review_exactly(self, sql):
+        """Both views must agree about which projects exist.
+
+        status = 'active' and archived_at IS NULL are collinear on this
+        account today. Picking the same spelling in both places means they
+        cannot quietly diverge if that ever stops being true.
+        """
+        assert "WHERE p.archived_at IS NULL" in sql[self.NAME]
+        assert "WHERE p.archived_at IS NULL" in sql["v_task_review"]
+        assert "p.status = 'active'" not in sql[self.NAME]
+
+    def test_raw_status_is_still_exposed_for_filtering(self, sql):
+        assert "p.status AS project_status" in sql[self.NAME]
+
+    def test_user_ids_are_resolved_to_names(self, sql):
+        """The main reason the view exists: ids are useless as dimensions."""
+        body = sql[self.NAME]
+        assert "owner.full_name AS proj_owner" in body
+        assert "creator.full_name AS created_by_name" in body
+        assert "completer.full_name AS completed_by_name" in body
+
+    def test_repeated_and_empty_columns_are_not_carried(self, sql):
+        """tag_ids is REPEATED (Looker cannot read it) and has no name lookup;
+        health is empty on every row."""
+        body = sql[self.NAME]
+        assert "tag_ids" not in body
+        assert "p.health" not in body
+
+    def test_comp_adjacent_columns_are_not_exposed(self, sql):
+        body = sql[self.NAME]
+        for col in ("cost_rate", "user_cost", "user_rate"):
+            assert col not in body, col
+
+    def test_rollups_are_grouped_so_they_cannot_fan_out(self, sql):
+        """Each CTE is one row per project, keeping the view one row per project."""
+        body = sql[self.NAME]
+        assert "GROUP BY t.project_id" in body
+        assert "GROUP BY tl.project_id" in body
+        assert "LEFT JOIN project_tasks pt ON pt.project_id = p.project_id" in body
+        assert "LEFT JOIN project_time ptm ON ptm.project_id = p.project_id" in body
+
+    def test_budget_ratio_is_null_not_zero_without_a_budget(self, sql):
+        """An un-budgeted project must not read as having spent nothing."""
+        body = sql[self.NAME]
+        assert "AS pct_of_budget_used" in body
+        assert "SAFE_DIVIDE(p.budget_used, p.budget_capacity)" in body
+
+    def test_budget_columns_are_not_divided_again_in_sql(self, sql):
+        """transform.cents_to_dollars already converted them on ingest."""
+        body = sql[self.NAME]
+        assert "budget_capacity / 100" not in body
+        assert "budget_used / 100" not in body
+
+    def test_zero_minute_entries_are_excluded_from_the_time_rollup(self, sql):
+        assert "tl.minutes > 0" in sql[self.NAME]
+
+    def test_uses_the_reporting_timezone_for_every_date_question(self, sql):
+        body = sql[self.NAME]
+        assert f"CURRENT_DATE('{views.REPORTING_TIMEZONE}')" in body
+        assert f"DATE(p.updated_at, '{views.REPORTING_TIMEZONE}')" in body
+
+    def test_a_completed_project_is_never_past_its_end_date(self, sql):
+        """Past-end-date means actionable; a finished project is not."""
+        body = sql[self.NAME]
+        marker = "AS is_past_end_date"
+        window = body[body.index(marker) - 300 : body.index(marker)]
+        assert "p.completed_at IS NULL" in window

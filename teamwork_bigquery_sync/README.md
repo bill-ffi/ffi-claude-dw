@@ -131,6 +131,50 @@ independent of the normal sync schedule.
 | `v_exception_time_without_task` | Time posted straight to a project with no task at all — no tasklist, no Activity, nothing to roll the work up against | All projects (not category-scoped); **windowed to the prior quarter + current QTD** |
 | `v_exception_recurring_compliance` | Top-level tasks (no `parent_task_id`) in a "Books Maintenance"-category project with no `sequence_id` | Books Maintenance category only; sub-tasks excluded since they inherit recurrence from their parent and don't carry their own `sequence_id` |
 
+### `v_project_detail` — the project-level Looker source
+
+One row per **active** project (`archived_at IS NULL`, ~219 rows), the
+projects-side counterpart to `v_timelog_detail` and `v_task_review`.
+
+Built rather than pointing Looker Studio at the `projects` table directly, for
+two concrete reasons: `owner_id`, `created_by` and `completed_by` are bare user
+ids that are useless as report dimensions, and `tag_ids` is a **REPEATED**
+column the Looker Studio connector cannot read. Resolving the ids needs a join
+Looker can only fake with a blend; the view does it in BigQuery for free. It
+also insulates reports from schema changes in the underlying table.
+
+Carries: identity and the `/tasks/list` deep link, client and category, owner /
+creator / completer **as names**, dates with `is_completed` and
+`is_past_end_date`, budget columns in dollars with `pct_of_budget_used`,
+`is_over_budget` and `has_budget`, plus task counts and time rollups.
+
+**Scope uses the same predicate as `v_task_review`** — `archived_at IS NULL`,
+not `status = 'active'`. The two are perfectly collinear on this account, so
+they select identically today; using one spelling in both places means the two
+views cannot quietly disagree about which projects exist if that ever changes.
+A test asserts it. The raw `status` is still exposed as `project_status`.
+
+**Deliberately excluded:**
+
+| Column | Why |
+|---|---|
+| `tag_ids` | REPEATED, so Looker Studio cannot read it — and no tags table is ingested, so the only thing a view could emit is a string of bare ids with no names. Tag *names* would need new ingestion. |
+| `health` | Best-effort on the standard payload and empty in practice (see `schemas.py`). Shipping a column NULL on every row is exactly what the two dead `web_link` columns were. |
+| `cost_rate`, `user_cost`, `user_rate` | Comp-adjacent, same caution as `v_timelog_detail`, so this view can be shared more widely. A test enforces it. |
+
+> ⚠️ **`logged_hours` and `budget_used` measure different things and will not
+> reconcile.** `budget_used` is Teamwork's own budget tracking; `logged_hours`
+> is summed from our `timelogs`, which only holds history the pipeline has
+> loaded — currently from **2026-01-01**. Any project worked before then is
+> understated. Use `budget_used` for budget consumption and `logged_hours` for
+> "what did we actually record against this project". Reporting them side by
+> side as if they were the same measure will produce questions nobody can
+> answer.
+
+Both rollups come from CTEs grouped by `project_id`, so each contributes at
+most one row and the `LEFT JOIN`s cannot fan out — the view is one row per
+project without a `DISTINCT`. A test pins that.
+
 ### `v_task_review` — the data-hygiene review surface
 
 One row per task, every task **open and completed** whose project is not
