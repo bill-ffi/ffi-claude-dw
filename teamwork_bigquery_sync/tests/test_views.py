@@ -817,3 +817,111 @@ class TestTimelogDetailParentRollup:
         """The reason this view is the right source for a monthly report."""
         body = sql[self.NAME]
         assert "tl.log_date" in body
+
+
+class TestClientMonthView:
+    """v_client_month: % of budget over a DYNAMIC date range.
+
+    A Looker blend joins a client-level budget to month-level revenue and
+    contributes the budget once regardless of the selected range, so revenue
+    scales with the date filter and the denominator does not. Putting the
+    monthly budget on each month's row is what makes
+    SUM(revenue) / SUM(budget) correct for any period.
+    """
+
+    NAME = "v_client_month"
+
+    def test_view_is_registered(self):
+        assert self.NAME in views.VIEW_NAMES
+
+    def test_created_after_the_view_it_reads_from(self, sql):
+        """BigQuery requires a referenced view to already exist."""
+        names = list(sql)
+        assert names.index(self.NAME) > names.index("v_timelog_detail")
+
+    def test_reads_the_base_view_not_raw_timelogs(self, sql):
+        """Join logic and billable_amount stay defined in one place."""
+        body = sql[self.NAME]
+        assert "v_timelog_detail` d" in body
+        assert "teamwork_data.timelogs` " not in body
+
+    def test_budget_is_carried_per_month_not_per_client(self, sql):
+        """The whole point: one row per client per month, each with the budget.
+
+        Grouping the budget only by client would reproduce the blend's bug.
+        """
+        body = sql[self.NAME]
+        assert "GROUP BY client_name, month_start" in body
+        assert "GENERATE_DATE_ARRAY(bp.first_month, bp.last_month, INTERVAL 1 MONTH)" in body
+
+    def test_month_spine_is_bounded_by_project_dates(self, sql):
+        """Per instruction: budget accrues only while the engagement is live."""
+        body = sql[self.NAME]
+        assert "COALESCE(p.start_date, b.floor_month)" in body
+        assert "COALESCE(p.end_date, b.current_month)" in body
+
+    def test_spine_is_clamped_to_the_history_floor_and_current_month(self, sql):
+        """A month before loaded history carries budget against zero revenue."""
+        body = sql[self.NAME]
+        assert "GREATEST(" in body and "b.floor_month" in body
+        assert "LEAST(" in body and "b.current_month" in body
+        assert views.CLIENT_MONTH_HISTORY_FLOOR in body
+
+    def test_history_floor_is_a_real_date(self):
+        from datetime import date
+        y, m, d = (int(p) for p in views.CLIENT_MONTH_HISTORY_FLOOR.split("-"))
+        assert date(y, m, d)
+
+    def test_only_budgeted_non_archived_projects_form_the_denominator(self, sql):
+        body = sql[self.NAME]
+        assert "WHERE p.archived_at IS NULL" in body
+        assert "COALESCE(p.budget_capacity, 0) > 0" in body
+
+    def test_budget_is_not_divided_again_in_sql(self, sql):
+        """transform.cents_to_dollars already converted it on ingest."""
+        body = sql[self.NAME]
+        assert "budget_capacity / 100" not in body
+
+    def test_full_outer_join_keeps_both_sides(self, sql):
+        """A budgeted month with no time still consumes budget; revenue on an
+        unbudgeted project must not vanish."""
+        body = sql[self.NAME]
+        assert "FULL OUTER JOIN client_month_actuals a" in body
+        assert "COALESCE(b.client_name, a.client_name) AS client_name" in body
+        assert "COALESCE(b.month_start, a.month_start) AS month_start" in body
+
+    def test_additive_columns_are_zero_filled_so_they_can_be_summed(self, sql):
+        body = sql[self.NAME]
+        for col in ("monthly_budget", "billable_revenue", "billable_hours"):
+            assert f"AS {col}," in body
+        assert "COALESCE(a.billable_revenue, 0) AS billable_revenue" in body
+        assert "COALESCE(b.monthly_budget, 0) AS monthly_budget" in body
+
+    def test_row_level_percentage_is_null_not_zero_without_a_budget(self, sql):
+        """An unbudgeted client-month must not read as 0% of budget."""
+        body = sql[self.NAME]
+        assert "AS pct_of_budget" in body
+        assert "SAFE_DIVIDE(a.billable_revenue, b.monthly_budget)" in body
+
+    def test_the_multi_month_warning_is_in_the_sql(self, sql):
+        """Summing pct_of_budget across months is the trap this view exists to
+        avoid; the instruction belongs where someone will hit it."""
+        body = sql[self.NAME]
+        assert "SINGLE-MONTH DISPLAY ONLY" in body
+        assert "SUM(billable_revenue) / SUM(monthly_budget)" in body
+
+    def test_only_one_revenue_column(self, sql):
+        """Scoped to one column per instruction; budgets land imminently."""
+        body = sql[self.NAME]
+        assert "billable_revenue_budgeted_projects" not in body
+        assert "pct_of_budget_budgeted_projects_only" not in body
+
+    def test_rollout_progress_is_still_visible(self, sql):
+        """With the split revenue column gone, these two counts are what shows
+        that a client-month's revenue includes unbudgeted work."""
+        body = sql[self.NAME]
+        assert "AS budgeted_project_count" in body
+        assert "AS project_count" in body
+
+    def test_uses_the_reporting_timezone(self, sql):
+        assert f"CURRENT_DATE('{views.REPORTING_TIMEZONE}')" in sql[self.NAME]

@@ -1323,16 +1323,9 @@ client_month_actuals AS (
     -- billable_amount is already NULL on non-billable entries, so SUM skips
     -- them without a guard.
     SUM(d.billable_amount) AS billable_revenue,
-    -- Revenue from projects that actually carry a budget. While budgets are
-    -- still being rolled out, total revenue includes unbudgeted work and
-    -- overstates % of budget; this column is the apples-to-apples numerator.
-    SUM(IF(bp.project_id IS NOT NULL, d.billable_amount, NULL))
-      AS billable_revenue_budgeted_projects,
     COUNT(*) AS time_entry_count,
     COUNT(DISTINCT d.project_id) AS project_count
   FROM {fqn("v_timelog_detail")} d
-  LEFT JOIN (SELECT DISTINCT project_id FROM budgeted_projects) bp
-    ON bp.project_id = d.project_id
   WHERE d.client_name IS NOT NULL
   GROUP BY d.client_name, d.log_month
 )
@@ -1346,11 +1339,13 @@ SELECT
   -- additive: safe to SUM over any date range
   COALESCE(b.monthly_budget, 0) AS monthly_budget,
   COALESCE(a.billable_revenue, 0) AS billable_revenue,
-  COALESCE(a.billable_revenue_budgeted_projects, 0)
-    AS billable_revenue_budgeted_projects,
   COALESCE(a.billable_hours, 0) AS billable_hours,
   COALESCE(a.logged_hours, 0) AS logged_hours,
   COALESCE(a.time_entry_count, 0) AS time_entry_count,
+  -- Rollout check. While budgets are still being added to active projects,
+  -- project_count exceeding budgeted_project_count means this client-month's
+  -- revenue includes work from projects contributing no denominator, so
+  -- pct_of_budget reads high. Expected to converge as budgets land.
   COALESCE(b.budgeted_project_count, 0) AS budgeted_project_count,
   COALESCE(a.project_count, 0) AS project_count,
   (COALESCE(b.monthly_budget, 0) > 0) AS has_budget,
@@ -1363,15 +1358,6 @@ SELECT
     ROUND(100 * SAFE_DIVIDE(a.billable_revenue, b.monthly_budget), 1),
     NULL
   ) AS pct_of_budget,
-  IF(
-    COALESCE(b.monthly_budget, 0) > 0,
-    ROUND(
-      100 * SAFE_DIVIDE(
-        a.billable_revenue_budgeted_projects, b.monthly_budget
-      ), 1
-    ),
-    NULL
-  ) AS pct_of_budget_budgeted_projects_only,
   (
     COALESCE(b.monthly_budget, 0) > 0
     AND COALESCE(a.billable_revenue, 0) > b.monthly_budget

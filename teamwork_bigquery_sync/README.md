@@ -131,6 +131,67 @@ independent of the normal sync schedule.
 | `v_exception_time_without_task` | Time posted straight to a project with no task at all — no tasklist, no Activity, nothing to roll the work up against | All projects (not category-scoped); **windowed to the prior quarter + current QTD** |
 | `v_exception_recurring_compliance` | Top-level tasks (no `parent_task_id`) in a "Books Maintenance"-category project with no `sequence_id` | Books Maintenance category only; sub-tasks excluded since they inherit recurrence from their parent and don't carry their own `sequence_id` |
 
+### `v_client_month` — % of budget over a dynamic date range
+
+One row per client per month: billable hours, billable revenue, and the
+**monthly budget in force that month**.
+
+**Why the grain matters.** A Looker Studio blend joins a client-level budget to
+month-level revenue and contributes that budget **once**, no matter how many
+months the reader selects. Revenue scales with the date filter; the denominator
+does not — three months of revenue over one month of budget. Putting the
+monthly budget on each month's row makes the denominator scale by itself:
+
+```
+SUM(billable_revenue) / SUM(monthly_budget)
+```
+
+is correct for one month, a quarter, or year-to-date, with no per-card
+arithmetic. Supporting a *dynamic* period is the whole reason this view exists
+rather than a calculated field.
+
+> ⚠️ **`pct_of_budget` on a row is single-month display only.** Summing or
+> averaging it across months is wrong — divide the two additive columns
+> instead. The additive columns (`monthly_budget`, `billable_revenue`,
+> `billable_hours`, `logged_hours`) are the contract; they are zero-filled so
+> they sum cleanly over any range. The warning is repeated in the SQL itself,
+> where someone will actually hit it.
+
+**Month spine.** One row per month each budgeted project is live, bounded by
+that project's own `start_date` and `end_date` (per instruction), clamped below
+by `CLIENT_MONTH_HISTORY_FLOOR` and above by the current month. No `end_date`
+means ongoing. Budget therefore accrues only while the engagement is live —
+charging a client for months before they onboarded would make the percentage
+meaningless. Simulated across seven cases before shipping (started before the
+floor, started and ended mid-window, ended before the floor, `end_date` in the
+future, no dates at all, starts next month); an empty window yields no rows
+rather than an error.
+
+**`CLIENT_MONTH_HISTORY_FLOOR` is `2026-01-01`** because `timelogs` history
+begins there. Without the clamp, a project that started earlier would get
+budgeted months carrying a full month's budget against artificially zero
+revenue, dragging every percentage down. Raise it only after backfilling the
+corresponding months.
+
+**A `FULL OUTER JOIN`** keeps both sides: a budgeted month with no time logged
+still consumes budget (a quiet retainer month is real), and revenue on a
+project with no budget still appears rather than vanishing.
+
+> ⚠️ **While budgets are still being rolled out, `pct_of_budget` reads high.**
+> Revenue counts every project; only budgeted projects contribute a
+> denominator. `project_count` exceeding `budgeted_project_count` on a
+> client-month is the tell. A second, budgeted-projects-only revenue column was
+> built and then **deliberately cut** — budgets are expected on all active
+> projects imminently, and two revenue columns that converge to the same number
+> would be permanent confusion for a temporary condition.
+
+**Budget history is not modelled.** `transform.pick_current_budget()` keeps only
+the active budget, so the current recurring figure is repeated across all
+months. Accepted deliberately — the feature is new in Teamwork — but if a
+recurring budget is ever edited, past months silently re-base. Fixing that
+means persisting the budgets the pipeline already fetches and discards; see the
+budget entry under "Known gaps".
+
 ### `v_project_detail` — the project-level Looker source
 
 One row per **active** project (`archived_at IS NULL`, ~219 rows), the
