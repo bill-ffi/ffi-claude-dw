@@ -124,6 +124,17 @@ REPORTING_TIMEZONE = "America/New_York"
 # access if this ever gets shared beyond its current audience.
 ANCILLARY_USER_INFO_TABLE = "gs_minimum_user_info"
 
+# The earliest month v_client_month will emit a row for.
+#
+# `timelogs` only holds history the pipeline has loaded, which begins
+# 2026-01-01. A budgeted month earlier than that would carry a full month's
+# budget against artificially zero revenue and drag every percentage down, so
+# the month spine is clamped here even when a project started earlier.
+#
+# Raise this only after backfilling the corresponding months with
+# --backfill-months; lower it only if earlier history is actually loaded.
+CLIENT_MONTH_HISTORY_FLOOR = "2026-01-01"
+
 VIEW_NAMES = [
     "v_exception_missing_activity_with_time",
     "v_exception_missing_activty_no_time",
@@ -138,6 +149,7 @@ VIEW_NAMES = [
     "v_exception_time_without_task",
     "v_task_review",
     "v_project_detail",
+    "v_client_month",
 ]
 
 
@@ -1221,6 +1233,153 @@ LEFT JOIN {users} completer ON completer.user_id = p.completed_by
 LEFT JOIN project_tasks pt ON pt.project_id = p.project_id
 LEFT JOIN project_time ptm ON ptm.project_id = p.project_id
 WHERE p.archived_at IS NULL
+"""
+
+    # One row per client per month: billable hours, billable revenue, and the
+    # monthly budget in force that month. Built so "% of budget" works over a
+    # DYNAMIC date range.
+    #
+    # The grain is the whole point. A blend that joins a client-level budget to
+    # month-level revenue contributes the budget ONCE no matter how many months
+    # the reader selects, so revenue scales with the range and the denominator
+    # does not -- three months of revenue over one month of budget. Putting the
+    # monthly budget on each month's row makes the denominator scale on its
+    # own: SUM(billable_revenue) / SUM(monthly_budget) is correct for one
+    # month, a quarter, or year-to-date, with no per-card arithmetic.
+    #
+    # So the ADDITIVE columns are the contract. pct_of_budget on a row is a
+    # convenience for single-month display only -- summing or averaging it
+    # across months is wrong. Divide the two sums instead.
+    #
+    # Month spine: one row per month each budgeted project is live, bounded by
+    # its own start_date and end_date per your instruction, clamped to
+    # CLIENT_MONTH_HISTORY_FLOOR at the bottom and the current month at the
+    # top. A project with no end_date is treated as ongoing. Budget therefore
+    # accrues only while the engagement is live -- charging a client for months
+    # before they onboarded would make the percentage meaningless.
+    #
+    # Budget is the CURRENT recurring budget repeated across months, because
+    # transform.pick_current_budget() keeps only the active one and the
+    # warehouse holds no budget history. Accepted deliberately (the feature is
+    # new in Teamwork); if a recurring budget is ever edited, past months
+    # silently re-base. See README.
+    views["v_client_month"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_client_month")} AS
+WITH bounds AS (
+  SELECT
+    DATE_TRUNC(DATE('{CLIENT_MONTH_HISTORY_FLOOR}'), MONTH) AS floor_month,
+    DATE_TRUNC(CURRENT_DATE('{REPORTING_TIMEZONE}'), MONTH) AS current_month
+),
+-- Every non-archived project that carries a budget, with the month window it
+-- is live for. Projects without a budget are absent here on purpose: they
+-- contribute no denominator. They still contribute revenue below.
+budgeted_projects AS (
+  SELECT
+    p.project_id,
+    p.client_name,
+    p.budget_capacity AS monthly_budget,
+    GREATEST(
+      DATE_TRUNC(COALESCE(p.start_date, b.floor_month), MONTH),
+      b.floor_month
+    ) AS first_month,
+    LEAST(
+      DATE_TRUNC(COALESCE(p.end_date, b.current_month), MONTH),
+      b.current_month
+    ) AS last_month
+  FROM {projects} p
+  CROSS JOIN bounds b
+  WHERE p.archived_at IS NULL
+    AND COALESCE(p.budget_capacity, 0) > 0
+    AND p.client_name IS NOT NULL
+),
+-- Expand each budgeted project across the months it is live. A project whose
+-- window is empty (ended before the floor) yields no rows, not an error.
+project_months AS (
+  SELECT
+    bp.client_name,
+    bp.project_id,
+    bp.monthly_budget,
+    month_start
+  FROM budgeted_projects bp,
+  UNNEST(
+    GENERATE_DATE_ARRAY(bp.first_month, bp.last_month, INTERVAL 1 MONTH)
+  ) AS month_start
+),
+client_month_budget AS (
+  SELECT
+    client_name,
+    month_start,
+    SUM(monthly_budget) AS monthly_budget,
+    COUNT(DISTINCT project_id) AS budgeted_project_count
+  FROM project_months
+  GROUP BY client_name, month_start
+),
+client_month_actuals AS (
+  SELECT
+    d.client_name,
+    d.log_month AS month_start,
+    SUM(d.minutes) / 60 AS logged_hours,
+    SUM(IF(d.is_billable, d.minutes, 0)) / 60 AS billable_hours,
+    -- billable_amount is already NULL on non-billable entries, so SUM skips
+    -- them without a guard.
+    SUM(d.billable_amount) AS billable_revenue,
+    -- Revenue from projects that actually carry a budget. While budgets are
+    -- still being rolled out, total revenue includes unbudgeted work and
+    -- overstates % of budget; this column is the apples-to-apples numerator.
+    SUM(IF(bp.project_id IS NOT NULL, d.billable_amount, NULL))
+      AS billable_revenue_budgeted_projects,
+    COUNT(*) AS time_entry_count,
+    COUNT(DISTINCT d.project_id) AS project_count
+  FROM {fqn("v_timelog_detail")} d
+  LEFT JOIN (SELECT DISTINCT project_id FROM budgeted_projects) bp
+    ON bp.project_id = d.project_id
+  WHERE d.client_name IS NOT NULL
+  GROUP BY d.client_name, d.log_month
+)
+SELECT
+  -- FULL OUTER JOIN so neither side is lost: a budgeted month with no time
+  -- still consumes budget, and revenue on an unbudgeted project still shows.
+  COALESCE(b.client_name, a.client_name) AS client_name,
+  COALESCE(b.month_start, a.month_start) AS month_start,
+  FORMAT_DATE('%Y-%m', COALESCE(b.month_start, a.month_start)) AS month_label,
+
+  -- additive: safe to SUM over any date range
+  COALESCE(b.monthly_budget, 0) AS monthly_budget,
+  COALESCE(a.billable_revenue, 0) AS billable_revenue,
+  COALESCE(a.billable_revenue_budgeted_projects, 0)
+    AS billable_revenue_budgeted_projects,
+  COALESCE(a.billable_hours, 0) AS billable_hours,
+  COALESCE(a.logged_hours, 0) AS logged_hours,
+  COALESCE(a.time_entry_count, 0) AS time_entry_count,
+  COALESCE(b.budgeted_project_count, 0) AS budgeted_project_count,
+  COALESCE(a.project_count, 0) AS project_count,
+  (COALESCE(b.monthly_budget, 0) > 0) AS has_budget,
+
+  -- SINGLE-MONTH DISPLAY ONLY. Do not SUM or AVG these across months --
+  -- divide the additive columns instead:
+  --   SUM(billable_revenue) / SUM(monthly_budget)
+  IF(
+    COALESCE(b.monthly_budget, 0) > 0,
+    ROUND(100 * SAFE_DIVIDE(a.billable_revenue, b.monthly_budget), 1),
+    NULL
+  ) AS pct_of_budget,
+  IF(
+    COALESCE(b.monthly_budget, 0) > 0,
+    ROUND(
+      100 * SAFE_DIVIDE(
+        a.billable_revenue_budgeted_projects, b.monthly_budget
+      ), 1
+    ),
+    NULL
+  ) AS pct_of_budget_budgeted_projects_only,
+  (
+    COALESCE(b.monthly_budget, 0) > 0
+    AND COALESCE(a.billable_revenue, 0) > b.monthly_budget
+  ) AS is_over_budget
+FROM client_month_budget b
+FULL OUTER JOIN client_month_actuals a
+  ON a.client_name = b.client_name
+ AND a.month_start = b.month_start
 """
 
     return views
