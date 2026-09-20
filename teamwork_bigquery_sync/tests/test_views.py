@@ -726,14 +726,25 @@ class TestTaskReviewParentRollup:
         assert "COALESCE(t.parent_task_id, t.task_id)" not in body
         assert "COALESCE(parent.name, t.name)" not in body
 
-    def test_parent_join_is_on_task_id_so_it_cannot_fan_out(self, sql):
-        """tasks is de-duplicated by task_id, so this matches at most one row."""
-        assert "parent ON parent.task_id = t.parent_task_id" in sql[self.NAME]
+    def _parent_join_line(self, sql):
+        """The one line joining the parent task, isolated.
 
-    def test_parent_join_is_a_left_join(self, sql):
-        """An inner join would silently drop every top-level task."""
-        body = sql[self.NAME]
-        assert "LEFT JOIN" in body.split("parent ON parent.task_id")[0].splitlines()[-1]
+        Located rather than string-split: splitting on an anchor that is
+        absent yields the whole body, whose last line is a DIFFERENT LEFT
+        JOIN, so the naive assertion passed against broken SQL.
+        """
+        lines = [l for l in sql[self.NAME].splitlines()
+                 if "parent ON parent.task_id" in l]
+        assert len(lines) == 1, lines
+        return lines[0]
+
+    def test_parent_join_is_left_and_keyed_on_the_parent_id(self, sql):
+        """LEFT, because an inner join drops every top-level task. Keyed on
+        parent_task_id, because keying it on task_id joins each task to
+        itself and makes every task its own parent."""
+        line = self._parent_join_line(sql)
+        assert line.startswith("LEFT JOIN"), line
+        assert line.endswith("= t.parent_task_id"), line
 
     def test_rollup_columns_are_confined_to_an_explicit_allowlist(self, sql):
         """v_timelog_detail carries the same pair deliberately, at timelog
@@ -789,10 +800,18 @@ class TestTimelogDetailParentRollup:
         assert "tk.name) AS rollup_task_name" in body
         assert "'No task (project-level time)'" in body
 
-    def test_parent_join_is_left_and_on_the_task_alias(self, sql):
-        """Must hang off tk (the timelog's task), not tl, and keep every row."""
-        body = sql[self.NAME]
-        assert "LEFT JOIN" in body.split("parent ON parent.task_id = tk.parent_task_id")[0].splitlines()[-1]
+    def test_parent_join_is_left_and_keyed_on_the_task_alias(self, sql):
+        """Must hang off tk (the timelog's task), not tl, and keep every row.
+
+        Keyed on tl.task_id instead, every timelog would join to its OWN task
+        as though that task were its parent, and rollup_task_name would report
+        the task itself for everything.
+        """
+        lines = [l for l in sql[self.NAME].splitlines()
+                 if "parent ON parent.task_id" in l]
+        assert len(lines) == 1, lines
+        assert lines[0].startswith("LEFT JOIN"), lines[0]
+        assert lines[0].endswith("= tk.parent_task_id"), lines[0]
 
     def test_the_date_column_a_monthly_pivot_needs_is_present(self, sql):
         """The reason this view is the right source for a monthly report."""
