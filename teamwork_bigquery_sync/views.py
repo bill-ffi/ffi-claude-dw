@@ -924,6 +924,22 @@ SELECT
   t.tasklist_name,
   t.parent_task_id,
   (t.parent_task_id IS NOT NULL) AS has_parent_task,
+  parent.name AS parent_task_name,
+
+  -- One pair of columns to group a report by so a parent and its sub-tasks
+  -- land on a single line: a sub-task reports its parent, a top-level task
+  -- reports itself. parent_task_id alone cannot do this -- it is NULL on
+  -- top-level tasks, and an integer is not a readable report dimension.
+  --
+  -- Both fall back to the task itself only when the parent actually resolved,
+  -- so the id and the name always describe the SAME task. Coalescing them
+  -- independently would pair a parent's id with a child's name whenever the
+  -- parent is missing from the tasks table (deleted, or outside the pull).
+  --
+  -- ONE LEVEL ONLY: parent_task_id is the immediate parent, so a
+  -- sub-sub-task rolls up to its own parent, not to the top of the tree.
+  IF(parent.task_id IS NOT NULL, t.parent_task_id, t.task_id) AS rollup_task_id,
+  IF(parent.task_id IS NOT NULL, parent.name, t.name) AS rollup_task_name,
 
   -- who owns the work
   {assignee_names},
@@ -1041,6 +1057,9 @@ FROM {tasks} t
 LEFT JOIN {projects} p ON p.project_id = t.project_id
 LEFT JOIN {users} owner ON owner.user_id = p.owner_id
 LEFT JOIN task_time tt ON tt.task_id = t.task_id
+-- tasks is de-duplicated by task_id in the pipeline, so this self-join
+-- matches at most one row and cannot fan out the grain.
+LEFT JOIN {tasks} parent ON parent.task_id = t.parent_task_id
 WHERE p.archived_at IS NULL
 """
 

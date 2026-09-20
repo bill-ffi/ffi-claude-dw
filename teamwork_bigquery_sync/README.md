@@ -203,6 +203,31 @@ Added beyond the request, in rough order of how often they earn their place:
 | `task_status`, `is_completed`, `project_status`, `project_is_billable` | Needed to separate the open and completed halves, since both are in scope. |
 | `hygiene_gap_count` | Convenience only — counts **four** gaps (no assignee, no estimate, no activity, no due date) so a reviewer can sort worst-first. The individual booleans are the source of truth. `has_description` and `has_time_logged` are deliberately **not** counted: both are near-constants here (~90% of open tasks have no description, measured 2026-09-14), so including them offsets every score instead of discriminating between tasks. Both remain filter columns. |
 
+**Rolling sub-tasks up to their parent.** `parent_task_id` alone cannot drive
+a grouped report: it is NULL on top-level tasks, and an integer is not a
+readable dimension. Three columns handle it —
+
+| Column | Meaning |
+|---|---|
+| `parent_task_name` | The parent's name; NULL on a top-level task. |
+| `rollup_task_id` / `rollup_task_name` | **Group a report by these.** A sub-task reports its parent; a top-level task reports itself. A parent and its sub-tasks therefore land on one line. |
+
+The pair branches on a *single* condition — whether the parent actually
+resolved — so the id and the name always describe the same task. Coalescing
+them independently (`COALESCE(t.parent_task_id, t.task_id)` alongside
+`COALESCE(parent.name, t.name)`) would pair a parent's id with a child's name
+whenever the parent is missing from `tasks` (deleted, or outside the pull). A
+test asserts the independent form is *absent*.
+
+> ⚠️ **One level only.** `parent_task_id` is the *immediate* parent, so a
+> sub-sub-task rolls up to its own parent, not to the top of the tree. If
+> deeper nesting ever matters, that needs a recursive CTE, not another join.
+
+The self-join is `LEFT JOIN tasks parent ON parent.task_id = t.parent_task_id`.
+`tasks` is de-duplicated by `task_id` in the pipeline, so it matches at most
+one row and cannot fan out the grain; an inner join would silently drop every
+top-level task. Tests cover both.
+
 **Deliberately excluded**: `cost_rate`, `user_cost`, `user_rate`. Same caution
 as `v_timelog_detail` — leaving comp-adjacent columns out lets this view be
 shared more widely than the `users` table. A test enforces it.

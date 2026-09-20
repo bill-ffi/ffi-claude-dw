@@ -693,3 +693,48 @@ class TestProjectDetailView:
         marker = "AS is_past_end_date"
         window = body[body.index(marker) - 300 : body.index(marker)]
         assert "p.completed_at IS NULL" in window
+
+
+class TestTaskReviewParentRollup:
+    """parent_task_name + a rollup key, so a report can group sub-tasks under
+    their parent. parent_task_id alone cannot: it is NULL on top-level tasks
+    and an integer is not a readable report dimension.
+    """
+
+    NAME = "v_task_review"
+
+    def test_parent_name_is_resolved(self, sql):
+        assert "parent.name AS parent_task_name" in sql[self.NAME]
+
+    def test_rollup_columns_exist(self, sql):
+        body = sql[self.NAME]
+        assert "AS rollup_task_id" in body
+        assert "AS rollup_task_name" in body
+
+    def test_rollup_id_and_name_share_one_condition(self, sql):
+        """They must always describe the SAME task.
+
+        Coalescing them independently -- COALESCE(t.parent_task_id, t.task_id)
+        with COALESCE(parent.name, t.name) -- pairs a parent's id with a
+        child's name whenever the parent is missing from the tasks table
+        (deleted, or outside the pull). Both must branch on whether the parent
+        actually resolved.
+        """
+        body = sql[self.NAME]
+        assert "IF(parent.task_id IS NOT NULL, t.parent_task_id, t.task_id) AS rollup_task_id" in body
+        assert "IF(parent.task_id IS NOT NULL, parent.name, t.name) AS rollup_task_name" in body
+        assert "COALESCE(t.parent_task_id, t.task_id)" not in body
+        assert "COALESCE(parent.name, t.name)" not in body
+
+    def test_parent_join_is_on_task_id_so_it_cannot_fan_out(self, sql):
+        """tasks is de-duplicated by task_id, so this matches at most one row."""
+        assert "parent ON parent.task_id = t.parent_task_id" in sql[self.NAME]
+
+    def test_parent_join_is_a_left_join(self, sql):
+        """An inner join would silently drop every top-level task."""
+        body = sql[self.NAME]
+        assert "LEFT JOIN" in body.split("parent ON parent.task_id")[0].splitlines()[-1]
+
+    def test_rollup_columns_are_confined_to_this_view(self, sql):
+        others = [n for n, b in sql.items() if n != self.NAME and "rollup_task_id" in b]
+        assert others == [], others
