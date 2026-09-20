@@ -770,6 +770,21 @@ SELECT
   tk.estimate_minutes,
   tk.due_date AS task_due_date,
   tk.parent_task_id,
+  parent.name AS parent_task_name,
+
+  -- Same rollup pair as v_task_review, here at timelog grain so a monthly
+  -- pivot can group sub-tasks under their parent. A sub-task reports its
+  -- parent, a top-level task reports itself; both branch on the SAME
+  -- condition so the id and the name always describe one task.
+  --
+  -- Project-level time (no task at all) leaves both NULL rather than
+  -- inventing a group -- task_join_status already names that case.
+  --
+  -- ONE LEVEL ONLY, as in v_task_review: a sub-sub-task rolls up to its own
+  -- parent, not to the top of the tree.
+  IF(parent.task_id IS NOT NULL, tk.parent_task_id, tk.task_id) AS rollup_task_id,
+  IF(parent.task_id IS NOT NULL, parent.name, tk.name) AS rollup_task_name,
+
   tk.sequence_id,
   CASE
     WHEN tl.task_id IS NULL THEN 'No task (project-level time)'
@@ -781,6 +796,9 @@ SELECT
 FROM {timelogs} tl
 LEFT JOIN {projects} p ON p.project_id = tl.project_id
 LEFT JOIN {tasks} tk ON tk.task_id = tl.task_id
+-- tasks is de-duplicated by task_id, so this matches at most one row and
+-- cannot fan out the one-row-per-timelog grain.
+LEFT JOIN {tasks} parent ON parent.task_id = tk.parent_task_id
 LEFT JOIN {users} u ON u.user_id = tl.user_id
 LEFT JOIN {users} lb ON lb.user_id = tl.logged_by_user_id
 {proj_owner_join}

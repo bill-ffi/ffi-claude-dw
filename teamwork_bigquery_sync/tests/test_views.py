@@ -735,6 +735,66 @@ class TestTaskReviewParentRollup:
         body = sql[self.NAME]
         assert "LEFT JOIN" in body.split("parent ON parent.task_id")[0].splitlines()[-1]
 
-    def test_rollup_columns_are_confined_to_this_view(self, sql):
-        others = [n for n, b in sql.items() if n != self.NAME and "rollup_task_id" in b]
+    def test_rollup_columns_are_confined_to_an_explicit_allowlist(self, sql):
+        """v_timelog_detail carries the same pair deliberately, at timelog
+        grain, so a monthly pivot can roll sub-tasks up. This stays an
+        allowlist rather than being dropped: a third view picking the columns
+        up by copy-paste should still fail here and be justified.
+        """
+        allowed = {self.NAME, "v_timelog_detail"}
+        others = [n for n, b in sql.items()
+                  if n not in allowed and "rollup_task_id" in b]
         assert others == [], others
+
+    def test_every_view_with_the_rollup_derives_it_identically(self, sql):
+        """Two views answering "which task does this roll up to" must agree."""
+        carriers = [n for n, b in sql.items() if "AS rollup_task_id" in b]
+        assert len(carriers) == 2, carriers
+        for name in carriers:
+            body = sql[name]
+            assert "IF(parent.task_id IS NOT NULL," in body, name
+            assert "COALESCE(parent.name," not in body, name
+
+
+class TestTimelogDetailParentRollup:
+    """The same rollup pair at timelog grain.
+
+    v_task_review is one row per task with lifetime totals, so it has no date
+    to pivot on. A month-by-month report has to read from v_timelog_detail,
+    which is why these columns exist in both places.
+    """
+
+    NAME = "v_timelog_detail"
+
+    def test_parent_name_and_rollup_columns_exist(self, sql):
+        body = sql[self.NAME]
+        assert "parent.name AS parent_task_name" in body
+        assert "AS rollup_task_id" in body
+        assert "AS rollup_task_name" in body
+
+    def test_rollup_id_and_name_share_one_condition(self, sql):
+        body = sql[self.NAME]
+        assert "IF(parent.task_id IS NOT NULL, tk.parent_task_id, tk.task_id) AS rollup_task_id" in body
+        assert "IF(parent.task_id IS NOT NULL, parent.name, tk.name) AS rollup_task_name" in body
+
+    def test_project_level_time_gets_no_invented_group(self, sql):
+        """Time with no task must leave the rollup NULL.
+
+        Both branches read from tk, which is NULL when there is no task, so
+        the columns fall out NULL rather than grouping untasked time under
+        some made-up label. task_join_status already names that population.
+        """
+        body = sql[self.NAME]
+        assert "tk.task_id) AS rollup_task_id" in body
+        assert "tk.name) AS rollup_task_name" in body
+        assert "'No task (project-level time)'" in body
+
+    def test_parent_join_is_left_and_on_the_task_alias(self, sql):
+        """Must hang off tk (the timelog's task), not tl, and keep every row."""
+        body = sql[self.NAME]
+        assert "LEFT JOIN" in body.split("parent ON parent.task_id = tk.parent_task_id")[0].splitlines()[-1]
+
+    def test_the_date_column_a_monthly_pivot_needs_is_present(self, sql):
+        """The reason this view is the right source for a monthly report."""
+        body = sql[self.NAME]
+        assert "tl.log_date" in body

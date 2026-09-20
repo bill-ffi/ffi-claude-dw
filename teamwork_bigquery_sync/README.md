@@ -203,6 +203,20 @@ Added beyond the request, in rough order of how often they earn their place:
 | `task_status`, `is_completed`, `project_status`, `project_is_billable` | Needed to separate the open and completed halves, since both are in scope. |
 | `hygiene_gap_count` | Convenience only — counts **four** gaps (no assignee, no estimate, no activity, no due date) so a reviewer can sort worst-first. The individual booleans are the source of truth. `has_description` and `has_time_logged` are deliberately **not** counted: both are near-constants here (~90% of open tasks have no description, measured 2026-09-14), so including them offsets every score instead of discriminating between tasks. Both remain filter columns. |
 
+**`rollup_task_id` / `rollup_task_name` also exist on `v_timelog_detail`**, at
+timelog grain. That is the view to use for anything **month-by-month**:
+`v_task_review` is one row per task carrying lifetime totals, so it has no date
+to pivot on. Same derivation in both, and a test asserts the two cannot drift.
+On `v_timelog_detail`, project-level time (no task at all) leaves both columns
+NULL rather than inventing a group — `task_join_status` already names that
+population.
+
+> ⚠️ **`estimate_minutes` on `v_timelog_detail` is the TASK's estimate repeated
+> on every time entry for that task.** `SUM` multiplies it by the number of
+> entries. It is safe to filter or display, never to total. For estimate-vs-
+> actual at task grain use `v_task_review`, which carries `estimate_minutes`,
+> `logged_hours` and a precomputed `pct_of_estimate_used` on one row per task.
+
 **Rolling sub-tasks up to their parent.** `parent_task_id` alone cannot drive
 a grouped report: it is NULL on top-level tasks, and an integer is not a
 readable dimension. Three columns handle it —
