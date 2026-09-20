@@ -203,6 +203,24 @@ Added beyond the request, in rough order of how often they earn their place:
 | `task_status`, `is_completed`, `project_status`, `project_is_billable` | Needed to separate the open and completed halves, since both are in scope. |
 | `hygiene_gap_count` | Convenience only — counts **four** gaps (no assignee, no estimate, no activity, no due date) so a reviewer can sort worst-first. The individual booleans are the source of truth. `has_description` and `has_time_logged` are deliberately **not** counted: both are near-constants here (~90% of open tasks have no description, measured 2026-09-14), so including them offsets every score instead of discriminating between tasks. Both remain filter columns. |
 
+**Why both views carry the rollup: a monthly close spans three calendar
+months.** Per the domain owner, for a close period such as "Monthly Close
+2026-08", some time posts in **August**, the bulk posts in **September** (the
+month after the period being closed), and a close that runs long posts again in
+**October**.
+
+That makes the two views genuinely complementary rather than redundant, and
+neither can answer the other's question:
+
+| Question | View | Why |
+|---|---|---|
+| Did this close land on estimate? | `v_task_review` | Lifetime `logged_hours` vs `estimate_minutes`, period-agnostic. A monthly slice only ever shows a fragment of a close, so a month-grained view cannot answer this at all. |
+| *When* did the effort land? | `v_timelog_detail` | `log_date` pivoted by month shows the Aug / Sep / Oct spread. Task grain has no date and cannot show it. |
+
+A close still accruing time in its third month is the signal worth watching,
+and it is only visible in the timelog-grained view. Do not "simplify" by
+retiring either lens.
+
 **`rollup_task_id` / `rollup_task_name` also exist on `v_timelog_detail`**, at
 timelog grain. That is the view to use for anything **month-by-month**:
 `v_task_review` is one row per task carrying lifetime totals, so it has no date
