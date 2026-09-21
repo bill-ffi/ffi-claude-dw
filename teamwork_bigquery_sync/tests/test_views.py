@@ -938,3 +938,119 @@ class TestClientMonthView:
 
     def test_uses_the_reporting_timezone(self, sql):
         assert f"CURRENT_DATE('{views.REPORTING_TIMEZONE}')" in sql[self.NAME]
+
+
+class TestDataFreshnessView:
+    """v_data_freshness: the "last updated at" source for Looker Studio.
+
+    synced_at is a BigQuery TIMESTAMP, which Looker renders in UTC — a 09:53
+    UTC sync reads as a mid-morning refresh when it was 05:53 ET. The whole
+    point of this view is that the conversion happens in SQL, where DST comes
+    off the tz database, rather than as a fixed-offset shift in Looker.
+    """
+
+    NAME = "v_data_freshness"
+
+    def test_view_is_registered(self):
+        assert self.NAME in views.VIEW_NAMES
+
+    def test_reads_only_base_tables(self, sql):
+        """This is what leaves its position in the creation order free.
+
+        If it ever starts reading another view, it needs an ordering test like
+        v_client_month's — so fail here rather than at --create-views time.
+        """
+        body = sql[self.NAME]
+        referenced = set(re.findall(r"teamwork_data\.(\w+)`", body))
+        assert referenced == {"projects", "tasks", "users", "timelogs", self.NAME}
+
+    def test_all_four_tables_are_covered(self, sql):
+        body = sql[self.NAME]
+        for table in ("projects", "tasks", "users", "timelogs"):
+            assert f"SELECT '{table}' AS table_name, MAX(synced_at)" in body
+
+    def test_per_table_stamp_is_a_max_never_a_min(self, sql):
+        """timelogs is a windowed replace: only the rolling window's rows get
+        a fresh synced_at, so an untouched January row keeps a months-old
+        stamp. MIN within a table would report that as the sync time."""
+        body = sql[self.NAME]
+        per_table = body.split("rolled AS")[0]
+        assert "MIN(" not in per_table
+        assert per_table.count("MAX(synced_at)") == 4
+
+    def test_headline_is_the_oldest_table_not_the_newest(self, sql):
+        """The pipeline fails a stage rather than writing bad data, so a
+        partial failure leaves one table stale and the rest current. MAX
+        across the four would claim a freshness the dashboard lacks."""
+        body = sql[self.NAME]
+        assert "MIN(synced_at) AS oldest_synced_at" in body
+        assert (
+            f"DATETIME(r.oldest_synced_at, '{views.REPORTING_TIMEZONE}') "
+            "AS last_synced_at_et"
+        ) in body
+        assert "AS last_synced_at_et" in body and "newest_synced_at) AS last_synced_at_et" not in body
+
+    def test_age_is_measured_from_the_oldest_stamp_too(self, sql):
+        """A headline of MIN and an age off MAX would contradict each other."""
+        body = sql[self.NAME]
+        for unit in ("MINUTE", "SECOND", "HOUR"):
+            assert f"TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), r.oldest_synced_at, {unit})" in body
+        assert "TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), r.newest_synced_at" not in body
+
+    def test_every_rendered_timestamp_is_timezone_converted(self, sql):
+        """A single bare DATETIME(ts) would silently reintroduce UTC."""
+        body = sql[self.NAME]
+        total = len(re.findall(r"DATETIME\(", body))
+        qualified = len(re.findall(r"DATETIME\([^)]+, '" + views.REPORTING_TIMEZONE + r"'\)", body))
+        assert total > 0 and total == qualified
+
+    def test_the_preformatted_label_is_timezone_qualified(self, sql):
+        """FORMAT_TIMESTAMP defaults to UTC when the zone is omitted."""
+        body = sql[self.NAME]
+        assert re.search(
+            r"FORMAT_TIMESTAMP\(\s*'[^']+',\s*r\.oldest_synced_at,\s*'"
+            + views.REPORTING_TIMEZONE
+            + r"'\s*\)",
+            body,
+        )
+
+    def test_age_uses_current_timestamp_not_current_date(self, sql):
+        """CURRENT_TIMESTAMP() needs no timezone — a TIMESTAMP is an absolute
+        instant and TIMESTAMP_DIFF between two is timezone-independent. This
+        pins that so nobody "fixes" it into a CURRENT_DATE comparison."""
+        body = sql[self.NAME]
+        assert "CURRENT_TIMESTAMP()" in body
+        assert "CURRENT_DATE(" not in body
+
+    def test_stale_threshold_comes_from_the_constant(self, sql):
+        body = sql[self.NAME]
+        assert f">= {views.DATA_FRESHNESS_STALE_AFTER_HOURS}" in body
+        assert ") AS is_stale" in body
+
+    def test_stale_threshold_clears_the_measured_scheduler_gap(self):
+        """The cron implies 12h; GitHub actually delivers the two firings
+        9.5-15.1h apart (33 firings measured, see README "Known gaps"). A
+        threshold at or below that flags stale during normal operation and
+        trains everyone to ignore the indicator."""
+        assert views.DATA_FRESHNESS_STALE_AFTER_HOURS > 15.1
+
+    def test_empty_table_guard_is_present(self, sql):
+        """MIN/MAX skip NULLs, so an empty table would vanish rather than
+        drag the headline down. tables_reporting should always be 4."""
+        body = sql[self.NAME]
+        assert "COUNTIF(synced_at IS NOT NULL) AS tables_reporting" in body
+
+    def test_stage_skew_is_exposed_for_diagnosis(self, sql):
+        """Hours of skew means a stage failed and its table was never
+        rewritten — the case the MIN headline is hiding from the reader."""
+        body = sql[self.NAME]
+        assert (
+            "TIMESTAMP_DIFF(r.newest_synced_at, r.oldest_synced_at, MINUTE)" in body
+        )
+        assert "AS stage_skew_minutes" in body
+
+    def test_it_is_one_row(self, sql):
+        """Aggregates with no GROUP BY. A grouped version would break every
+        scorecard pointed at it."""
+        body = sql[self.NAME]
+        assert "GROUP BY" not in body

@@ -124,6 +124,19 @@ REPORTING_TIMEZONE = "America/New_York"
 # access if this ever gets shared beyond its current audience.
 ANCILLARY_USER_INFO_TABLE = "gs_minimum_user_info"
 
+# How old the data must be before v_data_freshness flags it as stale.
+#
+# Deliberately NOT 12h, which is what the twice-daily cron implies. GitHub's
+# scheduler delivers those two firings 9.5-15.1h apart in practice (measured
+# over 33 consecutive firings -- see README "Known gaps"), so a 12h or even
+# 16h threshold would read "stale" during entirely normal operation and train
+# everyone to ignore the indicator. 18h clears the measured worst case with
+# headroom while still catching a genuinely missed sync, which lands at 24h+.
+#
+# Revisit this if the Cloud Run migration lands: real scheduling guarantees
+# would make a much tighter threshold meaningful.
+DATA_FRESHNESS_STALE_AFTER_HOURS = 18
+
 # The earliest month v_client_month will emit a row for.
 #
 # `timelogs` only holds history the pipeline has loaded, which begins
@@ -150,6 +163,7 @@ VIEW_NAMES = [
     "v_task_review",
     "v_project_detail",
     "v_client_month",
+    "v_data_freshness",
 ]
 
 
@@ -1366,6 +1380,98 @@ FROM client_month_budget b
 FULL OUTER JOIN client_month_actuals a
   ON a.client_name = b.client_name
  AND a.month_start = b.month_start
+"""
+
+    # One row, and the only view here whose subject is the pipeline itself
+    # rather than the business. It exists so a Looker Studio report can show
+    # "last updated" without every report re-deriving it, and because
+    # synced_at is a BigQuery TIMESTAMP: Looker renders those in UTC, so a
+    # 09:53 UTC sync reads as a mid-morning refresh when it was actually
+    # 05:53 ET. The conversion belongs here, where DATETIME(ts, tz) resolves
+    # DST off the tz database. The Looker-side alternative is a fixed-offset
+    # DATETIME_SUB(synced_at, INTERVAL 4 HOUR), which is silently an hour
+    # wrong every November -- the same shape as the CURRENT_DATE() bug.
+    #
+    # TWO THINGS THAT LOOK LIKE MISTAKES AND ARE NOT:
+    #
+    # 1. MAX within each table, then MIN across them. MAX within is required
+    #    because timelogs is a *windowed* replace -- only the rolling window's
+    #    rows get a fresh synced_at, so an untouched January row keeps a
+    #    months-old stamp and MIN within that table would report it as the
+    #    sync time. MIN across the four is the honest headline: the pipeline
+    #    fails a stage rather than writing bad data, so a partial failure
+    #    leaves one table stale while the rest are current, and MAX across
+    #    would claim a freshness the dashboard does not have. last_synced_at
+    #    therefore means "every table is at least this fresh".
+    #
+    # 2. CURRENT_TIMESTAMP() carries no timezone argument, unlike every
+    #    CURRENT_DATE() in this file. That is correct, not an oversight: a
+    #    TIMESTAMP is an absolute instant and TIMESTAMP_DIFF between two of
+    #    them is timezone-independent. Adding a zone here would be a no-op at
+    #    best. The timezone only matters when rendering, which is what the
+    #    DATETIME() and FORMAT_TIMESTAMP() calls below are for.
+    views["v_data_freshness"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_data_freshness")} AS
+WITH per_table AS (
+  SELECT 'projects' AS table_name, MAX(synced_at) AS synced_at FROM {projects}
+  UNION ALL
+  SELECT 'tasks' AS table_name, MAX(synced_at) AS synced_at FROM {tasks}
+  UNION ALL
+  SELECT 'users' AS table_name, MAX(synced_at) AS synced_at FROM {users}
+  UNION ALL
+  SELECT 'timelogs' AS table_name, MAX(synced_at) AS synced_at FROM {timelogs}
+),
+rolled AS (
+  SELECT
+    -- MIN/MAX skip NULLs, so an empty table would vanish from both rather
+    -- than dragging the headline down. tables_reporting is the guard: it
+    -- should always be 4, and anything less means a table this view thinks
+    -- it is vouching for is empty.
+    COUNTIF(synced_at IS NOT NULL) AS tables_reporting,
+    MIN(synced_at) AS oldest_synced_at,
+    MAX(synced_at) AS newest_synced_at,
+    MAX(IF(table_name = 'projects', synced_at, NULL)) AS projects_synced_at,
+    MAX(IF(table_name = 'tasks', synced_at, NULL)) AS tasks_synced_at,
+    MAX(IF(table_name = 'users', synced_at, NULL)) AS users_synced_at,
+    MAX(IF(table_name = 'timelogs', synced_at, NULL)) AS timelogs_synced_at
+  FROM per_table
+)
+SELECT
+  -- THE DISPLAY COLUMN. A BigQuery DATETIME has no timezone, so Looker
+  -- shows it verbatim instead of re-interpreting it as UTC.
+  DATETIME(r.oldest_synced_at, '{REPORTING_TIMEZONE}') AS last_synced_at_et,
+  -- Pre-formatted for a scorecard that wants a sentence rather than a date
+  -- widget, e.g. "Sep 21, 2026 at 05:53 AM".
+  FORMAT_TIMESTAMP(
+    '%b %d, %Y at %I:%M %p', r.oldest_synced_at, '{REPORTING_TIMEZONE}'
+  ) AS last_updated_label,
+  r.oldest_synced_at AS last_synced_at_utc,
+
+  -- Age. "05:53 AM" means nothing to a reader who does not know what normal
+  -- looks like; the measured gap between scheduled syncs is 9.5-15.1h.
+  TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), r.oldest_synced_at, MINUTE)
+    AS minutes_since_sync,
+  ROUND(
+    TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), r.oldest_synced_at, SECOND) / 3600, 1
+  ) AS hours_since_sync,
+  (
+    TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), r.oldest_synced_at, HOUR)
+      >= {DATA_FRESHNESS_STALE_AFTER_HOURS}
+  ) AS is_stale,
+
+  -- Diagnostics. Within one healthy run the four stages land seconds to a
+  -- couple of minutes apart, so stage_skew_minutes is small. Hours of skew
+  -- means a stage failed and its table was never rewritten -- exactly the
+  -- case the MIN above is protecting the headline from.
+  r.tables_reporting,
+  DATETIME(r.newest_synced_at, '{REPORTING_TIMEZONE}') AS newest_synced_at_et,
+  TIMESTAMP_DIFF(r.newest_synced_at, r.oldest_synced_at, MINUTE)
+    AS stage_skew_minutes,
+  DATETIME(r.projects_synced_at, '{REPORTING_TIMEZONE}') AS projects_synced_at_et,
+  DATETIME(r.tasks_synced_at, '{REPORTING_TIMEZONE}') AS tasks_synced_at_et,
+  DATETIME(r.users_synced_at, '{REPORTING_TIMEZONE}') AS users_synced_at_et,
+  DATETIME(r.timelogs_synced_at, '{REPORTING_TIMEZONE}') AS timelogs_synced_at_et
+FROM rolled r
 """
 
     return views
