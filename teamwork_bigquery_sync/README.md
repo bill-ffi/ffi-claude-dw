@@ -753,10 +753,11 @@ Cron: `15 4,16 * * *` — 04:15 and 16:15 UTC.
   refresh justifies. Say the word if it ever does matter.
 - **`schedule:` only fires from the default branch (`main`).** A cron edit
   on a feature branch does nothing until merged.
-- **The `:15` offset was a mitigation that did not work.** Measured over 19
-  consecutive firings: median delay 4h 22m, and *not one run fired on
-  time*. See "Known gaps" for the full data. The effective schedule is
-  roughly **05:00 and 15:00 ET**, not midnight and noon.
+- **The `:15` offset was a mitigation that did not work.** Measured over 33
+  consecutive firings (2026-09-05 to 2026-09-21): median delay ~4h 20m, and
+  *not one run fired on time*. See "Known gaps" for the full data. The
+  effective schedule is roughly **05:00 and 15:00 ET**, not midnight and
+  noon.
 - `SYNC_TIMEZONE` (`America/New_York`, a workflow env var) controls the
   calendar months of the timelogs window. It is independent of the cron's
   UTC timing — the two are not linked automatically.
@@ -1285,6 +1286,54 @@ leaves GCP).
   stopgap, if that is deferred, is simply adding more cron slots — four a
   day instead of two cuts worst-case staleness from ~15h to ~7h without
   fixing predictability at all.
+
+  **Re-measured 2026-09-21 — the pattern holds, and has become *more*
+  predictable without becoming faster.** 14 consecutive firings from
+  2026-09-14 (pm slot) to 2026-09-21 (am slot), same `15 4,16` cron:
+
+  | | Sep 5-14 (19 runs) | Sep 14-21 (14 runs) |
+  |---|---|---|
+  | median delay | 4h 22m | **4h 17m** |
+  | minimum delay | 1h 59m | **2h 20m** |
+  | maximum delay | 9h 36m | **5h 37m** |
+  | fired within 30 min of schedule | 0 of 19 | **0 of 14** |
+  | delayed more than 2 hours | 18 of 19 | **14 of 14** |
+
+  The median did not move. What collapsed is the *spread*: the worst case
+  improved by four hours and every firing now lands in a roughly one-hour
+  band per slot.
+
+  | Slot | Actually fires (UTC) | In Eastern | Delay range |
+  |---|---|---|---|
+  | 04:15 | 08:46-09:53 | 04:46-05:53 ET | 4h 31m - 5h 37m |
+  | 16:15 | 18:35-20:18 | 14:35-16:18 ET | 2h 20m - 4h 02m |
+
+  Against the Sep-14 table the am slot is unchanged and the pm slot has
+  drifted roughly 20 minutes later. Gaps between consecutive fires ran
+  9.5-15.1h (median 13.1h), so worst-case staleness is still ~15 hours —
+  the number that actually matters to a reader of the dashboards, and it
+  has not improved at all.
+
+  **Do not read the narrowing as the problem fixing itself.** A tight
+  distribution around a 4h 17m median is still a 4h 17m median; it means
+  the delay is a stable property of these two UTC slots rather than noise,
+  which is evidence *for* migrating off GitHub's scheduler, not against.
+  It is also still not a reason to re-tune the cron — the band is ~1 hour
+  wide per slot and would encode a dependency on GitHub's current
+  congestion pattern, which is exactly what the `:15` attempt above proved
+  is not stable over time.
+
+  Pipeline health over the same 14 runs was clean: **14 of 14 succeeded**
+  (49 of 49 scheduled runs all-time), 96-168s wall clock, `rows_dropped`
+  all zero, `activity.method` still `bulk_sideload`, every `fill_rates`
+  entry at 1.0 with `underfilled_columns` empty, and no `sync-failure`
+  issue has ever been opened. Row counts moved as expected over the week —
+  tasks 37,891 -> 38,090, timelogs (Aug+Sep window) 6,437 -> 7,224 — while
+  `projects` held at exactly 1,890 rows and an 824-project task scope
+  (219 active + 605 archived-on-or-after-cutoff) across all 14 runs. That
+  stasis is plausible for a week on this account, but it is the one number
+  here that would look identical if the projects pull ever went stale, so
+  confirm it moves before treating a constant `projects` count as healthy.
 - **Retired views — all now dropped, and orphans are self-reporting
   (closed 2026-09-13).** `--create-views` never drops a view removed from
   `VIEW_NAMES`, so a retired view stays live in BigQuery *frozen at its
