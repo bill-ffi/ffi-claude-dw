@@ -208,7 +208,8 @@ corresponding months.
 still consumes budget (a quiet retainer month is real), and revenue on a
 project with no budget still appears rather than vanishing.
 
-> ⚠️ **While budgets are still being rolled out, `pct_of_budget` reads high.**
+> ⚠️ **While budgets are still being rolled out, any budget percentage reads
+> high.**
 > Revenue counts every project; only budgeted projects contribute a
 > denominator. `project_count` exceeding `budgeted_project_count` on a
 > client-month is the tell. A second, budgeted-projects-only revenue column was
