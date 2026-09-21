@@ -741,6 +741,23 @@ here, in SQL, where `DATETIME(ts, tz)` resolves DST off the tz database.
 | `newest_synced_at_et`, `stage_skew_minutes` | Diagnostics — see below |
 | `projects_synced_at_et`, `tasks_synced_at_et`, `users_synced_at_et`, `timelogs_synced_at_et` | Per-table, for when the skew is non-zero and you want to know which stage is behind |
 
+**Verified live 2026-09-21**, the first query against the created view, at
+~13:05 UTC against a sync that ran at 09:53 UTC:
+
+```
+last_updated_label          hours_since_sync  is_stale  tables_reporting  stage_skew_minutes
+Sep 21, 2026 at 05:53 AM    3.2               false     4                 1
+```
+
+Every column matched prediction. `05:53 AM` is the one that matters — a
+broken conversion would read `09:53`, which is exactly the symptom this view
+exists to remove. `stage_skew_minutes` of 1 matches the run's own log
+(`projects` written 09:53:16, `timelogs` finished 09:54:53), confirming the
+`MIN` headline was not masking a failed stage, and `tables_reporting` of 4
+confirms no table was silently absent. Recorded because there is no local
+BigQuery emulator: until this query, the SQL had only been read and
+simulated, never executed.
+
 **Two things in the SQL that look like mistakes and are not.**
 
 *`MAX` within each table, then `MIN` across them.* `MAX` within is required
