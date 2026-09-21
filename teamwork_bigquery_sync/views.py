@@ -511,7 +511,27 @@ SELECT
     WHEN 5 THEN 4 WHEN 6 THEN 5 WHEN 7 THEN 5
   END AS day_order,
   DATE_TRUNC(tl.log_date, WEEK) AS week_start,
-  SUM(tl.hours) AS hours
+  SUM(tl.hours) AS hours,
+  -- Billable revenue for the same bucket. Additive, so it sums over any range.
+  --
+  -- Derived from minutes, NOT from the `hours` column above, so that revenue
+  -- means exactly what it means everywhere else: this is the same expression
+  -- as v_timelog_detail.billable_amount and v_client_month.billable_revenue.
+  -- timelogs.hours is stored pre-rounded (see README), so hours * rate would
+  -- be a second, slightly different definition of revenue that would not tie
+  -- back to those views.
+  --
+  -- Consequence, deliberate: within THIS view, billable_revenue / hours does
+  -- not exactly equal the billable rate, because the two columns rest on
+  -- different bases -- exact minutes vs pre-rounded hours. `hours` is left
+  -- alone rather than "fixed": changing it would silently shift every number
+  -- v_user_weekly_billable_hours has ever reported.
+  --
+  -- No IF needed: the WHERE below already restricts to billable entries. A
+  -- NULL billable_rate yields NULL and is skipped by SUM, so a missing rate
+  -- understates revenue rather than counting the work as free. Measured
+  -- 2026-09-21: 0 of 18,184 billable entries lack a rate.
+  SUM((tl.minutes / 60) * tl.billable_rate) AS billable_revenue
 FROM {timelogs} tl
 WHERE tl.is_billable = TRUE
 GROUP BY user_id, day_bucket, day_order, week_start

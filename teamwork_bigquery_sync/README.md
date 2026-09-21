@@ -676,6 +676,33 @@ applied exactly once. Deliberately sparse (no user scaffold, no
 a view — cost is incurred at query time, and the one consumer below
 filters to whatever range it needs).
 
+**`billable_revenue` was added alongside `hours` (2026-09-21)** — same
+bucket, additive, so it sums over any range. It is derived from
+`(minutes / 60) * billable_rate`, **not** from the `hours` column beside it,
+so revenue means exactly what it means in `v_timelog_detail.billable_amount`
+and `v_client_month.billable_revenue`. `timelogs.hours` is stored pre-rounded,
+so `hours * rate` would be a second, subtly different definition that would
+not tie back to those views.
+
+> The deliberate consequence: **within this view, `billable_revenue / hours`
+> does not exactly equal the billable rate**, because the two columns rest on
+> different bases — exact minutes vs pre-rounded hours. `hours` was left alone
+> rather than rebased, because changing it would silently shift every number
+> `v_user_weekly_billable_hours` has ever reported.
+
+The addition was safe precisely because **`v_user_weekly_billable_hours` reads
+this view with an explicit column list, never `SELECT *`.** That matters more
+than usual: the dependent is a `UNION ALL`, so a `SELECT *` would change one
+branch's column count the moment anyone adds a field here, breaking the union
+outright. A test asserts the explicit list, and another asserts the weekly
+view did *not* pick the new column up — additive means additive. Keep that
+property for any future column.
+
+A NULL `billable_rate` yields NULL and is skipped by `SUM`, so a missing rate
+understates revenue rather than valuing the work at zero. Measured
+2026-09-21: **0 of 18,184** billable entries lack a rate, so nothing is lost
+today; the behaviour is the guard for a person added later without one.
+
 **The week now runs Sunday-through-Saturday**, not Monday-through-Sunday
 — `week_start` is always a Sunday (BigQuery's default `WEEK` truncation),
 per your instruction that "week of" should be a Sunday and the business

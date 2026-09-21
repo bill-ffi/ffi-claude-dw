@@ -1069,3 +1069,60 @@ class TestDataFreshnessView:
         scorecard pointed at it."""
         body = sql[self.NAME]
         assert "GROUP BY" not in body
+
+
+class TestBaseViewBillableRevenue:
+    """billable_revenue on v_user_daily_billable_hours_base.
+
+    Added as a purely additive column: v_user_weekly_billable_hours reads the
+    base with an explicit column list, so a new column cannot disturb it.
+    That property is load-bearing and is asserted below, because the dependent
+    is a UNION ALL -- a SELECT * there would make any future column addition
+    change one branch's shape and break the union outright.
+    """
+
+    BASE = "v_user_daily_billable_hours_base"
+    DEPENDENT = "v_user_weekly_billable_hours"
+
+    def test_column_exists(self, sql):
+        assert "AS billable_revenue" in sql[self.BASE]
+
+    def test_revenue_is_derived_from_minutes_not_the_rounded_hours_column(self, sql):
+        """One definition of revenue across the warehouse.
+
+        timelogs.hours is stored pre-rounded, so SUM(hours * rate) would be a
+        second, slightly different revenue that would not tie back to
+        v_timelog_detail.billable_amount or v_client_month.billable_revenue.
+        """
+        body = sql[self.BASE]
+        assert "SUM((tl.minutes / 60) * tl.billable_rate) AS billable_revenue" in body
+        assert "SUM(tl.hours * tl.billable_rate)" not in body
+
+    def test_matches_the_billable_amount_expression_in_v_timelog_detail(self, sql):
+        """The two must not drift into different definitions of revenue."""
+        assert "(tl.minutes / 60) * tl.billable_rate" in sql[self.BASE]
+        assert "(tl.minutes / 60) * tl.billable_rate" in sql["v_timelog_detail"]
+
+    def test_revenue_is_billable_only(self, sql):
+        """The WHERE is what makes the IF unnecessary; losing it would let
+        non-billable work contribute revenue."""
+        assert "WHERE tl.is_billable = TRUE" in sql[self.BASE]
+
+    def test_the_existing_hours_column_is_untouched(self, sql):
+        """Rebasing hours onto minutes would silently shift every number
+        v_user_weekly_billable_hours has ever reported."""
+        assert "SUM(tl.hours) AS hours" in sql[self.BASE]
+
+    def test_dependent_reads_an_explicit_column_list(self, sql):
+        """This is why adding a column here is safe.
+
+        The dependent is a UNION ALL; a SELECT * would change one branch's
+        column count the moment anyone adds a field to the base.
+        """
+        body = sql[self.DEPENDENT]
+        assert "SELECT base.user_id, base.day_bucket, base.week_start, base.hours" in body
+        assert "SELECT *" not in body
+
+    def test_dependent_did_not_pick_up_the_new_column(self, sql):
+        """Additive means additive: the weekly view's output is unchanged."""
+        assert "base.billable_revenue" not in sql[self.DEPENDENT]
