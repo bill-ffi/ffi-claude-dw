@@ -105,11 +105,13 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
 Seven BigQuery views, meant to be the direct data source for Looker Studio
 reports for leadership — each one is filterable by user / project / client /
 tasklist directly off its columns (no extra joins needed in Looker). Plus
-four more that aren't exception rules: `v_usermins` (see "External reference
+eight more that aren't exception rules: `v_usermins` (see "External reference
 data" below), the user report's `v_user_daily_billable_hours_base` /
-`v_user_weekly_billable_hours` (see "User report" below), and
-`v_timelog_detail` (see "Drill-down reporting" below). **Eleven** views in
-total, all defined in `views.py`; created/updated via:
+`v_user_weekly_billable_hours` (see "User report" below),
+`v_timelog_detail` (see "Drill-down reporting" below), `v_task_review`,
+`v_project_detail`, `v_client_month` and `v_data_freshness` (see "Last
+updated" below). **Fifteen** views in total, all defined in `views.py`;
+created/updated via:
 
 ```
 python sync.py --create-views
@@ -707,6 +709,71 @@ via `SAFE_DIVIDE`) rides along too, same as before.
 **The "prior 4-week average" concept is gone entirely** (per your
 instruction — no longer needed), superseded by this quarter-to-date
 window of individual weeks, current-week projection included.
+
+### Last updated: `v_data_freshness`
+
+One row. Its subject is the pipeline rather than the business — it exists so
+a report can show "last updated at" without every report re-deriving it.
+
+**The problem it solves.** `synced_at` is a BigQuery `TIMESTAMP`, which is an
+absolute instant — `transform.utc_now_iso()` writes it correctly. But Looker
+Studio *renders* a TIMESTAMP in UTC, so the 09:53 UTC sync of 2026-09-21
+displays as a mid-morning refresh when it actually ran at 05:53 ET. Looker
+gives you no timezone-aware conversion for a field; the only in-Looker option
+is a fixed offset:
+
+```
+DATETIME_SUB(synced_at, INTERVAL 4 HOUR)     -- DO NOT
+```
+
+which is silently an hour wrong from November to March — the same shape as
+the `CURRENT_DATE()` bug in "Known gaps". The conversion therefore happens
+here, in SQL, where `DATETIME(ts, tz)` resolves DST off the tz database.
+
+| Column | Use |
+|---|---|
+| `last_synced_at_et` | **The display column.** A BigQuery `DATETIME` carries no timezone, so Looker shows it verbatim instead of re-reading it as UTC |
+| `last_updated_label` | The same instant pre-formatted, e.g. `Sep 21, 2026 at 05:53 AM`, for a scorecard that wants a sentence rather than a date widget |
+| `last_synced_at_utc` | The raw TIMESTAMP, for anything that wants to do its own arithmetic |
+| `minutes_since_sync` / `hours_since_sync` | Age. "05:53 AM" means nothing to a reader who doesn't know what normal looks like |
+| `is_stale` | Age ≥ `DATA_FRESHNESS_STALE_AFTER_HOURS` |
+| `tables_reporting` | Should always be 4. Less means a table this view vouches for is empty |
+| `newest_synced_at_et`, `stage_skew_minutes` | Diagnostics — see below |
+| `projects_synced_at_et`, `tasks_synced_at_et`, `users_synced_at_et`, `timelogs_synced_at_et` | Per-table, for when the skew is non-zero and you want to know which stage is behind |
+
+**Two things in the SQL that look like mistakes and are not.**
+
+*`MAX` within each table, then `MIN` across them.* `MAX` within is required
+because `timelogs` is a **windowed** replace: only the rolling window's rows
+get a fresh `synced_at`, so an untouched January row keeps a months-old
+stamp, and a `MIN` within that table would report it as the sync time. `MIN`
+*across* the four is the honest headline — the pipeline fails a stage rather
+than writing bad data, so a partial failure leaves one table stale while the
+rest are current, and `MAX` across would claim a freshness the dashboard
+doesn't have. `last_synced_at_et` therefore means "every table is at least
+this fresh". `stage_skew_minutes` is what exposes the case the `MIN` is
+hiding from the reader: within a healthy run the four stages land seconds to
+a couple of minutes apart, so hours of skew means a stage failed.
+
+*`CURRENT_TIMESTAMP()` carries no timezone argument*, unlike every
+`CURRENT_DATE()` in `views.py`. That is correct: a TIMESTAMP is an absolute
+instant and `TIMESTAMP_DIFF` between two of them is timezone-independent.
+The timezone only matters when rendering.
+
+**`DATA_FRESHNESS_STALE_AFTER_HOURS` is 18, deliberately not 12.** The cron
+implies a 12-hour cycle; GitHub actually delivers the two firings 9.5-15.1h
+apart (see "Known gaps"). A 12h or even 16h threshold would read "stale"
+during entirely normal operation and train everyone to ignore the indicator.
+18h clears the measured worst case with headroom and still catches a genuinely
+missed sync, which lands at 24h+. Worth tightening if the Cloud Run migration
+lands and real scheduling guarantees arrive.
+
+**Set the Looker Studio data source's freshness to the shortest option.** A
+BigQuery data source caches for 12 hours by default, which means a "last
+updated" scorecard can itself be twelve hours out of date — the worst possible
+failure mode for this particular widget, since it fails in the direction of
+false reassurance.
+
 
 ## Backfilling history
 
