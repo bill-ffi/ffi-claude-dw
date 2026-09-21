@@ -1358,24 +1358,33 @@ SELECT
   COALESCE(a.time_entry_count, 0) AS time_entry_count,
   -- Rollout check. While budgets are still being added to active projects,
   -- project_count exceeding budgeted_project_count means this client-month's
-  -- revenue includes work from projects contributing no denominator, so
-  -- pct_of_budget reads high. Expected to converge as budgets land.
+  -- revenue includes work from projects contributing no denominator, so any
+  -- budget percentage computed from it reads high. Converges as budgets land.
   COALESCE(b.budgeted_project_count, 0) AS budgeted_project_count,
   COALESCE(a.project_count, 0) AS project_count,
-  (COALESCE(b.monthly_budget, 0) > 0) AS has_budget,
+  (COALESCE(b.monthly_budget, 0) > 0) AS has_budget
 
-  -- SINGLE-MONTH DISPLAY ONLY. Do not SUM or AVG these across months --
-  -- divide the additive columns instead:
+  -- DELIBERATELY NO pct_of_budget OR is_over_budget COLUMN.
+  --
+  -- Every column above is additive and safe to SUM over any date range. A
+  -- row-level percentage is not, and shipping one here was a mistake that was
+  -- removed on 2026-09-21:
+  --
+  --   1. It cannot be summed or averaged across months, so it is wrong for
+  --      every range except a single month -- and a dynamic range is the one
+  --      thing this view exists to support. A column that looks usable and is
+  --      not is worse than no column.
+  --   2. This repo's pct_* columns are already multiplied by 100, so applying
+  --      Looker Studio's native Percent type multiplies again: a real 128%
+  --      rendered as 12,840%. Observed in a live report.
+  --
+  -- Compute it in the report instead, as an AGGREGATE over the additive
+  -- columns. This is correct for one month, a quarter or year-to-date, and
+  -- returns a ratio that formats natively as Percent:
+  --
   --   SUM(billable_revenue) / SUM(monthly_budget)
-  IF(
-    COALESCE(b.monthly_budget, 0) > 0,
-    ROUND(100 * SAFE_DIVIDE(a.billable_revenue, b.monthly_budget), 1),
-    NULL
-  ) AS pct_of_budget,
-  (
-    COALESCE(b.monthly_budget, 0) > 0
-    AND COALESCE(a.billable_revenue, 0) > b.monthly_budget
-  ) AS is_over_budget
+  --
+  -- "Over budget" is the same expression compared to 1.
 FROM client_month_budget b
 FULL OUTER JOIN client_month_actuals a
   ON a.client_name = b.client_name

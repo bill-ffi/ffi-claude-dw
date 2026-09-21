@@ -897,30 +897,45 @@ class TestClientMonthView:
         assert "COALESCE(a.billable_revenue, 0) AS billable_revenue" in body
         assert "COALESCE(b.monthly_budget, 0) AS monthly_budget" in body
 
-    def test_row_level_percentage_is_null_not_zero_without_a_budget(self, sql):
-        """An unbudgeted client-month must not read as 0% of budget.
+    def test_no_row_level_percentage_column(self, sql):
+        """The view emits additive columns only.
 
-        0 is a claim -- "they used none of their budget" -- where the truth is
-        "there is no budget to measure against". It would also drag any
-        average down. Asserts the IF's false branch specifically: checking
-        only that the column and SAFE_DIVIDE exist passes against a 0 default,
-        which mutation testing caught.
+        A row-level percentage cannot be summed or averaged across months, so
+        it is wrong for every range but one -- and a dynamic range is the
+        reason this view exists. It also double-scales: the repo's pct_*
+        columns are already x100, so Looker's Percent type renders a real 128%
+        as 12,840%, which happened in a live report. Removed 2026-09-21; this
+        guards against it being reintroduced out of convenience.
         """
         body = sql[self.NAME]
-        expected = (
-            "IF(\n"
-            "    COALESCE(b.monthly_budget, 0) > 0,\n"
-            "    ROUND(100 * SAFE_DIVIDE(a.billable_revenue, b.monthly_budget), 1),\n"
-            "    NULL\n"
-            "  ) AS pct_of_budget,"
-        )
-        assert expected in body, "pct_of_budget must fall back to NULL, not 0"
+        assert "AS pct_of_budget" not in body
+        assert "AS is_over_budget" not in body
 
-    def test_the_multi_month_warning_is_in_the_sql(self, sql):
-        """Summing pct_of_budget across months is the trap this view exists to
-        avoid; the instruction belongs where someone will hit it."""
+    def test_every_emitted_measure_is_additive(self, sql):
+        """Anything summable over a date range is safe; nothing else ships.
+
+        Percentages, ratios and averages are all non-additive. If one is ever
+        added here, it must be as an aggregate in the report, not a column.
+        """
         body = sql[self.NAME]
-        assert "SINGLE-MONTH DISPLAY ONLY" in body
+        select = body[body.rindex("SELECT"):body.rindex("FROM client_month_budget")]
+        # Strip SQL comments: the assertion is about emitted columns, not
+        # prose. Explaining why a percentage is absent should not trip a test
+        # looking for percentages.
+        code = "\n".join(
+            l for l in select.splitlines() if not l.strip().startswith("--")
+        )
+        for banned in ("pct_", "_pct", "AVG(", "ratio"):
+            assert banned not in code, banned
+
+    def test_the_correct_aggregate_is_documented_in_the_sql(self, sql):
+        """Removing the column only helps if the replacement is findable.
+
+        Someone reaching for a percentage should hit the right expression in
+        the view itself, not have to rediscover it.
+        """
+        body = sql[self.NAME]
+        assert "DELIBERATELY NO pct_of_budget" in body
         assert "SUM(billable_revenue) / SUM(monthly_budget)" in body
 
     def test_only_one_revenue_column(self, sql):

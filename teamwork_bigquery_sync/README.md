@@ -152,12 +152,41 @@ is correct for one month, a quarter, or year-to-date, with no per-card
 arithmetic. Supporting a *dynamic* period is the whole reason this view exists
 rather than a calculated field.
 
-> ⚠️ **`pct_of_budget` on a row is single-month display only.** Summing or
-> averaging it across months is wrong — divide the two additive columns
-> instead. The additive columns (`monthly_budget`, `billable_revenue`,
-> `billable_hours`, `logged_hours`) are the contract; they are zero-filled so
-> they sum cleanly over any range. The warning is repeated in the SQL itself,
-> where someone will actually hit it.
+**The view emits additive columns only — there is deliberately no
+`pct_of_budget` or `is_over_budget`.** `monthly_budget`, `billable_revenue`,
+`billable_hours` and `logged_hours` are zero-filled and sum cleanly over any
+range; compute the percentage in the report as an aggregate over them.
+
+A row-level percentage column shipped briefly and was removed on 2026-09-21
+for two reasons, both worth remembering before anyone re-adds one:
+
+1. **It cannot be aggregated.** Summing or averaging a percentage across
+   months is wrong, so the column was only correct for a single month — and a
+   *dynamic* range is the one thing this view exists to support. A column that
+   looks usable and is not is worse than no column.
+2. **It double-scales in Looker Studio.** This repo's `pct_*` columns are
+   already multiplied by 100 (see `pct_of_estimate_used`,
+   `pct_of_budget_used`), so applying Looker's native **Percent** type
+   multiplies again: a real 128% rendered as **12,840%** in a live report.
+
+Use this instead — correct for one month, a quarter or year-to-date, and it
+returns a ratio that formats natively as Percent:
+
+```
+SUM(billable_revenue) / SUM(monthly_budget)
+```
+
+"Over budget" is the same expression compared to 1. Two tests enforce the
+absence: one for these two column names, one asserting no non-additive measure
+(`pct_`, `AVG(`, `ratio`) appears anywhere in the SELECT, comments excluded.
+
+> ⚠️ **The x100 convention still applies to the other views.** `pct_of_budget_used`
+> on `v_project_detail` and `pct_of_estimate_used` on `v_task_review` return
+> e.g. `128.4`, not `1.284`. In Looker set those to **Number with a `%`
+> suffix**, never the Percent type. They were left as-is rather than rescaled:
+> changing their semantics would silently shift any report already reading
+> them, and one rescaled column beside two that are not is worse than a
+> consistent convention.
 
 **Month spine.** One row per month each budgeted project is live, bounded by
 that project's own `start_date` and `end_date` (per instruction), clamped below
