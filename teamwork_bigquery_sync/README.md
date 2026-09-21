@@ -848,13 +848,17 @@ python sync.py --backfill-months 2026-01,2026-02,2026-03
 ## Scheduling
 
 Built as a **GitHub Actions scheduled workflow** (`.github/workflows/teamwork-bigquery-sync.yml`),
-twice daily at **midnight and noon US Eastern Daylight Time**.
-Cron: `15 4,16 * * *` — 04:15 and 16:15 UTC.
+twice daily. Cron: `30 3,15 * * *` — 03:30 and 15:30 UTC.
 
-| Fires (UTC) | Eastern (EDT, ~Mar-Nov) | Eastern (EST) |
+| Nominal (UTC) | Eastern (EDT, ~Mar-Nov) | Eastern (EST) |
 |---|---|---|
-| 04:15 | 00:15 | 23:15 *(previous day)* |
-| 16:15 | 12:15 | 11:15 |
+| 03:30 | 23:30 *(previous day)* | 22:30 *(previous day)* |
+| 15:30 | 11:30 | 10:30 |
+
+Moved 45 minutes earlier from `15 4,16` on **2026-09-21**, targeting
+10:30 AM/PM Eastern — which is the **EST** reading, so until the clocks
+change it lands at 11:30. See "Known gaps" for what this experiment can and
+cannot show.
 
 - **Evenly spaced on paper**, 12 hours apart — but see the delay data
   below: in practice *nothing fires on time*, and the real gaps run
@@ -867,11 +871,12 @@ Cron: `15 4,16 * * *` — 04:15 and 16:15 UTC.
   refresh justifies. Say the word if it ever does matter.
 - **`schedule:` only fires from the default branch (`main`).** A cron edit
   on a feature branch does nothing until merged.
-- **The `:15` offset was a mitigation that did not work.** Measured over 33
-  consecutive firings (2026-09-05 to 2026-09-21): median delay ~4h 20m, and
-  *not one run fired on time*. See "Known gaps" for the full data. The
-  effective schedule is roughly **05:00 and 15:00 ET**, not midnight and
-  noon.
+- **Moving the cron off `:00` was a mitigation that did not work.** Measured
+  over 33 consecutive firings (2026-09-05 to 2026-09-21) on the previous
+  `15 4,16`: median delay ~4h 20m, and *not one run fired on time*. Under
+  that schedule the effective times were roughly **05:00 and 15:00 ET**, not
+  the nominal midnight and noon. The 2026-09-21 shift to `30 3,15` does not
+  change that mechanism — see "Known gaps".
 - `SYNC_TIMEZONE` (`America/New_York`, a workflow env var) controls the
   calendar months of the timelogs window. It is independent of the cron's
   UTC timing — the two are not linked automatically.
@@ -1448,6 +1453,44 @@ leaves GCP).
   stasis is plausible for a week on this account, but it is the one number
   here that would look identical if the projects pull ever went stale, so
   confirm it moves before treating a constant `projects` count as healthy.
+
+  **Cron moved 45 minutes earlier (2026-09-21), `15 4,16` -> `30 3,15`.**
+  Requested by the owner as a cheap experiment while the Cloud Run migration
+  waits on bandwidth. Recorded here with its limits stated up front, because
+  the next reader will want to know whether it worked and the honest answer
+  is that this design cannot cleanly tell them.
+
+  What it changes: the nominal slots, now 03:30 and 15:30 UTC — 23:30 and
+  11:30 EDT, becoming 22:30 and 10:30 EST once the clocks change. The 10:30
+  target was stated in local time and is an **EST** reading; reading the cron
+  in Eastern terms is the check this file already prescribes after the
+  2026-09-04 incident, and it shows the target is met in winter, not now.
+  Spacing stays an even 12h/12h, so the lopsided-schedule tell from that
+  incident is clean.
+
+  What it does **not** change: the delay mechanism. Nothing fires on time,
+  and the nominal cron has never been when this job runs. The move re-rolls
+  onto two different UTC slots whose congestion is unmeasured — the outcome
+  could be earlier, later or unchanged, and it is not 45 minutes either way.
+
+  **How to evaluate it, and why care is needed.** Within-slot variation on
+  the old schedule was 1h 12m (am) to 2h 02m (pm) across the last 14
+  firings, and up to 3h 40m over the full 33. A 45-minute nominal shift is
+  *inside that noise*. Comparing a handful of new firings against the old
+  medians will produce a number that looks like a result and is not one.
+  Give it at least two weeks (~28 firings), compare medians and per-slot
+  ranges rather than individual runs, and treat anything under about an hour
+  of median movement as indistinguishable from noise. `created_at` on each
+  `event=schedule` run via the Actions API is the precise source; the UI's
+  rounded display is not.
+
+  **This is not a reversal of "do not tune the cron to compensate".** That
+  rule stands: it is about chasing the delay, and a 45-minute move cannot
+  chase a 2-5.5 hour one. If the next measurement shows improvement, the
+  most likely explanation is still that these two slots happen to be less
+  congested, which is a property of GitHub's load and not something this
+  repo controls or can rely on.
+
 - **Retired views — all now dropped, and orphans are self-reporting
   (closed 2026-09-13).** `--create-views` never drops a view removed from
   `VIEW_NAMES`, so a retired view stays live in BigQuery *frozen at its
