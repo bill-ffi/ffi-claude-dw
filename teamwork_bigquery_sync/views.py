@@ -118,10 +118,24 @@ REPORTING_TIMEZONE = "America/New_York"
 # no need to touch this table.
 #
 # Columns (per your confirmation): tw_userid (INT64, join key -> users.
-# user_id), first, last, email, as_of, min_bill, min_value. The last two
-# are comp-adjacent (a per-person minimum billing figure) — same caution
-# as users.user_cost/user_rate in schemas.py: worth restricting read
-# access if this ever gets shared beyond its current audience.
+# user_id), first, last, email, as_of, min_bill, min_value.
+#
+# BOTH min_bill AND min_value ARE HOURS, NOT MONEY, despite the name
+# "value" (confirmed 2026-09-22):
+#   min_bill  -- minimum weekly BILLABLE hours per employee.
+#   min_value -- minimum weekly VALUE-ADDED hours per employee. Always
+#                non-billable, so it has no bearing on revenue.
+# For everyone on the sheet the two sum to roughly 30-35 hours; partners
+# invert the split (a low billable minimum, a high value-added one). An
+# earlier version of this comment called them "a per-person minimum billing
+# figure", and that reading of min_value as a dollar minimum was nearly
+# used to project revenue -- it would have put most people at about $0.20
+# of projected revenue a day. The derived columns daily_min_value /
+# wkly_min_value keep their names so existing reports do not break; read
+# them as hours.
+#
+# Still worth restricting read access if this is ever shared beyond its
+# current audience: per-person targets sit alongside user_cost/user_rate.
 ANCILLARY_USER_INFO_TABLE = "gs_minimum_user_info"
 
 # How old the data must be before v_data_freshness flags it as stale.
@@ -450,8 +464,9 @@ WHERE p.category_name = '{RECURRING_REQUIRED_CATEGORY}'
     # the ancillary minimum-billing data from the "mins4bq" Google Sheet
     # range (ANCILLARY_USER_INFO_TABLE, above). INNER JOIN is intentional
     # (per your SQL): only users present in the sheet show up here, not
-    # every Teamwork user. min_bill/min_value are weekly figures in the
-    # sheet; daily versions are derived (/5) alongside them.
+    # every Teamwork user. min_bill/min_value are weekly HOURS in the sheet
+    # (billable and value-added respectively -- see ANCILLARY_USER_INFO_TABLE
+    # above); daily versions are derived (/5) alongside them.
     views["v_usermins"] = f"""
 CREATE OR REPLACE VIEW {fqn("v_usermins")} AS
 SELECT
@@ -656,7 +671,17 @@ current_week_pace AS (
           THEN COALESCE(ah.hours, 0)
         ELSE m.daily_min_bill
       END
-    ) AS non_friday_total
+    ) AS non_friday_total,
+    -- The same pace in dollars: actual revenue for elapsed Mon-Thu buckets,
+    -- the standard-rate target for buckets not yet elapsed. Sizes the
+    -- revenue plug exactly as non_friday_total sizes the hours plug.
+    SUM(
+      CASE
+        WHEN db.day_order < b.today_order OR b.today_order > 5
+          THEN COALESCE(ah.billable_revenue, 0)
+        ELSE m.daily_min_bill * m.user_rate
+      END
+    ) AS non_friday_revenue
   FROM {fqn("v_usermins")} m
   CROSS JOIN day_buckets db
   CROSS JOIN bounds b
@@ -672,6 +697,12 @@ SELECT
   ws.week_start,
   FORMAT_DATE('%Y-%m-%d', ws.week_start) AS week_label,
   db.day_bucket, db.day_order, m.daily_min_bill,
+  -- The revenue analogue of daily_min_bill: that day's billable-hours
+  -- minimum at the person's STANDARD rate. Additive, so
+  -- SUM(billable_revenue) / SUM(daily_min_revenue) is correct over any
+  -- range. min_value is deliberately not involved -- it is non-billable
+  -- value-added hours and has no bearing on revenue.
+  m.daily_min_bill * m.user_rate AS daily_min_revenue,
   'actual' AS value_type,
   COALESCE(ah.hours, 0) AS hours,
   -- Real revenue for an elapsed bucket. Zero-filled like hours: a scaffolded
@@ -699,18 +730,26 @@ SELECT
   b.current_week_start AS week_start,
   FORMAT_DATE('%Y-%m-%d', b.current_week_start) AS week_label,
   db.day_bucket, db.day_order, m.daily_min_bill,
+  m.daily_min_bill * m.user_rate AS daily_min_revenue,
   CASE WHEN db.day_order = 5 THEN 'plug' ELSE 'minimum' END AS value_type,
   CASE WHEN db.day_order = 5
     THEN GREATEST(m.daily_min_bill * 5 - cwp.non_friday_total, 0)
     ELSE m.daily_min_bill
   END AS hours,
-  -- NULL, not 0. These rows are TARGETS for days that have not happened, so
-  -- there is no revenue to report. 0 would assert "earned nothing" about a
-  -- future day and would let a revenue chart draw a floor across the rest of
-  -- the week. SUM skips NULL, so totals stay correct either way -- this is
-  -- about what a reader sees. CAST is required: an untyped NULL has no type
-  -- for the UNION to match against the actual branch's FLOAT64.
-  CAST(NULL AS FLOAT64) AS billable_revenue,
+  -- Projected revenue, mirroring the hours projection exactly: the
+  -- standard-rate value of the day's billable-hours minimum, and on Friday
+  -- the catch-up plug needed to reach the week's standard-rate target.
+  --
+  -- Because elapsed days count ACTUAL revenue (per-entry billable_rate)
+  -- while the target is at STANDARD rate, the revenue plug can exceed zero
+  -- even when the hours plug is zero. That is the point, not a bug: it means
+  -- the hours were billed at below-standard rates, and the plug shows the
+  -- dollars still needed. A NULL user_rate makes the projection NULL --
+  -- unknown, rather than a misleading zero.
+  CASE WHEN db.day_order = 5
+    THEN GREATEST(m.daily_min_bill * 5 * m.user_rate - cwp.non_friday_revenue, 0)
+    ELSE m.daily_min_bill * m.user_rate
+  END AS billable_revenue,
   SAFE_DIVIDE(
     CASE WHEN db.day_order = 5
       THEN GREATEST(m.daily_min_bill * 5 - cwp.non_friday_total, 0)

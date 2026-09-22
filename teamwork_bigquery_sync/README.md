@@ -649,6 +649,15 @@ Budget", named range `mins4bq`).
   show up — not every Teamwork user.
 - `min_bill`/`min_value` in the sheet are **weekly** figures; `v_usermins`
   derives daily versions (`/ 5`) alongside them.
+- **Both are HOURS, not money** (confirmed 2026-09-22), despite the name
+  "value": `min_bill` is minimum weekly **billable** hours, `min_value` is
+  minimum weekly **value-added** hours — always non-billable, so it has no
+  bearing on revenue. They sum to roughly 30–35 hours for everyone on the
+  sheet; partners invert the split. The derived `daily_min_value` /
+  `wkly_min_value` read like currency and are **not**; they keep their names
+  so existing reports don't break. Reading `min_value` as a dollar minimum
+  was nearly used to project revenue, which would have put most people at
+  about $0.20 of projected revenue per day.
 - **Sensitivity note**: `min_bill`/`min_value` are comp-adjacent, same as
   `users.user_cost`/`user_rate` (see "Known gaps" below) — worth
   restricting read access to this view if BigQuery access here is ever
@@ -670,14 +679,41 @@ are dropped (see "Known gaps" for the drop-order caveat).
 
 **`billable_revenue` and `week_label` reach the weekly view too (2026-09-22).**
 
-`billable_revenue` is **actual-only**: the ACTUAL branch carries real revenue
-zero-filled like `hours`, and the `minimum`/`plug` branch emits
-`CAST(NULL AS FLOAT64)`. Those rows are *targets* for days that have not
-happened, so there is no revenue to report — `0` would assert "earned nothing"
-about a future day and let a revenue chart draw a floor across the rest of the
-week. `SUM` skips NULL either way, so totals are unaffected; this is about what
-a reader sees. The `CAST` is not optional: an untyped `NULL` has no type for
-the `UNION` to match the other branch's `FLOAT64` against.
+`billable_revenue` **is projected for the current week, mirroring hours
+exactly**, at each person's **standard rate** (`user_rate`):
+
+| | Hours | Revenue |
+|---|---|---|
+| `actual` rows | real, zero-filled | real (per-entry `billable_rate`), zero-filled |
+| `minimum` rows | `daily_min_bill` | `daily_min_bill × user_rate` |
+| `plug` row (Fri) | `GREATEST(daily_min_bill×5 − non_friday_total, 0)` | `GREATEST(daily_min_bill×5×user_rate − non_friday_revenue, 0)` |
+| target column | `daily_min_bill` | `daily_min_revenue` |
+
+`current_week_pace` carries a second sum, `non_friday_revenue`, built the same
+way as `non_friday_total`: actual revenue for elapsed Mon–Thu buckets, the
+standard-rate target for buckets not yet elapsed.
+
+**Why this earns its place: the revenue plug diverges from the hours plug by
+exactly the rate shortfall.** Elapsed days count *actual* revenue while the
+target is at *standard* rate. Simulated before shipping: a person on target for
+hours but billed at $100 against a $150 standard shows an hours plug of 6.0 —
+apparently fine — and a revenue plug of **$1,500 instead of $900** by Wednesday,
+**$2,100** by Friday. The gap is two (or four) days × 6 h × $50 of discounting,
+which the hours view cannot see at all. In every case with a positive plug, the
+week lands exactly on the weekly target; overshooting clamps both plugs at 0;
+Saturday produces no projected rows. A NULL `user_rate` makes the projection
+NULL — unknown, rather than a misleading zero.
+
+`daily_min_revenue` is additive, so `SUM(billable_revenue) / SUM(daily_min_revenue)`
+is correct over any range. **No row-level revenue percentage is emitted**, for
+the same reasons `v_client_month` dropped its own: it cannot be aggregated, and
+the repo's `pct_*` convention double-scales under Looker's Percent type.
+
+> **`min_value` plays no part.** It is minimum weekly *value-added* hours —
+> always non-billable — not a dollar minimum, despite the name (confirmed
+> 2026-09-22; see the `v_usermins` notes). It was nearly used as the revenue
+> basis on the strength of its name, which would have projected about $0.20 a
+> day for most people. A test asserts it appears in no code line of this view.
 
 `week_label` is a **STRING** (`YYYY-MM-DD`) on both this view and the base.
 A DATE dimension makes Looker Studio plot a **daily** axis, so weekly totals

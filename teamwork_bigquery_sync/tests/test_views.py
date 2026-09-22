@@ -1203,15 +1203,53 @@ class TestWeeklyViewRevenueAndLabel:
         assert "billable_revenue" in aliases
         assert "week_label" in aliases
 
-    def test_projected_rows_report_null_revenue_not_zero(self, sql):
-        """minimum/plug rows are TARGETS for days that have not happened.
+    def test_projected_revenue_mirrors_the_hours_projection(self, sql):
+        """minimum rows: the day's billable minimum at standard rate.
+        plug row: the dollars still needed to reach the week's target.
 
-        0 asserts "earned nothing" about a future day and lets a revenue chart
-        draw a floor across the rest of the week. The CAST is required: an
-        untyped NULL has no type for the UNION to match FLOAT64 against.
+        Replaced an earlier NULL (2026-09-22) once standard rate was confirmed
+        as the right basis for projecting revenue.
         """
         body = sql[self.NAME]
-        assert "CAST(NULL AS FLOAT64) AS billable_revenue" in body
+        assert "THEN GREATEST(m.daily_min_bill * 5 * m.user_rate - cwp.non_friday_revenue, 0)" in body
+        assert "ELSE m.daily_min_bill * m.user_rate" in body
+        assert "CAST(NULL AS FLOAT64) AS billable_revenue" not in body
+
+    def test_revenue_plug_subtracts_the_revenue_pace_not_the_hours_pace(self, sql):
+        """The likely copy-paste bug: reusing non_friday_total in the revenue
+        plug would subtract HOURS from DOLLARS and produce a plug near the
+        full weekly target every time."""
+        body = sql[self.NAME]
+        revenue_plug = [l for l in body.splitlines() if "* m.user_rate - cwp." in l]
+        assert revenue_plug, "revenue plug line not found"
+        for line in revenue_plug:
+            assert "cwp.non_friday_revenue" in line, line
+            assert "cwp.non_friday_total" not in line, line
+
+    def test_revenue_pace_counts_actual_revenue_for_elapsed_days(self, sql):
+        """Elapsed days contribute real revenue, not the target -- otherwise a
+        week billed at discounted rates would look on track."""
+        body = sql[self.NAME]
+        assert "THEN COALESCE(ah.billable_revenue, 0)" in body
+        assert "ELSE m.daily_min_bill * m.user_rate" in body
+        assert "AS non_friday_revenue" in body
+
+    def test_revenue_uses_standard_rate_and_never_min_value(self, sql):
+        """min_value is non-billable VALUE-ADDED hours, not a dollar minimum.
+
+        Confirmed 2026-09-22. Reading it as money would have projected about
+        $0.20 of revenue a day for most people. Asserted on code lines only,
+        since the comments explain exactly why it is excluded.
+        """
+        body = sql[self.NAME]
+        code = "\n".join(l for l in body.splitlines() if not l.strip().startswith("--"))
+        assert "m.user_rate" in code
+        assert "min_value" not in code
+
+    def test_daily_min_revenue_is_the_billable_minimum_at_standard_rate(self, sql):
+        """The additive target that makes SUM(revenue) / SUM(target) work."""
+        body = sql[self.NAME]
+        assert body.count("m.daily_min_bill * m.user_rate AS daily_min_revenue") == 2
 
     def test_actual_rows_report_real_revenue_zero_filled(self, sql):
         """A scaffolded row with no time genuinely earned nothing."""
@@ -1247,3 +1285,18 @@ class TestWeeklyViewRevenueAndLabel:
         base = sql[self.BASE]
         assert "FORMAT_DATE('%Y-%m-%d', DATE_TRUNC(tl.log_date, WEEK)) AS week_label" in base
         assert "DATE_TRUNC(tl.log_date, WEEK) AS week_start" in base
+
+
+class TestMinValueIsDocumentedAsHours:
+    """min_value was misread as a dollar minimum from its name.
+
+    The comment that caused it called it "a per-person minimum billing figure".
+    Corrected 2026-09-22; this keeps the correction from being lost.
+    """
+
+    def test_views_module_documents_both_minimums_as_hours(self):
+        import inspect
+        source = inspect.getsource(views)
+        assert "BOTH min_bill AND min_value ARE HOURS, NOT MONEY" in source
+        assert "a per-person minimum billing figure) —" not in source
+
