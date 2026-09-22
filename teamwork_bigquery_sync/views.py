@@ -556,7 +556,12 @@ SELECT
   SUM((tl.minutes / 60) * tl.billable_rate) AS billable_revenue
 FROM {timelogs} tl
 WHERE tl.is_billable = TRUE
-GROUP BY user_id, day_bucket, day_order, week_start
+-- week_label must be grouped explicitly. It is a pure function of
+-- week_start, so this does not change the grain -- but BigQuery does not
+-- infer that an expression over tl.log_date is derived from the GROUPED
+-- ALIAS week_start, and rejects it as an ungrouped reference. That failed
+-- a live --create-views on 2026-09-22; text tests cannot see it.
+GROUP BY user_id, day_bucket, day_order, week_start, week_label
 """
 
     # Layer 2 — actual + projected, via UNION ALL (your preferred approach,

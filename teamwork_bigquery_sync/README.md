@@ -988,6 +988,28 @@ leaves GCP).
 
 ## Known gaps / things to verify before relying on this
 
+- **A live `--create-views` failed on a GROUP BY the text tests could not see
+  (2026-09-22).** `week_label` — `FORMAT_DATE(..., DATE_TRUNC(tl.log_date,
+  WEEK))` — was added to `v_user_daily_billable_hours_base`'s SELECT but not its
+  `GROUP BY`. BigQuery rejected it: *"SELECT list expression references
+  tl.log_date which is neither grouped nor aggregated."* The view groups by the
+  **alias** `week_start`, and BigQuery does not infer that a new expression is
+  derived from a grouped alias. Every text assertion passed.
+  - **No outage.** `create_or_replace_views()` replaces views independently, so
+    the base kept its previous definition (which already carried
+    `billable_revenue`) and the weekly view compiled against it. Only the base's
+    new label was missing until the fix shipped.
+  - Fixed by grouping `week_label` explicitly — a pure function of
+    `week_start`, so the grain is unchanged.
+  - **Now guarded structurally**: a test parses the base view's SELECT and
+    asserts every non-aggregated column appears in the `GROUP BY`, so the next
+    plain column added there fails the suite rather than a deploy.
+  - The general lesson, same family as the unresolved `ah.billable_revenue`
+    reference caught earlier the same day: **SQL scoping and grouping rules are
+    enforced only by BigQuery.** Text-level tests confirm what the SQL *says*,
+    not whether it is *valid*. Where a rule can be checked structurally, check
+    it that way.
+
 - **Project budgets were stored in cents, not dollars (fixed 2026-09-19).**
   `budget_capacity` and `budget_used` come from the budgets endpoint's
   `capacity`/`capacityUsed`, which Teamwork returns as integer **cents**, and

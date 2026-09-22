@@ -1300,3 +1300,61 @@ class TestMinValueIsDocumentedAsHours:
         assert "BOTH min_bill AND min_value ARE HOURS, NOT MONEY" in source
         assert "a per-person minimum billing figure) —" not in source
 
+
+
+class TestBaseViewGroupByCoversEveryPlainColumn:
+    """Every non-aggregated SELECT column must be in the GROUP BY.
+
+    week_label -- a FORMAT_DATE over DATE_TRUNC(tl.log_date, WEEK) -- was added
+    to the SELECT but not the GROUP BY, and a live --create-views failed with
+    "SELECT list expression references tl.log_date which is neither grouped nor
+    aggregated". BigQuery does not infer that an expression is derived from a
+    GROUPED ALIAS. Every text assertion passed; only BigQuery could see it.
+
+    This checks the rule structurally, so the next plain column added to the
+    base view fails here instead of in production.
+    """
+
+    NAME = "v_user_daily_billable_hours_base"
+    AGGREGATES = ("SUM(", "COUNT(", "COUNTIF(", "MIN(", "MAX(", "AVG(",
+                  "STRING_AGG(", "ARRAY_AGG(")
+
+    def _select_items(self, body):
+        start = body.index("\nSELECT\n") + len("\nSELECT\n")
+        end = body.rindex("\nFROM ")
+        text = "\n".join(
+            l for l in body[start:end].splitlines() if not l.strip().startswith("--")
+        )
+        items, depth, cur = [], 0, ""
+        for ch in text:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if ch == "," and depth == 0:
+                items.append(cur)
+                cur = ""
+            else:
+                cur += ch
+        items.append(cur)
+        return [" ".join(i.split()) for i in items if i.strip()]
+
+    def test_every_plain_column_is_grouped(self, sql):
+        body = sql[self.NAME]
+        group_line = [l for l in body.splitlines() if l.startswith("GROUP BY ")]
+        assert len(group_line) == 1, group_line
+        grouped = {g.strip() for g in group_line[0][len("GROUP BY "):].split(",")}
+
+        missing = []
+        for item in self._select_items(body):
+            if any(agg in item for agg in self.AGGREGATES):
+                continue
+            alias = item.split()[-1].split(".")[-1]
+            if alias not in grouped:
+                missing.append(alias)
+        assert missing == [], f"not in GROUP BY: {missing}"
+
+    def test_week_label_specifically_is_grouped(self, sql):
+        body = sql[self.NAME]
+        group_line = [l for l in body.splitlines() if l.startswith("GROUP BY ")][0]
+        assert "week_label" in group_line
