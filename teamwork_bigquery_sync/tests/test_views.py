@@ -1233,9 +1233,14 @@ class TestWeeklyViewRevenueAndLabel:
         than letting Looker re-bucket on its Monday-based ISO week.
         """
         for name in (self.NAME, self.BASE):
-            body = sql[name]
-            assert "FORMAT_DATE('%Y-%m-%d'" in body, name
-            assert "AS week_label" in body, name
+            lines = [l for l in sql[name].splitlines() if "AS week_label" in l]
+            assert lines, name
+            for line in lines:
+                # Assert on the column's OWN expression. Checking that
+                # FORMAT_DATE appears somewhere in the view passes even when
+                # week_label itself is a bare DATE, as long as any other
+                # column uses it -- which is exactly what happened.
+                assert "FORMAT_DATE('%Y-%m-%d'" in line, (name, line)
 
     def test_week_label_is_derived_from_the_same_truncation_as_week_start(self, sql):
         """The label and the date must never disagree about which week it is."""
