@@ -511,6 +511,13 @@ SELECT
     WHEN 5 THEN 4 WHEN 6 THEN 5 WHEN 7 THEN 5
   END AS day_order,
   DATE_TRUNC(tl.log_date, WEEK) AS week_start,
+  -- Text form of week_start, for charts. A DATE dimension makes Looker
+  -- Studio plot a DAILY axis, so weekly totals land on Sundays with six
+  -- empty days between and the line collapses to zero in the gaps. A
+  -- STRING forces categorical spacing. Formatted YYYY-MM-DD so it sorts
+  -- chronologically as text, and it preserves the Sunday boundary exactly
+  -- rather than letting Looker re-bucket on its Monday-based ISO week.
+  FORMAT_DATE('%Y-%m-%d', DATE_TRUNC(tl.log_date, WEEK)) AS week_label,
   SUM(tl.hours) AS hours,
   -- Billable revenue for the same bucket. Additive, so it sums over any range.
   --
@@ -630,7 +637,7 @@ week_spine AS (
        )) AS week_start
 ),
 actual_hours AS (
-  SELECT base.user_id, base.day_bucket, base.week_start, base.hours
+  SELECT base.user_id, base.day_bucket, base.week_start, base.hours, base.billable_revenue
   FROM {fqn("v_user_daily_billable_hours_base")} base, bounds b
   WHERE base.week_start >= b.earliest_week_start
 ),
@@ -662,9 +669,14 @@ current_week_pace AS (
 -- ACTUAL branch.
 SELECT
   m.user_id, m.email AS user_email, m.first_name, m.last_name,
-  ws.week_start, db.day_bucket, db.day_order, m.daily_min_bill,
+  ws.week_start,
+  FORMAT_DATE('%Y-%m-%d', ws.week_start) AS week_label,
+  db.day_bucket, db.day_order, m.daily_min_bill,
   'actual' AS value_type,
   COALESCE(ah.hours, 0) AS hours,
+  -- Real revenue for an elapsed bucket. Zero-filled like hours: a scaffolded
+  -- row with no time genuinely earned nothing.
+  COALESCE(ah.billable_revenue, 0) AS billable_revenue,
   SAFE_DIVIDE(COALESCE(ah.hours, 0), m.daily_min_bill) AS pct_of_min
 FROM {fqn("v_usermins")} m
 CROSS JOIN day_buckets db
@@ -684,12 +696,21 @@ UNION ALL
 -- since the ACTUAL branch already covers that case.
 SELECT
   m.user_id, m.email AS user_email, m.first_name, m.last_name,
-  b.current_week_start AS week_start, db.day_bucket, db.day_order, m.daily_min_bill,
+  b.current_week_start AS week_start,
+  FORMAT_DATE('%Y-%m-%d', b.current_week_start) AS week_label,
+  db.day_bucket, db.day_order, m.daily_min_bill,
   CASE WHEN db.day_order = 5 THEN 'plug' ELSE 'minimum' END AS value_type,
   CASE WHEN db.day_order = 5
     THEN GREATEST(m.daily_min_bill * 5 - cwp.non_friday_total, 0)
     ELSE m.daily_min_bill
   END AS hours,
+  -- NULL, not 0. These rows are TARGETS for days that have not happened, so
+  -- there is no revenue to report. 0 would assert "earned nothing" about a
+  -- future day and would let a revenue chart draw a floor across the rest of
+  -- the week. SUM skips NULL, so totals stay correct either way -- this is
+  -- about what a reader sees. CAST is required: an untyped NULL has no type
+  -- for the UNION to match against the actual branch's FLOAT64.
+  CAST(NULL AS FLOAT64) AS billable_revenue,
   SAFE_DIVIDE(
     CASE WHEN db.day_order = 5
       THEN GREATEST(m.daily_min_bill * 5 - cwp.non_friday_total, 0)

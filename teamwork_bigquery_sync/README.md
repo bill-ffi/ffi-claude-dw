@@ -668,6 +668,36 @@ was already wired into a live "Team Hours" Combo chart — that chart needs
 to be rebuilt against `v_user_weekly_billable_hours` once the old views
 are dropped (see "Known gaps" for the drop-order caveat).
 
+**`billable_revenue` and `week_label` reach the weekly view too (2026-09-22).**
+
+`billable_revenue` is **actual-only**: the ACTUAL branch carries real revenue
+zero-filled like `hours`, and the `minimum`/`plug` branch emits
+`CAST(NULL AS FLOAT64)`. Those rows are *targets* for days that have not
+happened, so there is no revenue to report — `0` would assert "earned nothing"
+about a future day and let a revenue chart draw a floor across the rest of the
+week. `SUM` skips NULL either way, so totals are unaffected; this is about what
+a reader sees. The `CAST` is not optional: an untyped `NULL` has no type for
+the `UNION` to match the other branch's `FLOAT64` against.
+
+`week_label` is a **STRING** (`YYYY-MM-DD`) on both this view and the base.
+A DATE dimension makes Looker Studio plot a **daily** axis, so weekly totals
+land on Sundays with six empty days between and the line collapses to zero in
+the gaps. A string forces categorical spacing, sorts chronologically as text,
+and preserves the Sunday boundary rather than letting Looker re-bucket on its
+Monday-based ISO week.
+
+> ⚠️ **This view is a `UNION ALL`, which matches branches POSITIONALLY.**
+> Adding a column to one branch and not the other — or at a different position
+> — either fails the union or silently shifts every later column's meaning. A
+> test extracts each branch's ordered output aliases and asserts they are
+> identical; add any future column to both branches at the same position.
+>
+> The `actual_hours` CTE must also carry any base column the outer query
+> references. Adding `ah.billable_revenue` without adding
+> `base.billable_revenue` to that CTE is an unresolved reference that **only
+> BigQuery rejects** — the text-based tests cannot see it. That mistake was
+> made and caught during this change; a test now pins both halves.
+
 **Layer 1 — `v_user_daily_billable_hours_base`**: the shared aggregation.
 One row per `(user, day_bucket, week_start)` — real, historical
 `SUM(hours)` from billable timelogs, with the weekday-bucketing rule

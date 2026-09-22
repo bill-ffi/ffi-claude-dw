@@ -1123,6 +1123,122 @@ class TestBaseViewBillableRevenue:
         assert "SELECT base.user_id, base.day_bucket, base.week_start, base.hours" in body
         assert "SELECT *" not in body
 
-    def test_dependent_did_not_pick_up_the_new_column(self, sql):
-        """Additive means additive: the weekly view's output is unchanged."""
-        assert "base.billable_revenue" not in sql[self.DEPENDENT]
+    def test_dependent_now_carries_revenue_through_its_cte(self, sql):
+        """The weekly view later opted in (2026-09-22).
+
+        Its actual_hours CTE must select billable_revenue explicitly -- the
+        outer query references ah.billable_revenue, and a CTE that does not
+        carry the column makes that an unresolved reference. Text tests cannot
+        see this; only BigQuery rejects it, which is why it is pinned here.
+        """
+        body = sql[self.DEPENDENT]
+        assert "base.billable_revenue" in body
+        assert "ah.billable_revenue" in body
+
+
+def _union_branch_select_aliases(view_sql):
+    """The ordered output column names of each UNION ALL branch.
+
+    A UNION matches branches POSITIONALLY, so inserting a column into one
+    branch and not the other -- or at a different position -- silently
+    misaligns every column after it, or fails the union outright. Comparing
+    the ordered alias lists catches both.
+    """
+    import re
+
+    # Split on the TOP-LEVEL UNION ALL only. The day_buckets CTE uses inline
+    # "UNION ALL" five times to build its literal rows; splitting on the bare
+    # keyword finds six branches instead of two.
+    branches = view_sql.split("\n\nUNION ALL\n\n")
+    out = []
+    for branch in branches:
+        # the final SELECT ... FROM block of the branch
+        start = branch.rindex("\nSELECT\n")
+        end = branch.index("\nFROM ", start)
+        body = branch[start + len("\nSELECT\n"):end]
+        body = "\n".join(
+            l for l in body.splitlines() if not l.strip().startswith("--")
+        )
+        items, depth, current = [], 0, ""
+        for ch in body:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if ch == "," and depth == 0:
+                items.append(current)
+                current = ""
+            else:
+                current += ch
+        items.append(current)
+        aliases = []
+        for item in items:
+            item = " ".join(item.split())
+            if not item:
+                continue
+            name = item.split()[-1]
+            aliases.append(name.split(".")[-1])
+        out.append(aliases)
+    return out
+
+
+class TestWeeklyViewRevenueAndLabel:
+    """billable_revenue and week_label on v_user_weekly_billable_hours."""
+
+    NAME = "v_user_weekly_billable_hours"
+    BASE = "v_user_daily_billable_hours_base"
+
+    def test_union_branches_have_identical_column_lists(self, sql):
+        """The structural guard for this UNION view.
+
+        Adding a column to one branch only, or at a different position, either
+        breaks the union or silently shifts every later column's meaning.
+        """
+        branches = _union_branch_select_aliases(sql[self.NAME])
+        assert len(branches) == 2, branches
+        assert branches[0] == branches[1], (branches[0], branches[1])
+
+    def test_both_new_columns_are_in_the_union_output(self, sql):
+        aliases = _union_branch_select_aliases(sql[self.NAME])[0]
+        assert "billable_revenue" in aliases
+        assert "week_label" in aliases
+
+    def test_projected_rows_report_null_revenue_not_zero(self, sql):
+        """minimum/plug rows are TARGETS for days that have not happened.
+
+        0 asserts "earned nothing" about a future day and lets a revenue chart
+        draw a floor across the rest of the week. The CAST is required: an
+        untyped NULL has no type for the UNION to match FLOAT64 against.
+        """
+        body = sql[self.NAME]
+        assert "CAST(NULL AS FLOAT64) AS billable_revenue" in body
+
+    def test_actual_rows_report_real_revenue_zero_filled(self, sql):
+        """A scaffolded row with no time genuinely earned nothing."""
+        assert "COALESCE(ah.billable_revenue, 0) AS billable_revenue" in sql[self.NAME]
+
+    def test_original_intent_is_untouched(self, sql):
+        """hours, value_type and pct_of_min must behave exactly as before."""
+        body = sql[self.NAME]
+        assert "COALESCE(ah.hours, 0) AS hours" in body
+        assert "'actual' AS value_type" in body
+        assert "CASE WHEN db.day_order = 5 THEN 'plug' ELSE 'minimum' END AS value_type" in body
+        assert "SAFE_DIVIDE(COALESCE(ah.hours, 0), m.daily_min_bill) AS pct_of_min" in body
+
+    def test_week_label_is_text_sortable_and_sunday_preserving(self, sql):
+        """A DATE dimension makes Looker plot a daily axis with empty gaps.
+
+        YYYY-MM-DD sorts chronologically as text, and formatting the existing
+        Sunday-truncated week_start keeps the business week boundary rather
+        than letting Looker re-bucket on its Monday-based ISO week.
+        """
+        for name in (self.NAME, self.BASE):
+            body = sql[name]
+            assert "FORMAT_DATE('%Y-%m-%d'" in body, name
+            assert "AS week_label" in body, name
+
+    def test_week_label_is_derived_from_the_same_truncation_as_week_start(self, sql):
+        """The label and the date must never disagree about which week it is."""
+        base = sql[self.BASE]
+        assert "FORMAT_DATE('%Y-%m-%d', DATE_TRUNC(tl.log_date, WEEK)) AS week_label" in base
+        assert "DATE_TRUNC(tl.log_date, WEEK) AS week_start" in base
