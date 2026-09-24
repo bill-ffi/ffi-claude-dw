@@ -486,6 +486,21 @@ def run_former_staff_diagnostic(client, probe_ids=FORMER_USER_PROBE_IDS):
         except Exception as exc:
             print(f"[FAIL] people.json {label} — {exc}")
 
+    # D. showDeleted=true returned 20 people vs 16 without it (run #128).
+    # Which four are the extras, and are the probe ids among them?
+    try:
+        active = {str(p.get("id")) for p in client._paginate(USERS_PATH, {}, "people")}
+        everyone = list(client._paginate(USERS_PATH, {"showDeleted": "true"}, "people"))
+        extras = [p for p in everyone if str(p.get("id")) not in active]
+        found = sorted(str(p.get("id")) for p in everyone if str(p.get("id")) in probe)
+        print(f"[OK] people.json showDeleted=true — {len(everyone)} people, "
+              f"{len(active)} without the flag, {len(extras)} extra")
+        print(f"     probe ids found: {found} of {sorted(probe)}")
+        for p in extras:
+            print(f"       extra: {json.dumps(_identity_fields(p), default=str)}")
+    except Exception as exc:
+        print(f"[FAIL] people.json showDeleted=true full comparison — {exc}")
+
 
 def run_explain_task_scope(cfg):
     """Explains exactly which projects the tasks pull covers, and how many
