@@ -44,10 +44,13 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
   It reads only; nothing is written to BigQuery. See
   "Known gaps" below for how the cutoff was chosen and both flags' effect
   on row counts.
-- Users scope: everyone on the account, including deactivated/deleted users
-  — they're kept (flagged via `is_deleted`) rather than dropped, so
-  historical timelogs/tasks referencing them still resolve to a name instead
-  of a dangling ID.
+- Users scope: everyone on the account, **including deleted users** —
+  they're kept (flagged via `is_deleted`) rather than dropped, so historical
+  timelogs/tasks referencing them still resolve to a name instead of a
+  dangling ID. This needs `showDeleted=true` on `people.json`
+  (`USERS_LIST_PARAMS`); without it Teamwork returns only current people. That
+  flag was missing until 2026-09-24 — see "Known gaps". `v_usermins` filters
+  deleted users back out, so former staff never get a billing target.
 - **`projects.client_name`**: resolved from `company_id` via a dedicated
   `companies.json` call (`list_companies()`), the same pattern used for
   `category_name`. `company_id` is Teamwork's internal field for what we
@@ -1030,6 +1033,30 @@ leaves GCP).
 
 ## Known gaps / things to verify before relying on this
 
+- **Former staff's time had no name, for months (fixed 2026-09-24).** The
+  README and `list_users()`'s docstring both said deleted users were loaded,
+  but the call sent no params, and `people.json` returns only current people
+  unless asked. Two former staff — user ids 700802 and 646926 — owned 857
+  timelogs (424.6h, January to July) that read with a blank `user_name` in
+  every view. Nothing warned: `timelogs.user_id` was 100% filled, so the fill-
+  rate check was satisfied; the gap was only visible after a join.
+  - **What was tried, live, via `--dry-run` (runs #128 and #129):**
+    `showDeleted=true` returns 20 people vs 16, the four extras all
+    `deleted: true` and including both missing ids — adopted.
+    `includeDeleted=true` is silently ignored (still 16). The v1
+    `/people/deleted.json` endpoint answers but returns no one. The v3
+    `/people/{id}.json` endpoint 404s for a deleted id.
+  - **A knock-on that had to be handled:** `v_usermins` inner-joins `users` to
+    the compensation sheet, so it had excluded former staff only because they
+    were never loaded. It now filters `is_deleted IS NOT TRUE` explicitly;
+    otherwise anyone still on the sheet would reappear in
+    `v_user_weekly_billable_hours` with a target and a projected plug.
+  - **The detector that was missing:** every full sync's `RUN_SUMMARY` now
+    carries `unresolved_timelog_users` — timelog user ids with no `users` row,
+    across all loaded history — and logs a `WARNING` when it is non-empty.
+    `[]` is healthy; `null` means the check itself could not run. The dry run's
+    "Former-staff diagnostic" also confirms the flag still adds people.
+
 - **A live `--create-views` failed on a GROUP BY the text tests could not see
   (2026-09-22).** `week_label` — `FORMAT_DATE(..., DATE_TRUNC(tl.log_date,
   WEEK))` — was added to `v_user_daily_billable_hours_base`'s SELECT but not its
@@ -1822,7 +1849,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-378 tests, ~0.7s, entirely offline — no Teamwork API, no BigQuery, no
+386 tests, ~0.7s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
