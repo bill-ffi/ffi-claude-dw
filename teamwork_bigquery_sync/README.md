@@ -844,11 +844,12 @@ divides between internal work and client work:
 
 | Column | What goes in it |
 |---|---|
-| `internal_hours` | All time on Forward Financial Intelligence, Inc. — Teamwork company id **1380118** (`INTERNAL_CLIENT_COMPANY_ID` in `views.py`) — billable or not |
+| `pto_hours` | All time on the PTO task, **47878044** (`PTO_TASK_ID` in `views.py`), whatever its client or billable flag. Tested first, so leave never counts as internal work |
+| `internal_hours` | All other time on Forward Financial Intelligence, Inc. — Teamwork company id **1380118** (`INTERNAL_CLIENT_COMPANY_ID` in `views.py`) — billable or not |
 | `client_billable_hours` | Time on any other client, marked billable |
 | `cnb_hours` | Time on any other client, not marked billable (client non-billable). An entry whose billable flag is blank also lands here: only time Teamwork positively marks billable counts as billable |
 | `no_client_hours` | Time on a project with no client set. Neither internal nor external, so it gets its own column rather than being guessed into one. If those projects are really internal, change the view's CASE rather than patching it in the report |
-| `total_hours` | All of the above. The four columns always add up to this |
+| `total_hours` | All of the above. The five columns always add up to this |
 
 Also carries `log_date`; `week_start`, the **Sunday** that begins the entry's
 week (the same Sunday-start week as every other report), for rolling days up to
@@ -859,6 +860,13 @@ makes Looker plot a daily axis with gaps); `user_name`, `user_email`,
 
 Things to know:
 
+- **PTO is split out of internal (added 2026-09-24).** PTO is posted to a task
+  on the FFI client, so before this it was counted in `internal_hours`. Staff
+  often post PTO ahead of the leave, so `pto_hours` can appear on future dates;
+  that is planned leave, not an error. `client_type` still describes the
+  client, so a PTO row reads `Internal` there — use the hour columns, not
+  `client_type`, to separate leave from internal work. The same `PTO_TASK_ID`
+  drives the long-entry exemption, so the two cannot drift apart.
 - **Internal is decided by company id, not by name.** A rename in Teamwork
   cannot move internal time to CNB, and a different company that happens to
   share the name is still external. To support this, `v_timelog_detail` now
@@ -1849,7 +1857,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-386 tests, ~0.7s, entirely offline — no Teamwork API, no BigQuery, no
+395 tests, ~0.7s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
