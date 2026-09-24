@@ -1303,7 +1303,7 @@ class TestMinValueIsDocumentedAsHours:
 
 
 @pytest.mark.parametrize(
-    "NAME", ["v_user_daily_billable_hours_base", "v_user_weekly_time_split"]
+    "NAME", ["v_user_daily_billable_hours_base", "v_user_daily_time_split"]
 )
 class TestBaseViewGroupByCoversEveryPlainColumn:
     """Every non-aggregated SELECT column must be in the GROUP BY.
@@ -1390,11 +1390,11 @@ def _evaluate_case(arms, default, row):
     SQL NULL semantics. An unknown shape fails loudly rather than guessing, so
     a rewritten predicate cannot slip past these tests unexamined."""
     for predicate, label in arms:
-        if predicate == "d.client_name IS NULL":
-            hit = row["client_name"] is None
-        elif predicate.startswith("d.client_name = '"):
-            literal = predicate[len("d.client_name = '"):-1].replace("\\'", "'")
-            hit = row["client_name"] is not None and row["client_name"] == literal
+        if predicate == "d.company_id IS NULL":
+            hit = row["company_id"] is None
+        elif re.fullmatch(r"d\.company_id = \d+", predicate):
+            literal = int(predicate.split("=")[1])
+            hit = row["company_id"] is not None and row["company_id"] == literal
         elif predicate == "d.is_billable IS TRUE":
             hit = row["is_billable"] is True
         else:
@@ -1404,13 +1404,14 @@ def _evaluate_case(arms, default, row):
     return default
 
 
-class TestUserWeeklyTimeSplitView:
-    """Week x user x client x Activity, hours split into internal / client
-    billable / CNB. All time on the internal client is internal whether or not
-    it is billable; other clients split on the entry's billable flag."""
+class TestUserDailyTimeSplitView:
+    """Logged date x user x client x Activity, hours split into internal /
+    client billable / CNB. All time on the internal client (by company id) is
+    internal whether or not it is billable; other clients split on the entry's
+    billable flag."""
 
-    NAME = "v_user_weekly_time_split"
-    FFI = views.INTERNAL_CLIENT_NAME
+    NAME = "v_user_daily_time_split"
+    FFI = 1380118
 
     def test_created_after_the_view_it_reads(self, sql):
         order = list(sql)
@@ -1422,51 +1423,64 @@ class TestUserWeeklyTimeSplitView:
         for raw in ("timelogs", "projects", "tasks", "users"):
             assert f"`{PROJECT}.{DATASET}.{raw}`" not in body, raw
 
-    def test_internal_client_is_the_confirmed_name(self):
-        assert views.INTERNAL_CLIENT_NAME == "Forward Financial Intelligence, Inc."
+    def test_internal_client_is_the_confirmed_company_id(self):
+        assert views.INTERNAL_CLIENT_COMPANY_ID == self.FFI
 
-    def test_groups_by_week_user_client_and_activity(self, sql):
+    def test_classifies_on_company_id_not_client_name(self, sql):
+        # A name match silently reclassifies every internal hour the day the
+        # company is renamed in Teamwork; the id does not change.
+        for alias in ("time_class", "client_type"):
+            arms, _ = _case_arms(sql[self.NAME], alias)
+            for predicate, _label in arms:
+                assert "client_name" not in predicate, (alias, predicate)
+
+    def test_timelog_detail_exposes_company_id(self, sql):
+        assert "\n  p.company_id,\n" in sql["v_timelog_detail"]
+
+    def test_grain_is_date_user_client_and_activity(self, sql):
         group_line = [l for l in sql[self.NAME].splitlines() if l.startswith("GROUP BY ")][0]
         grouped = {g.strip() for g in group_line[len("GROUP BY "):].split(",")}
-        assert {"week_start", "user_id", "client_name", "activity"} <= grouped
+        assert {"log_date", "user_id", "company_id", "activity"} <= grouped
 
-    def test_week_is_the_sunday_start_week(self, sql):
+    def test_week_start_is_the_sunday_start_week(self, sql):
         # Same week as every other report, via v_timelog_detail.log_week_start,
         # never Looker's Monday-based ISO week.
         assert "d.log_week_start AS week_start" in sql[self.NAME]
 
-    @pytest.mark.parametrize("client, billable, expected", [
-        ("Forward Financial Intelligence, Inc.", False, "Internal"),
+    @pytest.mark.parametrize("company, name, billable, expected", [
+        (1380118, "Forward Financial Intelligence, Inc.", False, "Internal"),
         # The rule that is easiest to break: billable time on the internal
         # client is STILL internal, so the client test must come first.
-        ("Forward Financial Intelligence, Inc.", True, "Internal"),
-        ("Forward Financial Intelligence, Inc.", None, "Internal"),
-        ("Acme Co", True, "Client Billable"),
-        ("Acme Co", False, "CNB"),
+        (1380118, "Forward Financial Intelligence, Inc.", True, "Internal"),
+        (1380118, "Forward Financial Intelligence, Inc.", None, "Internal"),
+        # Renamed in Teamwork: still internal, because the id is unchanged.
+        (1380118, "FFI (renamed)", False, "Internal"),
+        (555, "Acme Co", True, "Client Billable"),
+        (555, "Acme Co", False, "CNB"),
         # Unknown billability is not revenue.
-        ("Acme Co", None, "CNB"),
+        (555, "Acme Co", None, "CNB"),
+        # A client that merely shares the internal NAME is still external.
+        (555, "Forward Financial Intelligence, Inc.", False, "CNB"),
         # No client is neither internal nor external -- kept separate.
-        (None, True, "No client"),
-        (None, False, "No client"),
-        # A near-miss spelling is external: the match is exact.
-        ("Forward Financial Intelligence Inc", False, "CNB"),
+        (None, None, True, "No client"),
+        (None, None, False, "No client"),
     ])
-    def test_time_class(self, sql, client, billable, expected):
+    def test_time_class(self, sql, company, name, billable, expected):
         arms, default = _case_arms(sql[self.NAME], "time_class")
-        row = {"client_name": client, "is_billable": billable}
+        row = {"company_id": company, "client_name": name, "is_billable": billable}
         assert _evaluate_case(arms, default, row) == expected
 
-    @pytest.mark.parametrize("client, billable", [
-        ("Forward Financial Intelligence, Inc.", True),
-        ("Forward Financial Intelligence, Inc.", False),
-        ("Acme Co", True),
-        ("Acme Co", False),
-        ("Acme Co", None),
+    @pytest.mark.parametrize("company, billable", [
+        (1380118, True),
+        (1380118, False),
+        (555, True),
+        (555, False),
+        (555, None),
         (None, True),
     ])
-    def test_client_type_agrees_with_time_class(self, sql, client, billable):
+    def test_client_type_agrees_with_time_class(self, sql, company, billable):
         body = sql[self.NAME]
-        row = {"client_name": client, "is_billable": billable}
+        row = {"company_id": company, "is_billable": billable}
         time_class = _evaluate_case(*_case_arms(body, "time_class"), row)
         client_type = _evaluate_case(*_case_arms(body, "client_type"), row)
         expected = {"Internal": "Internal", "No client": "No client",
@@ -1497,11 +1511,3 @@ class TestUserWeeklyTimeSplitView:
         body = sql[self.NAME]
         assert "d.minutes" in body
         assert "d.hours" not in body
-
-
-class TestSqlString:
-    def test_quotes_a_value(self):
-        assert views._sql_string("Acme") == "'Acme'"
-
-    def test_escapes_embedded_quotes(self):
-        assert views._sql_string("O'Brien") == "'O\\'Brien'"

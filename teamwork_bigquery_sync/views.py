@@ -162,17 +162,17 @@ DATA_FRESHNESS_STALE_AFTER_HOURS = 18
 # --backfill-months; lower it only if earlier history is actually loaded.
 CLIENT_MONTH_HISTORY_FLOOR = "2026-01-01"
 
-# The one client whose time v_user_weekly_time_split counts as INTERNAL. Every
-# other client is external work, split into billable and CNB (client
-# non-billable) by the time entry's own billable flag.
+# The Teamwork company id of the one client whose time v_user_daily_time_split
+# counts as INTERNAL: Forward Financial Intelligence, Inc. (confirmed
+# 2026-09-24). Every other client is external work, split into billable and CNB
+# (client non-billable) by the time entry's own billable flag.
 #
-# Matched EXACTLY against projects.client_name, which is Teamwork's company
-# name as resolved from companies.json. If the company is ever renamed in
-# Teamwork, every internal hour silently moves to CNB -- change this constant
-# and re-run --create-views. Deliberately a client test, not a category test:
+# Matched on projects.company_id, NOT on the client name: the id survives a
+# rename in Teamwork, where a name match would silently move every internal
+# hour to CNB. Deliberately a client test, not a category test:
 # INTERNAL_CATEGORIES above answers a different question (which project
 # categories should never carry billable time).
-INTERNAL_CLIENT_NAME = "Forward Financial Intelligence, Inc."
+INTERNAL_CLIENT_COMPANY_ID = 1380118
 
 VIEW_NAMES = [
     "v_exception_missing_activity_with_time",
@@ -189,17 +189,13 @@ VIEW_NAMES = [
     "v_task_review",
     "v_project_detail",
     "v_client_month",
-    "v_user_weekly_time_split",
+    "v_user_daily_time_split",
     "v_data_freshness",
 ]
 
 
 def _sql_string_array(values):
     return "[" + ", ".join("'" + v.replace("'", "\\'") + "'" for v in values) + "]"
-
-
-def _sql_string(value):
-    return "'" + value.replace("'", "\\'") + "'"
 
 
 def _sql_int_array(values):
@@ -883,6 +879,7 @@ SELECT
   p.project_id,
   p.name AS project_name,
   p.category_name,
+  p.company_id,
   p.client_name,
   {proj_owner_col},
   p.status AS project_status,
@@ -1493,32 +1490,42 @@ FULL OUTER JOIN client_month_actuals a
  AND a.month_start = b.month_start
 """
 
-    # One row per week x user x client x Activity, with the hours split three
-    # ways: internal, client billable and CNB (client non-billable).
+    # One row per logged date x user x client x Activity, with the hours split
+    # three ways: internal, client billable and CNB (client non-billable).
     #
     # The rule, per your definition:
-    #   - all time on INTERNAL_CLIENT_NAME is internal, BILLABLE OR NOT;
+    #   - all time on the client INTERNAL_CLIENT_COMPANY_ID (FFI) is internal,
+    #     BILLABLE OR NOT;
     #   - time on any other client is external, and splits on the entry's own
     #     billable flag into client_billable_hours and cnb_hours.
     # So a billable entry on the internal client lands in internal_hours, not
     # client_billable_hours. v_exception_billable_time_internal_projects is the
     # place that flags such entries; this view only sorts time.
     #
+    # Classified on company_id rather than client_name so a rename in Teamwork
+    # cannot silently reclassify internal time.
+    #
     # Two cases the three-way split cannot place, handled explicitly rather
     # than guessed:
-    #   - A project with NO client. It is not the internal client and not an
-    #     external one, so it goes to a fourth column, no_client_hours, instead
-    #     of being silently counted as either. The four hour columns therefore
-    #     always sum to total_hours. If those projects turn out to be internal,
-    #     fold them in by changing the CASE below -- not in the report.
+    #   - A project with NO client (company_id NULL). It is not the internal
+    #     client and not an external one, so it goes to a fourth column,
+    #     no_client_hours, instead of being silently counted as either. The
+    #     four hour columns therefore always sum to total_hours. If those
+    #     projects turn out to be internal, fold them in by changing the CASE
+    #     below -- not in the report.
     #   - An external entry whose billable flag is NULL. It counts as CNB: only
     #     time Teamwork positively marks billable is billable, so revenue-side
     #     numbers are never inflated by an unknown.
     #
+    # Daily grain, with week_start (the Sunday that begins the entry's week)
+    # alongside so Looker can roll days up to weeks. It is the same Sunday-start
+    # week as every other report, taken from v_timelog_detail.log_week_start,
+    # never Looker's own Monday-based ISO week. week_label is its text form,
+    # for chart axes (a DATE dimension makes Looker plot a daily axis).
+    #
     # Built on v_timelog_detail, so client, Activity and the minutes-based
-    # hours all mean exactly what they mean in every other time report, and
-    # the week is the same Sunday-start week. Must therefore be created after
-    # v_timelog_detail.
+    # hours all mean exactly what they mean in every other time report. Must
+    # therefore be created after v_timelog_detail.
     #
     # activity is the TASK's Activity, so it is NULL for project-level time
     # (no task) and for tasks outside the tasks-table scope. Those rows still
@@ -1530,40 +1537,44 @@ FULL OUTER JOIN client_month_actuals a
     # unless the expression itself is grouped (see the week_label failure in
     # README "Known gaps").
     #
-    # Unbounded, like v_user_daily_billable_hours_base: every loaded week.
-    views["v_user_weekly_time_split"] = f"""
-CREATE OR REPLACE VIEW {fqn("v_user_weekly_time_split")} AS
+    # Unbounded, like v_user_daily_billable_hours_base: every loaded day.
+    views["v_user_daily_time_split"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_user_daily_time_split")} AS
 WITH classified AS (
   SELECT
+    d.log_date,
     d.log_week_start AS week_start,
     FORMAT_DATE('%Y-%m-%d', d.log_week_start) AS week_label,
     d.user_id,
     d.user_name,
     d.user_email,
+    d.company_id,
     d.client_name,
     d.activity,
     d.minutes,
     CASE
-      WHEN d.client_name IS NULL THEN 'No client'
-      WHEN d.client_name = {_sql_string(INTERNAL_CLIENT_NAME)} THEN 'Internal'
+      WHEN d.company_id IS NULL THEN 'No client'
+      WHEN d.company_id = {int(INTERNAL_CLIENT_COMPANY_ID)} THEN 'Internal'
       ELSE 'External'
     END AS client_type,
     -- Order matters: the client test comes BEFORE the billable test, so
     -- billable time on the internal client is still internal.
     CASE
-      WHEN d.client_name IS NULL THEN 'No client'
-      WHEN d.client_name = {_sql_string(INTERNAL_CLIENT_NAME)} THEN 'Internal'
+      WHEN d.company_id IS NULL THEN 'No client'
+      WHEN d.company_id = {int(INTERNAL_CLIENT_COMPANY_ID)} THEN 'Internal'
       WHEN d.is_billable IS TRUE THEN 'Client Billable'
       ELSE 'CNB'
     END AS time_class
   FROM {fqn("v_timelog_detail")} d
 )
 SELECT
+  log_date,
   week_start,
   week_label,
   user_id,
   user_name,
   user_email,
+  company_id,
   client_name,
   client_type,
   activity,
@@ -1574,7 +1585,7 @@ SELECT
   SUM(minutes) / 60 AS total_hours,
   COUNT(*) AS time_entry_count
 FROM classified
-GROUP BY week_start, week_label, user_id, user_name, user_email, client_name, client_type, activity
+GROUP BY log_date, week_start, week_label, user_id, user_name, user_email, company_id, client_name, client_type, activity
 """
 
     # One row, and the only view here whose subject is the pipeline itself
