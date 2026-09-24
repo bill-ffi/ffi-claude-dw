@@ -403,6 +403,16 @@ def run_dry_run(client):
         any_failed = True
         print(f"[FAIL] client (company) diagnostic — {exc}")
 
+    # Former-staff diagnostic. people.json (USERS_PATH, sent with no params)
+    # was documented as returning deleted/deactivated people too, but that was
+    # never verified -- and 857 timelogs (424.6h) turned out to belong to two
+    # user ids missing from `users`, so their names read blank in every view.
+    # This probes the candidate ways of getting former staff back, read-only,
+    # so the fix is built against a response shape we have actually seen.
+    # Informational: nothing here sets any_failed.
+    print("\n--- Former-staff diagnostic ---")
+    run_former_staff_diagnostic(client)
+
     print()
     if any_failed:
         print("One or more checks failed. Fix TEAMWORK_BASE_URL/API key or the")
@@ -410,6 +420,71 @@ def run_dry_run(client):
         return 1
     print("All endpoints reachable and pagination looks correct.")
     return 0
+
+
+# User ids known to be referenced by timelogs but missing from `users`
+# (measured 2026-09-24 via v_timelog_detail WHERE user_name IS NULL).
+FORMER_USER_PROBE_IDS = [700802, 646926]
+
+# v1 endpoint documented by Teamwork as "Get all deleted People". Response
+# shape on this account not yet observed -- the diagnostic below exists to see it.
+DELETED_PEOPLE_V1_PATH = "/people/deleted.json"
+
+
+def _identity_fields(person):
+    """Just the fields that identify a person -- never rates or costs, since
+    this prints into the Actions log."""
+    return {
+        k: v for k, v in person.items()
+        if k == "id" or "name" in k.lower() or "email" in k.lower()
+        or "deleted" in k.lower() or k.lower() in ("status", "inactive", "type", "user-type")
+    }
+
+
+def run_former_staff_diagnostic(client, probe_ids=FORMER_USER_PROBE_IDS):
+    probe = {str(i) for i in probe_ids}
+
+    # A. v1 deleted-people endpoint.
+    try:
+        payload = client._get(DELETED_PEOPLE_V1_PATH, {})
+        print(f"[OK] {DELETED_PEOPLE_V1_PATH} — top-level keys: {sorted(payload.keys())}")
+        for key, value in payload.items():
+            if isinstance(value, list):
+                print(f"     '{key}': {len(value)} item(s)")
+                if value and isinstance(value[0], dict):
+                    print(f"     sample fields: {', '.join(sorted(value[0].keys()))}")
+                    hits = [p for p in value if str(p.get("id")) in probe]
+                    print(f"     probe ids found: {sorted(str(p.get('id')) for p in hits)} of {sorted(probe)}")
+                    for p in hits:
+                        print(f"       {json.dumps(_identity_fields(p), default=str)}")
+    except Exception as exc:
+        print(f"[FAIL] {DELETED_PEOPLE_V1_PATH} — {exc}")
+
+    # B. v3 single-person endpoint, per probe id.
+    for pid in probe_ids:
+        path = f"/projects/api/v3/people/{pid}.json"
+        try:
+            payload = client._get(path, {})
+            person = payload.get("person") or {}
+            print(f"[OK] {path} — top-level keys: {sorted(payload.keys())}")
+            if person:
+                print(f"     fields: {', '.join(sorted(person.keys()))}")
+                print(f"     {json.dumps(_identity_fields(person), default=str)}")
+        except Exception as exc:
+            print(f"[FAIL] {path} — {exc}")
+
+    # C. people.json with candidate include-deleted flags, compared by count.
+    for label, params in [
+        ("no flags (current behaviour)", {}),
+        ("includeDeleted=true", {"includeDeleted": "true"}),
+        ("showDeleted=true", {"showDeleted": "true"}),
+    ]:
+        try:
+            payload = client._get(USERS_PATH, {"page": 1, "pageSize": 1, **params})
+            page_meta = (payload.get("meta") or {}).get("page") or {}
+            print(f"[OK] people.json {label} — meta.page: {json.dumps(page_meta, default=str)}")
+        except Exception as exc:
+            print(f"[FAIL] people.json {label} — {exc}")
 
 
 def run_explain_task_scope(cfg):
