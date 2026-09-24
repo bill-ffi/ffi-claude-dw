@@ -1356,6 +1356,17 @@ class TestBaseViewGroupByCoversEveryPlainColumn:
                 missing.append(alias)
         assert missing == [], f"not in GROUP BY: {missing}"
 
+    def test_every_grouped_column_is_output(self, sql, NAME):
+        # The reverse direction. Grouping by a column the SELECT does not emit
+        # is valid SQL, but it splits rows on something the report cannot see:
+        # dropping log_date from the daily view's SELECT would leave one row
+        # per day that reads as unexplained duplicates of the same week.
+        body = sql[NAME]
+        group_line = [l for l in body.splitlines() if l.startswith("GROUP BY ")][0]
+        grouped = {g.strip() for g in group_line[len("GROUP BY "):].split(",")}
+        output = {item.split()[-1].split(".")[-1] for item in self._select_items(body)}
+        assert grouped - output == set()
+
     def test_week_label_specifically_is_grouped(self, sql, NAME):
         body = sql[NAME]
         group_line = [l for l in body.splitlines() if l.startswith("GROUP BY ")][0]
