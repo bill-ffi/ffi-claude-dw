@@ -1302,6 +1302,9 @@ class TestMinValueIsDocumentedAsHours:
 
 
 
+@pytest.mark.parametrize(
+    "NAME", ["v_user_daily_billable_hours_base", "v_user_weekly_time_split"]
+)
 class TestBaseViewGroupByCoversEveryPlainColumn:
     """Every non-aggregated SELECT column must be in the GROUP BY.
 
@@ -1315,7 +1318,6 @@ class TestBaseViewGroupByCoversEveryPlainColumn:
     base view fails here instead of in production.
     """
 
-    NAME = "v_user_daily_billable_hours_base"
     AGGREGATES = ("SUM(", "COUNT(", "COUNTIF(", "MIN(", "MAX(", "AVG(",
                   "STRING_AGG(", "ARRAY_AGG(")
 
@@ -1339,8 +1341,8 @@ class TestBaseViewGroupByCoversEveryPlainColumn:
         items.append(cur)
         return [" ".join(i.split()) for i in items if i.strip()]
 
-    def test_every_plain_column_is_grouped(self, sql):
-        body = sql[self.NAME]
+    def test_every_plain_column_is_grouped(self, sql, NAME):
+        body = sql[NAME]
         group_line = [l for l in body.splitlines() if l.startswith("GROUP BY ")]
         assert len(group_line) == 1, group_line
         grouped = {g.strip() for g in group_line[0][len("GROUP BY "):].split(",")}
@@ -1354,7 +1356,152 @@ class TestBaseViewGroupByCoversEveryPlainColumn:
                 missing.append(alias)
         assert missing == [], f"not in GROUP BY: {missing}"
 
-    def test_week_label_specifically_is_grouped(self, sql):
-        body = sql[self.NAME]
+    def test_week_label_specifically_is_grouped(self, sql, NAME):
+        body = sql[NAME]
         group_line = [l for l in body.splitlines() if l.startswith("GROUP BY ")][0]
         assert "week_label" in group_line
+
+
+def _case_arms(view_sql, alias):
+    """The (predicate, label) arms of the CASE ... END AS <alias> expression,
+    plus its ELSE label, in the order BigQuery evaluates them."""
+    end = re.search(r"\n\s*END AS " + alias + r"\b", view_sql)
+    assert end, f"no CASE ... END AS {alias}"
+    # The CASE nearest before its END -- not the first CASE in the view, or
+    # two adjacent CASE expressions would read as one.
+    start = view_sql.rindex("CASE\n", 0, end.start()) + len("CASE\n")
+    arms, default = [], None
+    for line in view_sql[start:end.start()].splitlines():
+        line = line.strip()
+        if line.startswith("--") or not line:
+            continue
+        when = re.fullmatch(r"WHEN (.+) THEN '([^']+)'", line)
+        if when:
+            arms.append((when.group(1), when.group(2)))
+            continue
+        other = re.fullmatch(r"ELSE '([^']+)'", line)
+        assert other, f"unrecognised CASE line: {line!r}"
+        default = other.group(1)
+    return arms, default
+
+
+def _evaluate_case(arms, default, row):
+    """Evaluates the handful of predicate shapes the time-split CASEs use, with
+    SQL NULL semantics. An unknown shape fails loudly rather than guessing, so
+    a rewritten predicate cannot slip past these tests unexamined."""
+    for predicate, label in arms:
+        if predicate == "d.client_name IS NULL":
+            hit = row["client_name"] is None
+        elif predicate.startswith("d.client_name = '"):
+            literal = predicate[len("d.client_name = '"):-1].replace("\\'", "'")
+            hit = row["client_name"] is not None and row["client_name"] == literal
+        elif predicate == "d.is_billable IS TRUE":
+            hit = row["is_billable"] is True
+        else:
+            raise AssertionError(f"unsupported predicate: {predicate!r}")
+        if hit:
+            return label
+    return default
+
+
+class TestUserWeeklyTimeSplitView:
+    """Week x user x client x Activity, hours split into internal / client
+    billable / CNB. All time on the internal client is internal whether or not
+    it is billable; other clients split on the entry's billable flag."""
+
+    NAME = "v_user_weekly_time_split"
+    FFI = views.INTERNAL_CLIENT_NAME
+
+    def test_created_after_the_view_it_reads(self, sql):
+        order = list(sql)
+        assert order.index("v_timelog_detail") < order.index(self.NAME)
+
+    def test_reads_v_timelog_detail_not_raw_tables(self, sql):
+        body = sql[self.NAME]
+        assert f"`{PROJECT}.{DATASET}.v_timelog_detail`" in body
+        for raw in ("timelogs", "projects", "tasks", "users"):
+            assert f"`{PROJECT}.{DATASET}.{raw}`" not in body, raw
+
+    def test_internal_client_is_the_confirmed_name(self):
+        assert views.INTERNAL_CLIENT_NAME == "Forward Financial Intelligence, Inc."
+
+    def test_groups_by_week_user_client_and_activity(self, sql):
+        group_line = [l for l in sql[self.NAME].splitlines() if l.startswith("GROUP BY ")][0]
+        grouped = {g.strip() for g in group_line[len("GROUP BY "):].split(",")}
+        assert {"week_start", "user_id", "client_name", "activity"} <= grouped
+
+    def test_week_is_the_sunday_start_week(self, sql):
+        # Same week as every other report, via v_timelog_detail.log_week_start,
+        # never Looker's Monday-based ISO week.
+        assert "d.log_week_start AS week_start" in sql[self.NAME]
+
+    @pytest.mark.parametrize("client, billable, expected", [
+        ("Forward Financial Intelligence, Inc.", False, "Internal"),
+        # The rule that is easiest to break: billable time on the internal
+        # client is STILL internal, so the client test must come first.
+        ("Forward Financial Intelligence, Inc.", True, "Internal"),
+        ("Forward Financial Intelligence, Inc.", None, "Internal"),
+        ("Acme Co", True, "Client Billable"),
+        ("Acme Co", False, "CNB"),
+        # Unknown billability is not revenue.
+        ("Acme Co", None, "CNB"),
+        # No client is neither internal nor external -- kept separate.
+        (None, True, "No client"),
+        (None, False, "No client"),
+        # A near-miss spelling is external: the match is exact.
+        ("Forward Financial Intelligence Inc", False, "CNB"),
+    ])
+    def test_time_class(self, sql, client, billable, expected):
+        arms, default = _case_arms(sql[self.NAME], "time_class")
+        row = {"client_name": client, "is_billable": billable}
+        assert _evaluate_case(arms, default, row) == expected
+
+    @pytest.mark.parametrize("client, billable", [
+        ("Forward Financial Intelligence, Inc.", True),
+        ("Forward Financial Intelligence, Inc.", False),
+        ("Acme Co", True),
+        ("Acme Co", False),
+        ("Acme Co", None),
+        (None, True),
+    ])
+    def test_client_type_agrees_with_time_class(self, sql, client, billable):
+        body = sql[self.NAME]
+        row = {"client_name": client, "is_billable": billable}
+        time_class = _evaluate_case(*_case_arms(body, "time_class"), row)
+        client_type = _evaluate_case(*_case_arms(body, "client_type"), row)
+        expected = {"Internal": "Internal", "No client": "No client",
+                    "Client Billable": "External", "CNB": "External"}[time_class]
+        assert client_type == expected
+
+    def test_hour_columns_cover_every_class_exactly_once(self, sql):
+        # Each hour column must sum exactly one class, and between them every
+        # class the CASE can produce -- otherwise the columns stop adding up to
+        # total_hours and hours vanish from (or double-count in) the report.
+        body = sql[self.NAME]
+        arms, default = _case_arms(body, "time_class")
+        classes = {label for _, label in arms} | {default}
+        cols = dict(
+            (alias, cls) for cls, alias in re.findall(
+                r"SUM\(IF\(time_class = '([^']+)', minutes, 0\)\) / 60 AS (\w+)", body)
+        )
+        assert cols == {
+            "internal_hours": "Internal",
+            "client_billable_hours": "Client Billable",
+            "cnb_hours": "CNB",
+            "no_client_hours": "No client",
+        }
+        assert set(cols.values()) == classes
+        assert "SUM(minutes) / 60 AS total_hours" in body
+
+    def test_hours_come_from_minutes_not_prerounded_hours(self, sql):
+        body = sql[self.NAME]
+        assert "d.minutes" in body
+        assert "d.hours" not in body
+
+
+class TestSqlString:
+    def test_quotes_a_value(self):
+        assert views._sql_string("Acme") == "'Acme'"
+
+    def test_escapes_embedded_quotes(self):
+        assert views._sql_string("O'Brien") == "'O\\'Brien'"
