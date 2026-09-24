@@ -129,11 +129,19 @@ class TestRuleConstantsReachTheSql:
 
     def test_task_exemption_applies_only_to_the_long_entry_rule(self, sql):
         """PTO is exempt from the long-entry rule, not hidden account-wide."""
+        # v_user_daily_time_split names the PTO task to CLASSIFY its hours into
+        # pto_hours -- checked separately below that it never filters them out.
         for name, body in sql.items():
-            if name == "v_exception_long_time_entries":
+            if name in ("v_exception_long_time_entries", "v_user_daily_time_split"):
                 continue
             for task_id in views.LONG_ENTRY_EXEMPT_TASK_IDS:
                 assert str(task_id) not in body, name
+
+    def test_time_split_classifies_pto_and_never_filters_it(self, sql):
+        body = sql["v_user_daily_time_split"]
+        uses = [l.strip() for l in body.splitlines() if str(views.PTO_TASK_ID) in l]
+        assert uses == [f"WHEN d.task_id = {views.PTO_TASK_ID} THEN 'PTO'"]
+        assert "\nWHERE" not in body
 
     def test_estimate_exemption_is_scoped_to_its_category(self, sql):
         body = sql["v_exception_missing_estimate"]
@@ -1406,6 +1414,9 @@ def _evaluate_case(arms, default, row):
         elif re.fullmatch(r"d\.company_id = \d+", predicate):
             literal = int(predicate.split("=")[1])
             hit = row["company_id"] is not None and row["company_id"] == literal
+        elif re.fullmatch(r"d\.task_id = \d+", predicate):
+            literal = int(predicate.split("=")[1])
+            hit = row.get("task_id") is not None and row["task_id"] == literal
         elif predicate == "d.is_billable IS TRUE":
             hit = row["is_billable"] is True
         else:
@@ -1423,6 +1434,7 @@ class TestUserDailyTimeSplitView:
 
     NAME = "v_user_daily_time_split"
     FFI = 1380118
+    PTO = 47878044
 
     def test_created_after_the_view_it_reads(self, sql):
         order = list(sql)
@@ -1478,8 +1490,37 @@ class TestUserDailyTimeSplitView:
     ])
     def test_time_class(self, sql, company, name, billable, expected):
         arms, default = _case_arms(sql[self.NAME], "time_class")
-        row = {"company_id": company, "client_name": name, "is_billable": billable}
+        row = {"company_id": company, "client_name": name, "is_billable": billable,
+               "task_id": 1}
         assert _evaluate_case(arms, default, row) == expected
+
+    @pytest.mark.parametrize("company, billable", [
+        # The case that matters: PTO sits on the FFI client, so without the PTO
+        # test coming first it would be counted as internal work.
+        (1380118, False),
+        (1380118, True),
+        (1380118, None),
+        # PTO wins whatever the client or flag says, even implausible ones.
+        (555, True),
+        (555, False),
+        (None, False),
+    ])
+    def test_pto_task_is_pto_whatever_else_is_true(self, sql, company, billable):
+        arms, default = _case_arms(sql[self.NAME], "time_class")
+        row = {"company_id": company, "is_billable": billable, "task_id": self.PTO}
+        assert _evaluate_case(arms, default, row) == "PTO"
+
+    def test_project_level_time_is_not_pto(self, sql):
+        # task_id NULL (time with no task) must not match the PTO test.
+        arms, default = _case_arms(sql[self.NAME], "time_class")
+        row = {"company_id": self.FFI, "is_billable": False, "task_id": None}
+        assert _evaluate_case(arms, default, row) == "Internal"
+
+    def test_pto_uses_the_shared_constant(self):
+        # One definition of "the PTO task" for this view and the long-entry
+        # exemption, so the two cannot drift apart.
+        assert views.PTO_TASK_ID == self.PTO
+        assert views.PTO_TASK_ID in views.LONG_ENTRY_EXEMPT_TASK_IDS
 
     @pytest.mark.parametrize("company, billable", [
         (1380118, True),
@@ -1510,6 +1551,7 @@ class TestUserDailyTimeSplitView:
                 r"SUM\(IF\(time_class = '([^']+)', minutes, 0\)\) / 60 AS (\w+)", body)
         )
         assert cols == {
+            "pto_hours": "PTO",
             "internal_hours": "Internal",
             "client_billable_hours": "Client Billable",
             "cnb_hours": "CNB",

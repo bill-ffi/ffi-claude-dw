@@ -69,6 +69,12 @@ RECURRING_REQUIRED_CATEGORY = "Books Maintenance"
 
 LONG_ENTRY_THRESHOLD_HOURS = 2
 
+# The single Teamwork task every PTO entry on this account posts against
+# (confirmed 2026-09-18). One constant for both places that treat PTO
+# specially: the long-entry exemption below, and v_user_daily_time_split's
+# pto_hours column.
+PTO_TASK_ID = 47878044
+
 # Timelog task_ids the long-entry rule never flags, however many hours they
 # carry. 47878044 is the single task every PTO entry on this account posts
 # against: a full PTO day is logged as 8 hours, so it clears the 2-hour
@@ -80,7 +86,7 @@ LONG_ENTRY_THRESHOLD_HOURS = 2
 # only thing posting to this task, so exempting it silences exactly the false
 # positives and nothing else. A category exemption would also hide genuine
 # over-long entries sitting elsewhere in the same category.
-LONG_ENTRY_EXEMPT_TASK_IDS = [47878044]
+LONG_ENTRY_EXEMPT_TASK_IDS = [PTO_TASK_ID]
 
 # The business timezone the user-hours report's "has today happened yet?"
 # logic is evaluated in.
@@ -1499,11 +1505,14 @@ FULL OUTER JOIN client_month_actuals a
 """
 
     # One row per logged date x user x client x Activity, with the hours split
-    # three ways: internal, client billable and CNB (client non-billable).
+    # four ways: PTO, internal, client billable and CNB (client non-billable).
     #
-    # The rule, per your definition:
-    #   - all time on the client INTERNAL_CLIENT_COMPANY_ID (FFI) is internal,
-    #     BILLABLE OR NOT;
+    # The rule, per your definition, tested in this order:
+    #   - all time on the PTO task (PTO_TASK_ID) is PTO, whatever its client or
+    #     billable flag. It is tested FIRST so leave never lands in
+    #     internal_hours, which it otherwise would, being on the FFI client;
+    #   - all other time on the client INTERNAL_CLIENT_COMPANY_ID (FFI) is
+    #     internal, BILLABLE OR NOT;
     #   - time on any other client is external, and splits on the entry's own
     #     billable flag into client_billable_hours and cnb_hours.
     # So a billable entry on the internal client lands in internal_hours, not
@@ -1516,14 +1525,22 @@ FULL OUTER JOIN client_month_actuals a
     # Two cases the three-way split cannot place, handled explicitly rather
     # than guessed:
     #   - A project with NO client (company_id NULL). It is not the internal
-    #     client and not an external one, so it goes to a fourth column,
+    #     client and not an external one, so it goes to its own column,
     #     no_client_hours, instead of being silently counted as either. The
-    #     four hour columns therefore always sum to total_hours. If those
+    #     five hour columns therefore always sum to total_hours. If those
     #     projects turn out to be internal, fold them in by changing the CASE
     #     below -- not in the report.
     #   - An external entry whose billable flag is NULL. It counts as CNB: only
     #     time Teamwork positively marks billable is billable, so revenue-side
     #     numbers are never inflated by an unknown.
+    #
+    # PTO is often posted ahead of the leave, so pto_hours can appear on future
+    # dates. That is deliberate: this view is unbounded, and future PTO is
+    # real planned leave, not an error.
+    #
+    # client_type still describes the CLIENT, so a PTO row's client_type is
+    # whatever its project's client is (FFI: Internal). Filter or stack on the
+    # hour columns, not client_type, to separate PTO from internal work.
     #
     # Daily grain, with week_start (the Sunday that begins the entry's week)
     # alongside so Looker can roll days up to weeks. It is the same Sunday-start
@@ -1565,9 +1582,11 @@ WITH classified AS (
       WHEN d.company_id = {int(INTERNAL_CLIENT_COMPANY_ID)} THEN 'Internal'
       ELSE 'External'
     END AS client_type,
-    -- Order matters: the client test comes BEFORE the billable test, so
-    -- billable time on the internal client is still internal.
+    -- Order matters. PTO comes first, so leave on the FFI client is PTO, not
+    -- internal. The client test comes BEFORE the billable test, so billable
+    -- time on the internal client is still internal.
     CASE
+      WHEN d.task_id = {int(PTO_TASK_ID)} THEN 'PTO'
       WHEN d.company_id IS NULL THEN 'No client'
       WHEN d.company_id = {int(INTERNAL_CLIENT_COMPANY_ID)} THEN 'Internal'
       WHEN d.is_billable IS TRUE THEN 'Client Billable'
@@ -1586,6 +1605,7 @@ SELECT
   client_name,
   client_type,
   activity,
+  SUM(IF(time_class = 'PTO', minutes, 0)) / 60 AS pto_hours,
   SUM(IF(time_class = 'Internal', minutes, 0)) / 60 AS internal_hours,
   SUM(IF(time_class = 'Client Billable', minutes, 0)) / 60 AS client_billable_hours,
   SUM(IF(time_class = 'CNB', minutes, 0)) / 60 AS cnb_hours,
