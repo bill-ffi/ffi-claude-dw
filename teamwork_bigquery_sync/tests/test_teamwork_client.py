@@ -204,3 +204,27 @@ class TestDefensiveKeyDetection:
     def test_companies_accepts_either_casing(self, client, no_sleep, key):
         c = client([FakeResponse(payload={key: [{"id": 3, "name": "Acme"}], "meta": {"page": {}}})])
         assert c.list_companies() == [{"id": 3, "name": "Acme"}]
+
+
+class TestListUsersIncludesDeletedPeople:
+    """people.json omits deleted people unless asked. list_users() sent no
+    params while its docstring claimed deleted people were included, and two
+    former staff's 857 timelogs (424.6h) read with no name for months."""
+
+    def test_asks_for_deleted_people(self, client, no_sleep):
+        c = client([page([{"id": 1}], key="people")])
+        c.list_users()
+        params = c.session.requests[0]["params"]
+        # Confirmed live 2026-09-24: showDeleted=true takes people.json from
+        # 16 to 20. includeDeleted=true is silently ignored.
+        assert params.get("showDeleted") == "true"
+        assert "includeDeleted" not in params
+
+    def test_every_page_carries_the_flag(self, client, no_sleep):
+        # A flag on page 1 only would drop whoever lands on page 2+.
+        c = client([
+            page([{"id": 1}], has_more=True, key="people"),
+            page([{"id": 2}], key="people"),
+        ])
+        assert [p["id"] for p in c.list_users()] == [1, 2]
+        assert all(r["params"].get("showDeleted") == "true" for r in c.session.requests)

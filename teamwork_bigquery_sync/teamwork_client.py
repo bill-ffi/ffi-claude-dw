@@ -64,6 +64,8 @@ TASKS_PATH = "/projects/api/v3/tasks.json"
 TIMELOGS_PATH = "/projects/api/v3/time.json"
 PROJECT_BUDGETS_PATH = "/projects/api/v3/budgets.json"
 USERS_PATH = "/projects/api/v3/people.json"
+# Without this, people.json omits deleted people. See list_users().
+USERS_LIST_PARAMS = {"showDeleted": "true"}
 CUSTOM_FIELDS_PATH = "/projects/api/v3/customfields.json"
 TASK_CUSTOM_FIELDS_PATH_TEMPLATE = "/projects/api/v3/tasks/{task_id}/customfields.json"
 PROJECT_CATEGORIES_PATH = "/projects/api/v3/projectcategories.json"
@@ -406,12 +408,22 @@ class TeamworkClient:
         return list(self._paginate(PROJECT_BUDGETS_PATH, {}, "budgets"))
 
     def list_users(self):
-        """All people (Teamwork's term for users) on the account, including
-        deactivated ones — deleted/deactivated users can still be referenced
-        by historical timelogs and tasks, so we keep them (flagged via
-        is_deleted) rather than filtering them out.
+        """All people (Teamwork's term for users) on the account, INCLUDING
+        deleted ones — they are still referenced by historical timelogs and
+        tasks, so we keep them (flagged via is_deleted, from the payload's
+        `deleted`) rather than letting their names go blank.
+
+        people.json returns only current people unless asked. This docstring
+        used to claim deleted people were included while the call sent no
+        params at all; two former staff's 857 timelogs (424.6h) read with no
+        name until 2026-09-24. Confirmed live that day (dry-run runs #128 and
+        #129): showDeleted=true returns 20 people vs 16 without it, the four
+        extras all carrying deleted=true. Three alternatives were tried and
+        rejected: includeDeleted=true is silently ignored (still 16), the v1
+        /people/deleted.json returns no one, and the v3 per-person endpoint
+        404s for a deleted id.
         """
-        return list(self._paginate(USERS_PATH, {}, "people"))
+        return list(self._paginate(USERS_PATH, USERS_LIST_PARAMS, "people"))
 
     def list_custom_fields(self):
         """All custom field *definitions* (not values) site-wide. No filter

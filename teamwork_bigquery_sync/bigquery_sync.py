@@ -135,6 +135,36 @@ def truncate_and_load(client, dataset_ref, table_name, schema, rows, allow_shrin
     return len(rows)
 
 
+def list_unresolved_timelog_users(client, project_id, dataset_id):
+    """Timelog user ids with no row in `users`, i.e. time whose person's name
+    reads blank in every view. Returns a list of
+    {user_id, entries, hours, last_entry}, largest first; [] when every user
+    resolves; None if the check itself could not run (never a false clean).
+
+    Exists because two former staff's 857 timelogs sat nameless for months
+    while every run reported success: users was silently missing deleted
+    people (see teamwork_client.list_users). Scans ALL loaded history, not
+    just this run's timelog window, since a departed person's last entry is by
+    definition in the past.
+    """
+    sql = (
+        "SELECT tl.user_id, COUNT(*) AS entries, "
+        "ROUND(SUM(tl.minutes) / 60, 1) AS hours, MAX(tl.log_date) AS last_entry "
+        f"FROM `{project_id}.{dataset_id}.{TIMELOGS_TABLE}` tl "
+        f"LEFT JOIN `{project_id}.{dataset_id}.{USERS_TABLE}` u ON u.user_id = tl.user_id "
+        "WHERE u.user_id IS NULL "
+        "GROUP BY tl.user_id ORDER BY hours DESC"
+    )
+    try:
+        return [
+            {"user_id": r[0], "entries": r[1], "hours": r[2], "last_entry": r[3]}
+            for r in client.query(sql).result()
+        ]
+    except Exception as exc:
+        logger.warning("Could not check for unresolved timelog users: %s", exc)
+        return None
+
+
 def _count_timelogs_in_window(client, project_id, dataset_id, start_date, end_date_exclusive):
     """Rows currently stored for a timelogs window."""
     sql = (

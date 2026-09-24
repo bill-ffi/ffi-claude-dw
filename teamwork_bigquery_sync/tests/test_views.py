@@ -1522,3 +1522,20 @@ class TestUserDailyTimeSplitView:
         body = sql[self.NAME]
         assert "d.minutes" in body
         assert "d.hours" not in body
+
+
+class TestUserminsExcludesFormerStaff:
+    """`users` now includes deleted people so their names resolve on historical
+    time. v_usermins used to exclude them implicitly (they were never loaded);
+    without an explicit filter, anyone still on the compensation sheet would
+    reappear in v_user_weekly_billable_hours with a target and a plug."""
+
+    def test_deleted_users_are_filtered_out(self, sql):
+        body = sql["v_usermins"]
+        assert "\nWHERE u.is_deleted IS NOT TRUE\n" in body
+
+    def test_a_null_flag_keeps_the_person(self, sql):
+        # = FALSE would drop a current employee whose flag came back NULL.
+        body = sql["v_usermins"]
+        assert "is_deleted = FALSE" not in body
+        assert "COALESCE(u.is_deleted, TRUE)" not in body

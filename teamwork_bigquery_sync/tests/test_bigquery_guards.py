@@ -130,3 +130,48 @@ class TestExistingRowCount:
 
     def test_returns_none_for_a_missing_table(self):
         assert bigquery_sync._existing_row_count(FakeBQClient(None), "ref") is None
+
+
+class TestUnresolvedTimelogUsers:
+    """Time whose user id has no row in `users` reads with a blank name in
+    every view. Two former staff's 857 timelogs sat that way for months while
+    every run reported success; this check surfaces it in RUN_SUMMARY."""
+
+    class FakeJob:
+        def __init__(self, rows, raises):
+            self.rows, self.raises = rows, raises
+
+        def result(self):
+            if self.raises:
+                raise self.raises
+            return self.rows
+
+    class FakeClient:
+        def __init__(self, rows=(), raises=None):
+            self.rows, self.raises, self.sql = list(rows), raises, None
+
+        def query(self, sql):
+            self.sql = sql
+            return TestUnresolvedTimelogUsers.FakeJob(self.rows, self.raises)
+
+    def test_reports_each_missing_user(self):
+        c = self.FakeClient(rows=[(700802, 801, 392.3, "2026-07-09")])
+        assert bigquery_sync.list_unresolved_timelog_users(c, "p", "d") == [
+            {"user_id": 700802, "entries": 801, "hours": 392.3, "last_entry": "2026-07-09"}
+        ]
+
+    def test_everyone_resolving_is_an_empty_list(self):
+        assert bigquery_sync.list_unresolved_timelog_users(self.FakeClient(), "p", "d") == []
+
+    def test_a_failed_check_is_none_not_a_false_clean(self):
+        c = self.FakeClient(raises=RuntimeError("permission denied"))
+        assert bigquery_sync.list_unresolved_timelog_users(c, "p", "d") is None
+
+    def test_is_an_anti_join_over_all_history(self):
+        # A departed person's last entry is in the past by definition, so the
+        # check must not be restricted to this run's timelog window.
+        c = self.FakeClient()
+        bigquery_sync.list_unresolved_timelog_users(c, "proj", "ds")
+        assert "LEFT JOIN `proj.ds.users` u ON u.user_id = tl.user_id" in c.sql
+        assert "WHERE u.user_id IS NULL" in c.sql
+        assert "log_date >=" not in c.sql and "@window" not in c.sql

@@ -497,6 +497,14 @@ SELECT
   m.as_of
 FROM {users} u
 JOIN {fqn(ANCILLARY_USER_INFO_TABLE)} m ON u.user_id = m.tw_userid
+-- Former staff stay out of the minimums even if their row is still on the
+-- sheet. Until 2026-09-24 `users` held no deleted people at all, so this join
+-- dropped them implicitly; now that they are loaded (so their names resolve on
+-- historical time), the exclusion has to be explicit or they would reappear
+-- in v_user_weekly_billable_hours with a target and a projected plug.
+-- IS NOT TRUE, not = FALSE, so a NULL flag keeps the person rather than
+-- silently dropping a current employee.
+WHERE u.is_deleted IS NOT TRUE
 """
 
     # Layer 1 — the shared aggregation base. One row per (user, day_bucket,
