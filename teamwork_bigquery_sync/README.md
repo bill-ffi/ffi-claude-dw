@@ -109,7 +109,7 @@ nine more that aren't exception rules: `v_usermins` (see "External reference
 data" below), the user report's `v_user_daily_billable_hours_base` /
 `v_user_weekly_billable_hours` (see "User report" below),
 `v_timelog_detail` (see "Drill-down reporting" below), `v_task_review`,
-`v_project_detail`, `v_client_month`, `v_user_weekly_time_split` and
+`v_project_detail`, `v_client_month`, `v_user_daily_time_split` and
 `v_data_freshness` (see "Last updated" below). **Sixteen** views in total, all defined in `views.py`;
 created/updated via:
 
@@ -535,7 +535,7 @@ another join.
 
 Not an exception rule and not part of the user-hours report — a wide,
 unfiltered Looker Studio data source with **one row per time entry**,
-joined out to project, client, person, tasklist and Activity. 35 columns.
+joined out to project, client, person, tasklist and Activity.
 
 Grain is guaranteed one row per timelog: a timelog has exactly one user,
 one project and at most one task, and `tasks` is de-duplicated by `task_id`
@@ -833,39 +833,42 @@ via `SAFE_DIVIDE`) rides along too, same as before.
 instruction — no longer needed), superseded by this quarter-to-date
 window of individual weeks, current-week projection included.
 
-### Time mix: `v_user_weekly_time_split`
+### Time mix: `v_user_daily_time_split`
 
-One row per **week × user × client × Activity**, with the hours split into
-columns so a Looker table or stacked bar can show how each person's time
+One row per **logged date × user × client × Activity**, with the hours split
+into columns so a Looker table or stacked bar can show how each person's time
 divides between internal work and client work:
 
 | Column | What goes in it |
 |---|---|
-| `internal_hours` | All time on the client **Forward Financial Intelligence, Inc.** (`INTERNAL_CLIENT_NAME` in `views.py`), billable or not |
+| `internal_hours` | All time on Forward Financial Intelligence, Inc. — Teamwork company id **1380118** (`INTERNAL_CLIENT_COMPANY_ID` in `views.py`) — billable or not |
 | `client_billable_hours` | Time on any other client, marked billable |
 | `cnb_hours` | Time on any other client, not marked billable (client non-billable). An entry whose billable flag is blank also lands here: only time Teamwork positively marks billable counts as billable |
 | `no_client_hours` | Time on a project with no client set. Neither internal nor external, so it gets its own column rather than being guessed into one. If those projects are really internal, change the view's CASE rather than patching it in the report |
 | `total_hours` | All of the above. The four columns always add up to this |
 
-Also carries `week_start` / `week_label` (the same Sunday-start week as every
-other report; use `week_label` as a chart axis), `user_name`, `user_email`,
-`client_name`, `client_type` (`Internal` / `External` / `No client`, handy as a
-filter) and `activity`, plus `time_entry_count`.
+Also carries `log_date`; `week_start`, the **Sunday** that begins the entry's
+week (the same Sunday-start week as every other report), for rolling days up to
+weeks in Looker; `week_label`, its text form, for chart axes (a DATE dimension
+makes Looker plot a daily axis with gaps); `user_name`, `user_email`,
+`company_id`, `client_name`, `client_type` (`Internal` / `External` /
+`No client`, handy as a filter) and `activity`, plus `time_entry_count`.
 
 Things to know:
 
+- **Internal is decided by company id, not by name.** A rename in Teamwork
+  cannot move internal time to CNB, and a different company that happens to
+  share the name is still external. To support this, `v_timelog_detail` now
+  carries `company_id` too.
 - **The client test comes before the billable test.** Billable time on the
   internal client counts as internal, not client billable.
   `v_exception_billable_time_internal_projects` is where such entries get
   flagged; this view only sorts time.
-- **The client name is matched exactly.** If the company is renamed in
-  Teamwork, every internal hour silently moves to `cnb_hours`. Update
-  `INTERNAL_CLIENT_NAME` and re-run `--create-views`.
 - **`activity` is the task's Activity**, so it is blank for time logged
   straight to a project (no task) and for tasks outside the tasks-table scope.
   Those rows still carry their hours.
-- All hour columns are additive, so they sum correctly over any range of weeks,
-  users or clients. For a percentage (e.g. share of time that is client
+- All hour columns are additive, so they sum correctly over any range of days,
+  weeks, users or clients. For a percentage (e.g. share of time that is client
   billable), compute it in the report as
   `SUM(client_billable_hours) / SUM(total_hours)`; don't average row-level
   ratios.
@@ -1819,7 +1822,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-375 tests, ~0.7s, entirely offline — no Teamwork API, no BigQuery, no
+378 tests, ~0.7s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
