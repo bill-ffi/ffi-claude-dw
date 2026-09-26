@@ -651,7 +651,13 @@ Budget", named range `mins4bq`).
   `v_usermins` uses an inner `JOIN`, so only users present in the sheet
   show up — not every Teamwork user.
 - `min_bill`/`min_value` in the sheet are **weekly** figures; `v_usermins`
-  derives daily versions (`/ 5`) alongside them.
+  derives daily versions (`/ 5`) alongside them. Every team member currently
+  has their own pair; the firm plans to revise and simplify the scheme in 2027.
+- **`pto_day`** (added 2026-09-26) is the number of **hours one PTO day is
+  worth** for that person: `(min_bill + min_value) / 5`, their weekly minimum
+  spread over five days. It is maintained in the sheet and passed through
+  `v_usermins` as-is rather than recomputed in SQL, so the sheet stays the one
+  place the formula lives if the 2027 revision changes it.
 - **Both are HOURS, not money** (confirmed 2026-09-22), despite the name
   "value": `min_bill` is minimum weekly **billable** hours, `min_value` is
   minimum weekly **value-added** hours — always non-billable, so it has no
@@ -667,6 +673,31 @@ Budget", named range `mins4bq`).
   opened up more broadly.
 - If the named range, sheet, or external table is ever renamed, update
   `ANCILLARY_USER_INFO_TABLE` in `views.py` and re-run `--create-views`.
+- **Adding a column to the sheet** does not reach BigQuery on its own: the
+  external table's column list is fixed when it is created. As the table's
+  owner, in the BigQuery console:
+  1. Make sure the named range `mins4bq` covers the new column (**Data →
+     Named ranges**). A column added at the far right usually falls outside it.
+  2. Recreate the table with an **explicit** column list, in the sheet's
+     left-to-right order — Sheets columns are matched by position, not by
+     header:
+     ```sql
+     CREATE OR REPLACE EXTERNAL TABLE `radiant-rig-284611.teamwork_data.gs_minimum_user_info` (
+       tw_userid INT64, first STRING, last STRING, email STRING, as_of DATE,
+       pto_day FLOAT64, min_bill FLOAT64, min_value FLOAT64
+     )
+     OPTIONS (sheet_range = "mins4bq", skip_leading_rows = 1, format = "GOOGLE_SHEETS",
+              uris = ["<the sheet's URL>"]);
+     ```
+     Listing the columns matters. Without a list BigQuery guesses each type
+     from today's values and freezes the guess: on 2026-09-26 it guessed
+     `min_bill` as a whole number, which would break `v_usermins` the first
+     time someone entered 17.5. A guessed `STRING` for `tw_userid` would break
+     the join to `users` outright.
+  3. `ALTER TABLE ... SET OPTIONS` is rejected for external tables, so
+     recreating is also the only way to change this table's options.
+  4. To use the new column in a report, add it to `v_usermins` in `views.py`
+     and run `--create-views`.
 
 ### User report: `v_user_daily_billable_hours_base` / `v_user_weekly_billable_hours`
 
@@ -1884,7 +1915,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-406 tests, ~0.7s, entirely offline — no Teamwork API, no BigQuery, no
+408 tests, ~0.7s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 

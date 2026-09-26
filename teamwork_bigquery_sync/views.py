@@ -123,8 +123,20 @@ REPORTING_TIMEZONE = "America/New_York"
 # Actions service account was deliberately NOT given access, since it has
 # no need to touch this table.
 #
-# Columns (per your confirmation): tw_userid (INT64, join key -> users.
-# user_id), first, last, email, as_of, min_bill, min_value.
+# Columns, in sheet order (confirmed 2026-09-26): tw_userid (INT64, join key
+# -> users.user_id), first, last, email, as_of, pto_day, min_bill, min_value.
+# Every team member currently has their own min_bill / min_value; the firm
+# plans to revise and simplify the scheme in 2027.
+#
+# pto_day (added 2026-09-26) -- the HOURS one PTO day is worth for that
+# person: (min_bill + min_value) / 5, i.e. their weekly minimum spread over a
+# five-day week. Read from the sheet rather than recomputed here so that if
+# the 2027 revision changes the formula, the sheet stays the one place it is
+# defined.
+#
+# The external table's column list is FIXED when it is created; a new sheet
+# column is invisible to BigQuery until the table is recreated -- see README
+# "External reference data" for the steps.
 #
 # BOTH min_bill AND min_value ARE HOURS, NOT MONEY, despite the name
 # "value" (confirmed 2026-09-22):
@@ -500,6 +512,9 @@ SELECT
   (m.min_bill / 5) AS daily_min_bill,
   m.min_value AS wkly_min_value,
   (m.min_value / 5) AS daily_min_value,
+  -- Hours one PTO day is worth for this person: (min_bill + min_value) / 5,
+  -- maintained in the sheet. See the ANCILLARY_USER_INFO_TABLE note.
+  m.pto_day,
   m.as_of
 FROM {users} u
 JOIN {fqn(ANCILLARY_USER_INFO_TABLE)} m ON u.user_id = m.tw_userid

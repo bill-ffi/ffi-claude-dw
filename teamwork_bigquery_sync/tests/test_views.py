@@ -1581,3 +1581,22 @@ class TestUserminsExcludesFormerStaff:
         body = sql["v_usermins"]
         assert "is_deleted = FALSE" not in body
         assert "COALESCE(u.is_deleted, TRUE)" not in body
+
+
+class TestUserminsPtoDay:
+    """pto_day is the hours one PTO day is worth per person,
+    (min_bill + min_value) / 5, maintained in the sheet."""
+
+    def test_passes_the_sheets_value_through(self, sql):
+        # Read, not recomputed: the sheet is the one place the formula lives,
+        # so a 2027 change to it needs no SQL change.
+        assert "\n  m.pto_day,\n" in sql["v_usermins"]
+
+    def test_existing_columns_are_unchanged(self, sql):
+        # Reports built on v_usermins must not break.
+        body = sql["v_usermins"]
+        for col in ("(m.min_bill / 5) AS daily_min_bill",
+                    "(m.min_value / 5) AS daily_min_value",
+                    "m.min_bill AS wkly_min_bill",
+                    "m.min_value AS wkly_min_value"):
+            assert col in body, col
