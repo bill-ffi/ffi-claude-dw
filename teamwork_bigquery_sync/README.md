@@ -876,6 +876,7 @@ divides between internal work and client work:
 | Column | What goes in it |
 |---|---|
 | `pto_hours` | All time on the PTO task, **47878044** (`PTO_TASK_ID` in `views.py`), whatever its client or billable flag. Tested first, so leave never counts as internal work |
+| `pto_in_days` | `pto_hours` ÷ that person's `pto_day` from the minimums sheet — the hours one PTO day is worth for them. Additive. `0` with no PTO; **blank** when PTO was logged but the person has no usable `pto_day` on the sheet. Not an hours column, so not part of `total_hours` |
 | `internal_hours` | All other time on Forward Financial Intelligence, Inc. — Teamwork company id **1380118** (`INTERNAL_CLIENT_COMPANY_ID` in `views.py`) — billable or not |
 | `client_billable_hours` | Time on any other client, marked billable |
 | `cnb_hours` | Time on any other client, not marked billable (client non-billable). An entry whose billable flag is blank also lands here: only time Teamwork positively marks billable counts as billable |
@@ -898,6 +899,14 @@ Things to know:
   client, so a PTO row reads `Internal` there — use the hour columns, not
   `client_type`, to separate leave from internal work. The same `PTO_TASK_ID`
   drives the long-entry exemption, so the two cannot drift apart.
+- **`pto_in_days` makes this view depend on the Google Sheet (accepted
+  2026-09-26).** Like `v_usermins`, it can now be queried only by someone with
+  Drive access to the minimums sheet, or through a Looker Studio data source
+  set to the **owner's credentials**. A data source on viewer's credentials
+  will fail for anyone without sheet access. It reads the sheet directly
+  rather than `v_usermins` (which drops former staff), collapsed to one row per
+  person so a duplicate sheet row cannot double anyone's hours, and joined so
+  people missing from the sheet keep all their hours.
 - **Internal is decided by company id, not by name.** A rename in Teamwork
   cannot move internal time to CNB, and a different company that happens to
   share the name is still external. To support this, `v_timelog_detail` now
@@ -1915,7 +1924,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-408 tests, ~0.7s, entirely offline — no Teamwork API, no BigQuery, no
+412 tests, ~0.7s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
