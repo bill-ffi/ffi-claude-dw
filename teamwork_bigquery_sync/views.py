@@ -1577,10 +1577,27 @@ FULL OUTER JOIN client_month_actuals a
     # unless the expression itself is grouped (see the week_label failure in
     # README "Known gaps").
     #
+    # pto_in_days (added 2026-09-26) reads each person's pto_day from the
+    # minimums sheet, so THIS VIEW NOW DEPENDS ON THE GOOGLE SHEET (accepted
+    # explicitly): only readers with Drive access to the sheet -- or Looker
+    # Studio data sources using the owner's credentials -- can query it, the
+    # same restriction v_usermins has. It joins the sheet table directly rather
+    # than v_usermins, because v_usermins drops former staff (so they get no
+    # billing target), and their past PTO should still convert to days if they
+    # are on the sheet.
+    #
     # Unbounded, like v_user_daily_billable_hours_base: every loaded day.
     views["v_user_daily_time_split"] = f"""
 CREATE OR REPLACE VIEW {fqn("v_user_daily_time_split")} AS
-WITH classified AS (
+-- One pto_day per person. GROUP BY guarantees it: a duplicate row on the sheet
+-- would otherwise fan out every one of that person's time entries and double
+-- their hours in every column, not just the PTO one.
+WITH pto_rates AS (
+  SELECT tw_userid AS user_id, MAX(pto_day) AS pto_day
+  FROM {fqn(ANCILLARY_USER_INFO_TABLE)}
+  GROUP BY tw_userid
+),
+classified AS (
   SELECT
     d.log_date,
     d.log_week_start AS week_start,
@@ -1592,6 +1609,7 @@ WITH classified AS (
     d.client_name,
     d.activity,
     d.minutes,
+    r.pto_day,
     CASE
       WHEN d.company_id IS NULL THEN 'No client'
       WHEN d.company_id = {int(INTERNAL_CLIENT_COMPANY_ID)} THEN 'Internal'
@@ -1608,6 +1626,9 @@ WITH classified AS (
       ELSE 'CNB'
     END AS time_class
   FROM {fqn("v_timelog_detail")} d
+  -- LEFT, so time from anyone not on the sheet is kept: an inner join would
+  -- silently drop their hours from every column and break total_hours.
+  LEFT JOIN pto_rates r ON r.user_id = d.user_id
 )
 SELECT
   log_date,
@@ -1621,6 +1642,14 @@ SELECT
   client_type,
   activity,
   SUM(IF(time_class = 'PTO', minutes, 0)) / 60 AS pto_hours,
+  -- PTO in days: pto_hours / the person's pto_day (hours one PTO day is worth
+  -- for them). Additive, so it sums over any range of days or people. 0 when
+  -- no PTO was logged; NULL when PTO was logged but the person has no usable
+  -- pto_day on the sheet -- unknown, rather than a made-up 0.
+  CASE
+    WHEN SUM(IF(time_class = 'PTO', minutes, 0)) = 0 THEN 0
+    ELSE SUM(IF(time_class = 'PTO', minutes, 0)) / 60 / NULLIF(MAX(pto_day), 0)
+  END AS pto_in_days,
   SUM(IF(time_class = 'Internal', minutes, 0)) / 60 AS internal_hours,
   SUM(IF(time_class = 'Client Billable', minutes, 0)) / 60 AS client_billable_hours,
   SUM(IF(time_class = 'CNB', minutes, 0)) / 60 AS cnb_hours,

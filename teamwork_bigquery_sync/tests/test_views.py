@@ -1600,3 +1600,34 @@ class TestUserminsPtoDay:
                     "m.min_bill AS wkly_min_bill",
                     "m.min_value AS wkly_min_value"):
             assert col in body, col
+
+
+class TestTimeSplitPtoInDays:
+    """pto_in_days = pto_hours / the person's pto_day from the minimums sheet.
+    Joining the sheet into a time report risks two silent failures that would
+    corrupt EVERY hour column, not just the new one: dropping people who are
+    not on the sheet, and fanning out on a duplicate sheet row."""
+
+    NAME = "v_user_daily_time_split"
+    SHEET = f"`{PROJECT}.{DATASET}.{views.ANCILLARY_USER_INFO_TABLE}`"
+
+    def test_the_sheet_is_collapsed_to_one_row_per_person(self, sql):
+        body = sql[self.NAME]
+        cte = body[body.index("WITH pto_rates AS ("):body.index("classified AS (")]
+        assert f"FROM {self.SHEET}" in cte
+        assert "GROUP BY tw_userid" in cte
+        assert "MAX(pto_day) AS pto_day" in cte
+
+    def test_people_not_on_the_sheet_keep_their_hours(self, sql):
+        assert "\n  LEFT JOIN pto_rates r ON r.user_id = d.user_id\n" in sql[self.NAME]
+
+    def test_reads_the_sheet_not_v_usermins(self, sql):
+        # v_usermins drops former staff; their past PTO should still convert.
+        assert "v_usermins" not in sql[self.NAME]
+
+    def test_pto_in_days_expression(self, sql):
+        body = sql[self.NAME]
+        assert ("  CASE\n"
+                "    WHEN SUM(IF(time_class = 'PTO', minutes, 0)) = 0 THEN 0\n"
+                "    ELSE SUM(IF(time_class = 'PTO', minutes, 0)) / 60 / NULLIF(MAX(pto_day), 0)\n"
+                "  END AS pto_in_days,\n") in body
