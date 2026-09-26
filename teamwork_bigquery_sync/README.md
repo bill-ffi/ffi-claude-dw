@@ -1041,6 +1041,33 @@ leaves GCP).
 
 ## Known gaps / things to verify before relying on this
 
+- **Every table and view was set to delete itself after 60 days (fixed
+  2026-09-26).** The dataset carried a default table expiration of 60 days —
+  set outside this pipeline, which never sets one — so every object got a
+  deletion date 60 days after it was created. `projects`, `tasks` and
+  `timelogs` were due on **2026-10-25**, `users` on 10-26 and
+  `gs_minimum_user_info` on 10-28. Found by accident while adding a column
+  to the sheet.
+  - **Why nothing noticed:** a truncate-and-load keeps a table's original
+    expiration rather than resetting it, so twice-daily reloads never moved
+    the date. Views looked safe only because each `--create-views` rebuilds
+    them and restarts their clock.
+  - **What losing it would have cost:** `projects`/`tasks`/`users` rebuild on
+    the next sync, but `timelogs` reloads only its rolling window — January
+    to July would have been gone until re-pulled with `--backfill-months`.
+  - **The fix, run by hand as the project owner:** `ALTER SCHEMA ... SET
+    OPTIONS (default_table_expiration_days = NULL)`, then `ALTER TABLE ...
+    SET OPTIONS (expiration_timestamp = NULL)` on the four native tables, then
+    `--create-views` to rebuild the views without dates. The external sheet
+    table rejects `ALTER TABLE SET OPTIONS` and had to be recreated with
+    `CREATE OR REPLACE EXTERNAL TABLE` instead.
+  - **The detector:** every full sync and `--create-views` now carries
+    `table_expirations` in `RUN_SUMMARY` —
+    `{"dataset_default_expiration_days": null, "expiring": []}` is healthy,
+    `null` means the check could not run — and logs a `WARNING` with the exact
+    `ALTER` statement when anything has a date. `timelogs__staging` is skipped:
+    it is scratch space rebuilt every run.
+
 - **Former staff's time had no name, for months (fixed 2026-09-24).** The
   README and `list_users()`'s docstring both said deleted users were loaded,
   but the call sent no params, and `people.json` returns only current people
@@ -1857,7 +1884,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-395 tests, ~0.7s, entirely offline — no Teamwork API, no BigQuery, no
+406 tests, ~0.7s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
