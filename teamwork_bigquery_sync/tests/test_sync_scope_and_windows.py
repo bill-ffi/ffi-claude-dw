@@ -184,3 +184,39 @@ class TestSelectTaskPullProjects:
     def test_empty_input_yields_empty_scope(self):
         ids, b = sync.select_task_pull_projects([])
         assert ids == set() and b["projects_in_scope"] == 0
+
+
+class TestExpirationWarning:
+    """The warning is the point of the check: a report nobody logs is silent."""
+
+    def test_a_clean_report_logs_nothing(self, caplog):
+        import sync
+        with caplog.at_level("WARNING"):
+            sync.warn_on_table_expirations(
+                {"dataset_default_expiration_days": None, "expiring": []}, "p.d")
+        assert caplog.records == []
+
+    def test_a_failed_check_logs_nothing_extra(self, caplog):
+        # check_table_expirations already warned that it could not run.
+        import sync
+        with caplog.at_level("WARNING"):
+            sync.warn_on_table_expirations(None, "p.d")
+        assert caplog.records == []
+
+    def test_a_dataset_default_is_warned_with_the_fix(self, caplog):
+        import sync
+        with caplog.at_level("WARNING"):
+            sync.warn_on_table_expirations(
+                {"dataset_default_expiration_days": 60, "expiring": []}, "p.d")
+        message = caplog.records[0].getMessage()
+        assert "60-day" in message
+        assert "ALTER SCHEMA `p.d` SET OPTIONS (default_table_expiration_days = NULL)" in message
+
+    def test_each_expiring_table_is_named_with_its_date(self, caplog):
+        import sync
+        with caplog.at_level("WARNING"):
+            sync.warn_on_table_expirations(
+                {"dataset_default_expiration_days": None,
+                 "expiring": [{"table": "timelogs", "expires": "2026-10-25T20:27:37+00:00"}]},
+                "p.d")
+        assert "timelogs on 2026-10-25" in caplog.records[0].getMessage()

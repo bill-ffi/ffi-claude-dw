@@ -893,6 +893,29 @@ def sync_timelogs_for_window(tw_client, bq_client, gcp_project_id, dataset_id, w
     }
 
 
+def warn_on_table_expirations(report, dataset_path):
+    """Logs a WARNING when anything in the dataset is set to be deleted.
+    Informational, never fatal -- see bigquery_sync.check_table_expirations."""
+    if not report:
+        return
+    days = report["dataset_default_expiration_days"]
+    if days:
+        logger.warning(
+            "Dataset %s gives every new table a %s-day expiration, so tables and "
+            "views the pipeline creates will be deleted automatically. Clear it with: "
+            "ALTER SCHEMA `%s` SET OPTIONS (default_table_expiration_days = NULL)",
+            dataset_path, days, dataset_path,
+        )
+    if report["expiring"]:
+        logger.warning(
+            "%d table(s)/view(s) in %s are set to be deleted: %s. Clear each with "
+            "ALTER TABLE (or ALTER VIEW) ... SET OPTIONS (expiration_timestamp = NULL); "
+            "an external table must be recreated instead.",
+            len(report["expiring"]), dataset_path,
+            ", ".join(f"{t['table']} on {t['expires'][:10]}" for t in report["expiring"]),
+        )
+
+
 def run_full_sync(cfg, allow_shrink=False):
     tw_client = TeamworkClient(cfg.teamwork_base_url, cfg.teamwork_api_key)
     bq_client = bigquery_sync.get_client(cfg.gcp_project_id)
@@ -959,6 +982,11 @@ def run_full_sync(cfg, allow_shrink=False):
             ", ".join(f"{u['user_id']} ({u['entries']} entries, {u['hours']}h)" for u in unresolved),
         )
 
+    expirations = bigquery_sync.check_table_expirations(
+        bq_client, cfg.gcp_project_id, cfg.bq_dataset
+    )
+    warn_on_table_expirations(expirations, f"{cfg.gcp_project_id}.{cfg.bq_dataset}")
+
     finished_at = datetime.now(timezone.utc)
     summary = {
         "run_started_at": started_at.isoformat(),
@@ -968,6 +996,7 @@ def run_full_sync(cfg, allow_shrink=False):
         "bq_dataset": cfg.bq_dataset,
         "stages": stages,
         "unresolved_timelog_users": unresolved,
+        "table_expirations": expirations,
     }
     logger.info("RUN_SUMMARY %s", json.dumps(summary, default=str))
 
@@ -1014,12 +1043,24 @@ def run_create_views(cfg):
     elif orphans == []:
         print("\n  No orphaned views — the dataset matches VIEW_NAMES.")
 
+    # After the views are (re)created, so a dataset default that just put a
+    # date on every view is reported by the same run that caused it.
+    expirations = bigquery_sync.check_table_expirations(
+        bq_client, cfg.gcp_project_id, cfg.bq_dataset
+    )
+    warn_on_table_expirations(expirations, f"{cfg.gcp_project_id}.{cfg.bq_dataset}")
+    if expirations and not expirations["dataset_default_expiration_days"] and not expirations["expiring"]:
+        print("  No deletion dates — nothing in the dataset is set to expire.")
+    elif expirations:
+        print("\n  WARNING: deletion dates found in the dataset — see the log above.")
+
     summary = {
         "mode": "create_views",
         "gcp_project_id": cfg.gcp_project_id,
         "bq_dataset": cfg.bq_dataset,
         "views": results,
         "orphaned_views": orphans,
+        "table_expirations": expirations,
     }
     logger.info("RUN_SUMMARY %s", json.dumps(summary, default=str))
 

@@ -135,6 +135,46 @@ def truncate_and_load(client, dataset_ref, table_name, schema, rows, allow_shrin
     return len(rows)
 
 
+def check_table_expirations(client, project_id, dataset_id):
+    """Deletion dates anywhere in the dataset. Returns
+    {"dataset_default_expiration_days": float or None,
+     "expiring": [{"table", "expires"}, ...]} -- the healthy result is None and
+    [] -- or None if the check itself could not run (never a false clean).
+
+    Exists because, until 2026-09-26, the dataset gave every new table a
+    60-day expiration. Nothing in the pipeline sets one, and nothing noticed:
+    projects, tasks and timelogs were due to be deleted on 2026-10-25, which
+    for timelogs would have lost every month outside the rolling sync window.
+    A truncate-and-load keeps a table's original expiration rather than
+    resetting it, so the reloads did not help. Views looked safer only
+    because each --create-views rebuilds them and restarts their clock.
+
+    The timelogs staging table is skipped: it is scratch space recreated every
+    run, so a date on it costs nothing. The dataset default is still reported,
+    since that is what would put dates back on everything else.
+    """
+    dataset_path = f"{project_id}.{dataset_id}"
+    try:
+        default_ms = client.get_dataset(dataset_path).default_table_expiration_ms
+        expiring = sorted(
+            (
+                {"table": item.table_id, "expires": item.expires.isoformat()}
+                for item in client.list_tables(dataset_path)
+                if item.expires is not None and item.table_id != TIMELOGS_STAGING_TABLE
+            ),
+            key=lambda t: t["expires"],
+        )
+    except Exception as exc:
+        logger.warning("Could not check table expirations: %s", exc)
+        return None
+    return {
+        "dataset_default_expiration_days": (
+            round(default_ms / 86_400_000, 2) if default_ms else None
+        ),
+        "expiring": expiring,
+    }
+
+
 def list_unresolved_timelog_users(client, project_id, dataset_id):
     """Timelog user ids with no row in `users`, i.e. time whose person's name
     reads blank in every view. Returns a list of

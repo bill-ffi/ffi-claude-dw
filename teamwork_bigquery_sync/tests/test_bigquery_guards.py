@@ -175,3 +175,75 @@ class TestUnresolvedTimelogUsers:
         assert "LEFT JOIN `proj.ds.users` u ON u.user_id = tl.user_id" in c.sql
         assert "WHERE u.user_id IS NULL" in c.sql
         assert "log_date >=" not in c.sql and "@window" not in c.sql
+
+
+class TestTableExpirations:
+    """Until 2026-09-26 the dataset gave every new table a 60-day expiration.
+    projects, tasks and timelogs were a month from deletion -- timelogs taking
+    every month outside the sync window with it -- and nothing noticed."""
+
+    from datetime import datetime, timezone
+
+    class FakeItem:
+        def __init__(self, table_id, expires=None):
+            self.table_id, self.expires = table_id, expires
+
+    class FakeDataset:
+        def __init__(self, default_ms):
+            self.default_table_expiration_ms = default_ms
+
+    class FakeClient:
+        def __init__(self, items=(), default_ms=None, raises=None):
+            self.items, self.default_ms, self.raises = list(items), default_ms, raises
+            self.paths = []
+
+        def get_dataset(self, path):
+            self.paths.append(path)
+            if self.raises:
+                raise self.raises
+            return TestTableExpirations.FakeDataset(self.default_ms)
+
+        def list_tables(self, path):
+            self.paths.append(path)
+            return self.items
+
+    WHEN = datetime(2026, 10, 25, 20, 27, 36, tzinfo=timezone.utc)
+
+    def check(self, client):
+        return bigquery_sync.check_table_expirations(client, "proj", "ds")
+
+    def test_a_clean_dataset_reports_nothing(self):
+        items = [self.FakeItem("projects"), self.FakeItem("v_usermins")]
+        assert self.check(self.FakeClient(items)) == {
+            "dataset_default_expiration_days": None, "expiring": [],
+        }
+
+    def test_reports_every_table_or_view_with_a_date(self):
+        items = [self.FakeItem("projects", self.WHEN), self.FakeItem("tasks"),
+                 self.FakeItem("v_usermins", self.WHEN)]
+        report = self.check(self.FakeClient(items))
+        assert [t["table"] for t in report["expiring"]] == ["projects", "v_usermins"]
+        assert report["expiring"][0]["expires"].startswith("2026-10-25")
+
+    def test_reports_the_dataset_default_in_days(self):
+        # 60 days is what this dataset actually had.
+        report = self.check(self.FakeClient(default_ms=60 * 86_400_000))
+        assert report["dataset_default_expiration_days"] == 60
+
+    def test_the_staging_table_is_not_reported(self):
+        # Scratch space recreated every run; a date on it costs nothing, and
+        # reporting it would make the warning fire on a healthy dataset.
+        items = [self.FakeItem(bigquery_sync.TIMELOGS_STAGING_TABLE, self.WHEN)]
+        assert self.check(self.FakeClient(items))["expiring"] == []
+
+    def test_only_the_staging_table_is_skipped(self):
+        items = [self.FakeItem("timelogs", self.WHEN)]
+        assert [t["table"] for t in self.check(self.FakeClient(items))["expiring"]] == ["timelogs"]
+
+    def test_a_failed_check_is_none_not_a_false_clean(self):
+        assert self.check(self.FakeClient(raises=RuntimeError("denied"))) is None
+
+    def test_reads_the_configured_dataset(self):
+        client = self.FakeClient()
+        self.check(client)
+        assert client.paths == ["proj.ds", "proj.ds"]
