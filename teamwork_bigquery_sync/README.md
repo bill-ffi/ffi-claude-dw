@@ -715,13 +715,25 @@ every `--create-views` run, **before** the views (which join them).
   each is just a label and a colour — so the label is the only key there is.
 - **Sorts step by 10** (`ag_sort` 10–60, `activity_sort` 10–130), so a new row
   can slot between two others without renumbering.
-- **"Missing":** time or a task with **no Activity** shows
-  `activity_group = 'Missing'`, sorting last (999). The `activity` column itself
-  stays blank, so `has_activity` and the missing-Activity exception rules still
-  work. It also covers time on tasks outside the tasks scope, whose Activity is
-  unknown rather than unset — `task_join_status` tells the two apart. An
-  Activity that exists but is missing from the file stays blank and is reported
-  by the sync (below).
+- **No Activity to group by** (confirmed 2026-09-29). `activity_group` is
+  decided in this order:
+
+  | Case | `activity_group` | Sorts |
+  |---|---|---|
+  | Time on (or the task) the PTO task, `PTO_TASK_ID` | `PTO` | 970 |
+  | Has an Activity | its group from the file | 10–130 |
+  | FFI work with no Activity — Activity is **not tracked for internal time** | `Internal` | 980 |
+  | Anything else with no Activity (in practice, client work) | `Missing` | 999 |
+
+  So **"Missing" is the actionable bucket**: client work that should carry an
+  Activity. Before this split, "Missing" held 5,965h, of which 4,428h was
+  internal work and 1,230h PTO, hiding about 280h of genuine client gaps. The
+  `activity` column itself stays blank in all three cases, so `has_activity`
+  and the missing-Activity exception rules are unchanged. "Missing" also covers
+  client time on tasks outside the tasks scope, whose Activity is unknown
+  rather than unset — `task_join_status` tells the two apart. An Activity that
+  exists but is absent from the file stays blank and is reported by the sync
+  (below).
 - **`tw_color`** is each Activity's colour in Teamwork as a plain name —
   `blue`, `green`, `purple` or `yellow`. Names, not hex codes, because Looker
   Studio cannot colour a chart from a field value: it is a reference for
@@ -777,7 +789,7 @@ spacing and `&`.
 **In Looker Studio**, to show groups in their intended order: put
 `activity_group` in the table or chart, then set **Sort** to `ag_sort`
 (aggregation **Min**, ascending). The sort field does not need to be displayed.
-Time with no Activity reads "Missing" and sorts last.
+PTO, Internal and Missing sort after every real group, in that order.
 
 **Adding another table:** add the CSV to `reference/`, one entry to
 `REFERENCE_TABLES` in `reference_data.py` (schema, key, and any unique /
@@ -2008,7 +2020,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-455 tests, ~0.8s, entirely offline — no Teamwork API, no BigQuery, no
+480 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
