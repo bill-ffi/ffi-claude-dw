@@ -946,7 +946,7 @@ SELECT
   tk.tasklist_id,
   tk.tasklist_name,
   tk.activity,
-  -- Report grouping, sort order and Teamwork colour for the Activity, from
+  -- Report grouping, sort order and Teamwork colour name for the Activity, from
   -- reference/activity_groups.csv. No Activity at all reads 'Missing' --
   -- which includes time on a task outside the tasks-table scope, whose
   -- Activity is unknown rather than unset; task_join_status tells the two

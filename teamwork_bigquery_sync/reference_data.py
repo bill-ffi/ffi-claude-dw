@@ -20,7 +20,6 @@ loudly instead of quietly fanning out a join or scrambling a sort order.
 import csv
 import logging
 import os
-import re
 
 from google.cloud import bigquery
 
@@ -38,9 +37,11 @@ REFERENCE_TABLES = {
             bigquery.SchemaField("ag_sort", "INT64", mode="REQUIRED"),
             bigquery.SchemaField("activity", "STRING", mode="REQUIRED"),
             bigquery.SchemaField("activity_sort", "INT64", mode="REQUIRED"),
-            # The Activity's colour in Teamwork, copied from the custom field's
-            # option list. A copy can drift, so every sync compares it with
-            # Teamwork's live value (activity_color_mismatches) and warns.
+            # The Activity's colour in Teamwork, as a plain name ("blue").
+            # Names, not hex codes: Looker Studio cannot colour a chart from a
+            # field, so the value is for people choosing colours by hand. A
+            # copy can drift, so every sync compares it with Teamwork's live
+            # colour (activity_color_mismatches) and warns.
             bigquery.SchemaField("tw_color", "STRING", mode="REQUIRED"),
         ],
         # One row per Activity. Views LEFT JOIN on this, so a duplicate key
@@ -55,11 +56,19 @@ REFERENCE_TABLES = {
         # tables: the group -> ag_sort rule below gives the same guarantee as a
         # separate groups table, and one 13-row file is far easier to edit.
         "consistent": [("activity_group", "ag_sort")],
-        "hex_colors": ["tw_color"],
+        "color_names": ["tw_color"],
     },
 }
 
-HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
+# Teamwork's Activity option colours (hex, from the custom field definition)
+# and the plain names used in reference files. Teamwork using a hex not listed
+# here is reported by activity_color_mismatches; add it with a name.
+TEAMWORK_COLOR_NAMES = {
+    "#4461d7": "blue",
+    "#4ecd97": "green",
+    "#bba1ff": "purple",
+    "#ffc63c": "yellow",
+}
 
 
 class ReferenceDataError(ValueError):
@@ -106,11 +115,12 @@ def load_reference_rows(table_name, directory=REFERENCE_DIR):
     if not rows:
         raise ReferenceDataError(f"{spec['file']}: no rows")
 
-    for col in spec.get("hex_colors", []):
+    known_names = sorted(set(TEAMWORK_COLOR_NAMES.values()))
+    for col in spec.get("color_names", []):
         for row in rows:
-            if not HEX_COLOR.fullmatch(row[col]):
+            if row[col] not in known_names:
                 raise ReferenceDataError(
-                    f"{spec['file']}: '{col}' must look like #4461d7, got {row[col]!r}"
+                    f"{spec['file']}: '{col}' must be one of {known_names}, got {row[col]!r}"
                 )
 
     for col in [spec["key"]] + spec.get("unique", []):
@@ -167,14 +177,19 @@ def unmapped_activities(activities, directory=REFERENCE_DIR):
 
 def activity_color_mismatches(teamwork_colors, directory=REFERENCE_DIR):
     """Activities whose tw_color in the CSV differs from Teamwork's live colour.
-    `teamwork_colors` is {activity: "#rrggbb"} from the custom field's options.
-    Compared case-insensitively, since #BBA1FF and #bba1ff are the same colour.
-    Activities absent from either side are unmapped_activities' concern."""
+    `teamwork_colors` is {activity: "#rrggbb"} from the custom field's options;
+    each is translated to its name (case-insensitively) before comparing. A hex
+    with no name in TEAMWORK_COLOR_NAMES is reported as-is, so a new Teamwork
+    colour surfaces instead of being silently ignored. Activities absent from
+    either side are unmapped_activities' concern."""
     mismatches = []
     for row in load_reference_rows(ACTIVITY_GROUPS_TABLE, directory):
         live = teamwork_colors.get(row["activity"])
-        if live and live.lower() != row["tw_color"].lower():
+        if not live:
+            continue
+        live_name = TEAMWORK_COLOR_NAMES.get(live.lower(), live)
+        if live_name != row["tw_color"]:
             mismatches.append(
-                {"activity": row["activity"], "teamwork": live, "reference": row["tw_color"]}
+                {"activity": row["activity"], "teamwork": live_name, "reference": row["tw_color"]}
             )
     return mismatches

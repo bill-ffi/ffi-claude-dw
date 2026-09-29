@@ -67,38 +67,39 @@ class TestTheRealFile:
 
 class TestValidation:
     def test_a_good_file_loads_typed(self, tmp_path):
-        d = write(tmp_path, "Books,2,BANK RECS,6,#4461d7\n")
+        d = write(tmp_path, "Books,2,BANK RECS,6,blue\n")
         assert rd.load_reference_rows(TABLE, d) == [
             {"activity_group": "Books", "ag_sort": 2, "activity": "BANK RECS",
-             "activity_sort": 6, "tw_color": "#4461d7"}
+             "activity_sort": 6, "tw_color": "blue"}
         ]
 
     def test_excel_byte_order_mark_and_crlf_are_tolerated(self, tmp_path):
-        d = write(tmp_path, "Books,2,BANK RECS,6,#4461d7\r\n", header=HEADER.replace("\n", "\r\n"),
+        d = write(tmp_path, "Books,2,BANK RECS,6,blue\r\n", header=HEADER.replace("\n", "\r\n"),
                   encoding="utf-8-sig")
         assert rd.load_reference_rows(TABLE, d)[0]["activity_group"] == "Books"
 
     def test_trailing_blank_lines_are_ignored(self, tmp_path):
-        d = write(tmp_path, "Books,2,BANK RECS,6,#4461d7\n\n,,,\n")
+        d = write(tmp_path, "Books,2,BANK RECS,6,blue\n\n,,,\n")
         assert len(rd.load_reference_rows(TABLE, d)) == 1
 
     def test_surrounding_spaces_are_stripped(self, tmp_path):
         # "BANK RECS " would silently fail to match the Activity in the join.
-        d = write(tmp_path, "Books , 2 , BANK RECS ,6,#4461d7\n")
+        d = write(tmp_path, "Books , 2 , BANK RECS ,6,blue\n")
         assert rd.load_reference_rows(TABLE, d)[0]["activity"] == "BANK RECS"
 
     @pytest.mark.parametrize("body, complaint", [
         # A duplicate key fans out the view join and doubles that Activity's hours.
-        ("Books,2,BANK RECS,6,#4461d7\nBooks,2,BANK RECS,7,#4461d7\n", "'activity' value 'BANK RECS' appears twice"),
-        ("Books,2,BANK RECS,6,#4461d7\nBooks,2,BOOKS / GL,6,#4461d7\n", "'activity_sort' value 6 appears twice"),
+        ("Books,2,BANK RECS,6,blue\nBooks,2,BANK RECS,7,blue\n", "'activity' value 'BANK RECS' appears twice"),
+        ("Books,2,BANK RECS,6,blue\nBooks,2,BOOKS / GL,6,blue\n", "'activity_sort' value 6 appears twice"),
         # One group, two sort numbers: it would sort in two places at once.
-        ("Books,2,BANK RECS,6,#4461d7\nBooks,3,BOOKS / GL,7,#4461d7\n", "has two ag_sort values"),
+        ("Books,2,BANK RECS,6,blue\nBooks,3,BOOKS / GL,7,blue\n", "has two ag_sort values"),
         # Two groups, one sort number: their order would be arbitrary.
-        ("Books,2,BANK RECS,6,#4461d7\nPayroll,2,PAYROLL,7,#4461d7\n", "ag_sort 2 is shared"),
-        ("Books,,BANK RECS,6,#4461d7\n", "'ag_sort' is blank"),
-        ("Books,two,BANK RECS,6,#4461d7\n", "must be a whole number"),
-        ("Books,2,BANK RECS,6,blue\n", "must look like #4461d7"),
-        ("Books,2,BANK RECS,6,#4461d\n", "must look like #4461d7"),
+        ("Books,2,BANK RECS,6,blue\nPayroll,2,PAYROLL,7,blue\n", "ag_sort 2 is shared"),
+        ("Books,,BANK RECS,6,blue\n", "'ag_sort' is blank"),
+        ("Books,two,BANK RECS,6,blue\n", "must be a whole number"),
+        # Names only: a hex code, or a name the colour check cannot translate.
+        ("Books,2,BANK RECS,6,#4461d7\n", "'tw_color' must be one of"),
+        ("Books,2,BANK RECS,6,navy\n", "'tw_color' must be one of"),
         ("", "no rows"),
     ])
     def test_rejects(self, tmp_path, body, complaint):
@@ -106,7 +107,7 @@ class TestValidation:
             rd.load_reference_rows(TABLE, write(tmp_path, body))
 
     def test_rejects_a_renamed_or_missing_column(self, tmp_path):
-        d = write(tmp_path, "Books,2,BANK RECS,6,#4461d7\n",
+        d = write(tmp_path, "Books,2,BANK RECS,6,blue\n",
                   header="activity_group,group_sort,activity,activity_sort,tw_color\n")
         with pytest.raises(rd.ReferenceDataError, match="columns must be exactly"):
             rd.load_reference_rows(TABLE, d)
@@ -139,8 +140,8 @@ class TestLoading:
     def test_one_bad_file_loads_nothing(self, tmp_path, monkeypatch):
         # Validate everything before writing anything, so a bad edit cannot
         # leave the set half-updated.
-        write(tmp_path, "Books,2,BANK RECS,6,#4461d7\n")
-        write(tmp_path, "Books,2,BANK RECS,6,#4461d7\nBooks,2,BANK RECS,6,#4461d7\n", name="bad.csv")
+        write(tmp_path, "Books,2,BANK RECS,6,blue\n")
+        write(tmp_path, "Books,2,BANK RECS,6,blue\nBooks,2,BANK RECS,6,blue\n", name="bad.csv")
         monkeypatch.setattr(rd, "REFERENCE_TABLES", {
             TABLE: rd.REFERENCE_TABLES[TABLE],
             "ref_bad": {**rd.REFERENCE_TABLES[TABLE], "file": "bad.csv"},
@@ -195,13 +196,26 @@ class TestViewsJoinTheGroups:
 
 
 class TestColourMismatches:
-    def test_reports_a_recoloured_activity(self):
+    def test_translates_teamwork_hex_to_the_files_names(self):
+        assert rd.activity_color_mismatches({"PAYROLL": "#4ecd97", "PROJECTS": "#bba1ff"}) == []
+
+    def test_reports_a_recoloured_activity_by_name(self):
+        assert rd.activity_color_mismatches({"PAYROLL": "#4461d7"}) == [
+            {"activity": "PAYROLL", "teamwork": "blue", "reference": "green"}
+        ]
+
+    def test_an_unnamed_teamwork_colour_is_reported_not_ignored(self):
+        # A colour Teamwork adds later has no name yet; it must surface.
         assert rd.activity_color_mismatches({"PAYROLL": "#ff0000"}) == [
-            {"activity": "PAYROLL", "teamwork": "#ff0000", "reference": "#4ecd97"}
+            {"activity": "PAYROLL", "teamwork": "#ff0000", "reference": "green"}
         ]
 
     def test_case_is_not_a_difference(self):
         assert rd.activity_color_mismatches({"PAYROLL": "#4ECD97"}) == []
+
+    def test_every_name_in_the_file_is_translatable(self):
+        names = set(rd.TEAMWORK_COLOR_NAMES.values())
+        assert {r["tw_color"] for r in rd.load_reference_rows(TABLE)} <= names
 
     def test_activities_teamwork_did_not_report_are_skipped(self):
         # Missing or renamed options are unmapped_activities' concern.
