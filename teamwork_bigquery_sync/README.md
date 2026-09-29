@@ -708,7 +708,27 @@ every `--create-views` run, **before** the views (which join them).
 
 | Table | File | Key | Joined into |
 |---|---|---|---|
-| `ref_activity_groups` | `activity_groups.csv` | `activity` | `v_timelog_detail`, `v_task_review`, `v_user_daily_time_split` — adds `activity_group`, `ag_sort`, `activity_sort` |
+| `ref_activity_groups` | `activity_groups.csv` | `activity` | `v_timelog_detail`, `v_task_review`, `v_user_daily_time_split` — adds `activity_group`, `ag_sort`, `activity_sort`, `tw_color` |
+
+**`ref_activity_groups` specifics** (confirmed 2026-09-29):
+- **Keyed on the Activity label.** Teamwork's Activity options have no id —
+  each is just a label and a colour — so the label is the only key there is.
+- **Sorts step by 10** (`ag_sort` 10–60, `activity_sort` 10–130), so a new row
+  can slot between two others without renumbering.
+- **"Missing":** time or a task with **no Activity** shows
+  `activity_group = 'Missing'`, sorting last (999). The `activity` column itself
+  stays blank, so `has_activity` and the missing-Activity exception rules still
+  work. It also covers time on tasks outside the tasks scope, whose Activity is
+  unknown rather than unset — `task_join_status` tells the two apart. An
+  Activity that exists but is missing from the file stays blank and is reported
+  by the sync (below).
+- **`tw_color`** is each Activity's colour in Teamwork, copied from the custom
+  field's option list and checked against it on every sync. Looker Studio cannot
+  colour a chart from a field value, so it is a reference for setting
+  **Style → Dimension value colors** by hand, not an automatic palette.
+- **One table, not two.** Group and group-sort could live in a separate table.
+  The load's rule that every row of a group carries the same `ag_sort` gives
+  the same guarantee, and one short file is easier to maintain.
 
 **Why a CSV in the repo, not a Google Sheet.** These tables are joined into
 `v_timelog_detail`, which every time report reads. A Drive-backed join there
@@ -738,15 +758,15 @@ the set half-updated.
 touching the CSV. Every full sync compares Teamwork's current options — and the
 Activity on every task — against `activity_groups.csv`, and reports the
 difference as `unmapped_activities` in the tasks stage of `RUN_SUMMARY`, with a
-`WARNING`. `[]` is healthy. An unmapped Activity's time still appears in every
+`WARNING`. `[]` is healthy. It also compares each `tw_color` with Teamwork's
+live colour and reports `activity_color_mismatches` the same way. An unmapped Activity's time still appears in every
 report, with a blank `activity_group`. Matching is exact, including case,
 spacing and `&`.
 
 **In Looker Studio**, to show groups in their intended order: put
 `activity_group` in the table or chart, then set **Sort** to `ag_sort`
 (aggregation **Min**, ascending). The sort field does not need to be displayed.
-Time with no Activity (untasked time, or tasks outside the tasks scope) has a
-blank group and sorts to one end.
+Time with no Activity reads "Missing" and sorts last.
 
 **Adding another table:** add the CSV to `reference/`, one entry to
 `REFERENCE_TABLES` in `reference_data.py` (schema, key, and any unique /
@@ -1977,7 +1997,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-438 tests, ~0.8s, entirely offline — no Teamwork API, no BigQuery, no
+452 tests, ~0.8s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
