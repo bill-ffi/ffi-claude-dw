@@ -699,6 +699,59 @@ Budget", named range `mins4bq`).
   4. To use the new column in a report, add it to `v_usermins` in `views.py`
      and run `--create-views`.
 
+### Reference tables: grouping and sort orders (`ref_*`)
+
+Small, hand-maintained lookup tables that give reports a grouping and a fixed
+sort order Teamwork does not have. Each is a CSV in
+`teamwork_bigquery_sync/reference/`, loaded into a native BigQuery table by
+every `--create-views` run, **before** the views (which join them).
+
+| Table | File | Key | Joined into |
+|---|---|---|---|
+| `ref_activity_groups` | `activity_groups.csv` | `activity` | `v_timelog_detail`, `v_task_review`, `v_user_daily_time_split` — adds `activity_group`, `ag_sort`, `activity_sort` |
+
+**Why a CSV in the repo, not a Google Sheet.** These tables are joined into
+`v_timelog_detail`, which every time report reads. A Drive-backed join there
+would lock the whole reporting layer behind sheet permissions, as
+`v_usermins` already is. The CSV also gets version history for free: every
+change is a commit with a date and a reason.
+
+**How to change one.** Edit the CSV (or send the new version to Claude),
+commit it to `main`, and run `--create-views`. Nothing changes in BigQuery
+until that run.
+
+**What the load checks, and why.** A bad edit fails the load loudly — the
+table keeps its last good contents and the run exits non-zero — rather than
+quietly corrupting reports:
+- the columns must be exactly the expected set, in order;
+- every cell filled, sort columns whole numbers;
+- the **key is unique** — a duplicate would fan out the view join and double
+  that Activity's hours in every report;
+- sort numbers unique, and each group carries exactly one group-sort, shared by
+  no other group — otherwise charts order unpredictably;
+- surrounding spaces are stripped and Excel's byte-order mark is tolerated,
+  because `"BANK RECS "` would silently fail to match in the join.
+Every file validates before any table is written, so a bad file cannot leave
+the set half-updated.
+
+**The drift check.** Teamwork's Activity options can change without anyone
+touching the CSV. Every full sync compares Teamwork's current options — and the
+Activity on every task — against `activity_groups.csv`, and reports the
+difference as `unmapped_activities` in the tasks stage of `RUN_SUMMARY`, with a
+`WARNING`. `[]` is healthy. An unmapped Activity's time still appears in every
+report, with a blank `activity_group`. Matching is exact, including case,
+spacing and `&`.
+
+**In Looker Studio**, to show groups in their intended order: put
+`activity_group` in the table or chart, then set **Sort** to `ag_sort`
+(aggregation **Min**, ascending). The sort field does not need to be displayed.
+Time with no Activity (untasked time, or tasks outside the tasks scope) has a
+blank group and sorts to one end.
+
+**Adding another table:** add the CSV to `reference/`, one entry to
+`REFERENCE_TABLES` in `reference_data.py` (schema, key, and any unique /
+group-sort rules), the join to whichever views need it, and tests.
+
 ### User report: `v_user_daily_billable_hours_base` / `v_user_weekly_billable_hours`
 
 Two layered views replace what used to be five separate ones
@@ -1924,7 +1977,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-412 tests, ~0.7s, entirely offline — no Teamwork API, no BigQuery, no
+438 tests, ~0.8s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
@@ -1960,6 +2013,8 @@ Teamwork API or a real BigQuery client. Those are still verified by
 - `transform.py` — raw Teamwork JSON → BigQuery row mapping
 - `bigquery_sync.py` — dataset/table creation, truncate+load, the
   transactional windowed replace for timelogs
+- `reference_data.py` + `reference/*.csv` — hand-maintained grouping/sort
+  tables, validated and loaded by `--create-views` (see "Reference tables")
 - `views.py` — the six exception/QC reporting views plus `v_usermins`,
   `v_user_daily_billable_hours_base`, and `v_user_weekly_billable_hours`
   (see "Exception reporting views" above)
