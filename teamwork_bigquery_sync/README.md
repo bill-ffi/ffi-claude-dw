@@ -715,6 +715,14 @@ every `--create-views` run, **before** the views (which join them).
   each is just a label and a colour — so the label is the only key there is.
 - **Sorts step by 10** (`ag_sort` 10–60, `activity_sort` 10–130), so a new row
   can slot between two others without renumbering.
+- **Retired labels are mapped too.** Tasks keep whatever Activity label they had
+  when it was set, even after the option is renamed or removed in Teamwork. The
+  first live run of `unmapped_activities` (2026-09-29) found tasks still
+  carrying **`A/R`**, evidently the old name of `A/R & INV`. It is mapped in the
+  file (Books, `activity_sort` 55, in the gap next to its successor) rather than
+  re-edited in Teamwork, which also covers tasks on archived projects. Teamwork
+  no longer lists a retired label, so its `tw_color` cannot be checked live —
+  copy the successor's.
 - **No Activity to group by** (confirmed 2026-09-29). `activity_group` is
   decided in this order:
 
@@ -2020,7 +2028,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-480 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
+482 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
