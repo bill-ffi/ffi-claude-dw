@@ -722,10 +722,13 @@ every `--create-views` run, **before** the views (which join them).
   unknown rather than unset — `task_join_status` tells the two apart. An
   Activity that exists but is missing from the file stays blank and is reported
   by the sync (below).
-- **`tw_color`** is each Activity's colour in Teamwork, copied from the custom
-  field's option list and checked against it on every sync. Looker Studio cannot
-  colour a chart from a field value, so it is a reference for setting
-  **Style → Dimension value colors** by hand, not an automatic palette.
+- **`tw_color`** is each Activity's colour in Teamwork as a plain name —
+  `blue`, `green`, `purple` or `yellow`. Names, not hex codes, because Looker
+  Studio cannot colour a chart from a field value: it is a reference for
+  setting **Style → Dimension value colors** by hand. Teamwork's hex for each
+  name is in `TEAMWORK_COLOR_NAMES` (`reference_data.py`); every sync translates
+  Teamwork's live colours to names and compares them with the file, and reports
+  a Teamwork colour that has no name yet rather than ignoring it.
 - **One table, not two.** Group and group-sort could live in a separate table.
   The load's rule that every row of a group carries the same `ag_sort` gives
   the same guarantee, and one short file is easier to maintain.
@@ -739,6 +742,14 @@ change is a commit with a date and a reason.
 **How to change one.** Edit the CSV (or send the new version to Claude),
 commit it to `main`, and run `--create-views`. Nothing changes in BigQuery
 until that run.
+
+**Why the load is part of `--create-views`, not a job of its own** (decided
+2026-09-29). Reloading these tables costs about a second and nothing in
+BigQuery charges, and reloading unchanged data changes nothing. A separate job
+would add two ways to fail: a CSV edit that silently never goes live because
+only create-views was run, and views that cannot be built at all because the
+table they join does not exist yet (a first deploy, or after a deletion). One
+command keeps views and reference tables in step.
 
 **What the load checks, and why.** A bad edit fails the load loudly — the
 table keeps its last good contents and the run exits non-zero — rather than
@@ -1997,7 +2008,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-452 tests, ~0.8s, entirely offline — no Teamwork API, no BigQuery, no
+455 tests, ~0.8s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
