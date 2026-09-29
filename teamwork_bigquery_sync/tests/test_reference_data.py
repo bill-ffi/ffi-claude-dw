@@ -27,7 +27,7 @@ def write(tmp_path, body, header=HEADER, name="activity_groups.csv", encoding="u
 class TestTheRealFile:
     def test_validates(self):
         rows = rd.load_reference_rows(TABLE)
-        assert len(rows) == 13
+        assert len(rows) == 14
         assert all(isinstance(r["ag_sort"], int) and isinstance(r["activity_sort"], int) for r in rows)
 
     def test_covers_every_activity_teamwork_offered_on_2026_09_29(self):
@@ -39,12 +39,33 @@ class TestTheRealFile:
                    "FP&A", "PROJECTS", "COMPLIANCE"]
         assert rd.unmapped_activities(offered) == []
 
+    OFFERED = ["BOOKS / GL", "BANK RECS", "A/P & EXP", "A/R & INV", "REVnCOGS",
+               "CONTROLLING", "PAYROLL", "HR", "ADVISORY", "CLIENT MNGMT",
+               "FP&A", "PROJECTS", "COMPLIANCE"]
+
     def test_sorts_step_by_ten(self):
         # Confirmed 2026-09-29: gaps of 10, so a new group or Activity can be
-        # slotted between two others without renumbering the rest.
+        # slotted between two others without renumbering the rest. Retired
+        # labels (below) are exactly such inserts, so only Teamwork's current
+        # options are held to the multiples of 10.
         rows = rd.load_reference_rows(TABLE)
         assert sorted({r["ag_sort"] for r in rows}) == [10, 20, 30, 40, 50, 60]
-        assert sorted(r["activity_sort"] for r in rows) == list(range(10, 140, 10))
+        current = sorted(r["activity_sort"] for r in rows if r["activity"] in self.OFFERED)
+        assert current == list(range(10, 140, 10))
+
+    def test_retired_a_r_label_groups_with_its_successor(self):
+        # The 2026-09-29 sync's unmapped_activities found tasks still carrying
+        # "A/R", evidently the old name of "A/R & INV". Mapped rather than
+        # re-edited in Teamwork (confirmed that day), so archived tasks are
+        # covered too. It must sit in the same group, next to its successor.
+        by_activity = {r["activity"]: r for r in rd.load_reference_rows(TABLE)}
+        old, new = by_activity["A/R"], by_activity["A/R & INV"]
+        assert old["activity_group"] == new["activity_group"] == "Books"
+        assert old["tw_color"] == new["tw_color"]
+        assert new["activity_sort"] < old["activity_sort"] < by_activity["BANK RECS"]["activity_sort"]
+
+    def test_the_labels_found_on_tasks_on_2026_09_29_are_all_mapped(self):
+        assert rd.unmapped_activities(self.OFFERED + ["A/R"]) == []
 
     def test_colours_match_teamwork_on_2026_09_29(self):
         # The Activity field's option colours from that day's dry run. A
@@ -126,9 +147,9 @@ class TestLoading:
 
     def test_replaces_the_table_with_the_validated_rows(self):
         client = self.FakeClient()
-        assert rd.load_reference_tables(client, self.FakeDatasetRef()) == {TABLE: 13}
+        assert rd.load_reference_tables(client, self.FakeDatasetRef()) == {TABLE: 14}
         ref, rows, config = client.loads[0]
-        assert ref == f"ref:{TABLE}" and len(rows) == 13
+        assert ref == f"ref:{TABLE}" and len(rows) == 14
         assert config.write_disposition == "WRITE_TRUNCATE"
 
     def test_one_bad_file_loads_nothing(self, tmp_path, monkeypatch):
