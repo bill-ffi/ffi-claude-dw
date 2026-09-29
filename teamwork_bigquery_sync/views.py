@@ -32,6 +32,8 @@ Update the constants below (not the SQL) if any of these lists change.
 
 import logging
 
+from reference_data import ACTIVITY_GROUPS_TABLE
+
 logger = logging.getLogger(__name__)
 
 # The project categories that make up "all of the billable projects we are
@@ -229,6 +231,10 @@ def build_view_sql(project_id, dataset):
     projects = fqn("projects")
     tasks = fqn("tasks")
     timelogs = fqn("timelogs")
+    # Hand-maintained grouping/sort table (reference/activity_groups.csv,
+    # loaded by reference_data.py before the views). Unique on activity --
+    # validated at load -- so joining it cannot fan out a row.
+    activity_groups = fqn(ACTIVITY_GROUPS_TABLE)
     users = fqn("users")
 
     monitored = _sql_string_array(MONITORED_CATEGORIES)
@@ -920,6 +926,12 @@ SELECT
   tk.tasklist_id,
   tk.tasklist_name,
   tk.activity,
+  -- Report grouping and sort order for the Activity, from
+  -- reference/activity_groups.csv. NULL when the entry has no Activity, or
+  -- for an Activity missing from that file (the sync warns about the latter).
+  ag.activity_group,
+  ag.ag_sort,
+  ag.activity_sort,
   tk.status AS task_status,
   tk.estimate_minutes,
   tk.due_date AS task_due_date,
@@ -953,6 +965,7 @@ LEFT JOIN {tasks} tk ON tk.task_id = tl.task_id
 -- tasks is de-duplicated by task_id, so this matches at most one row and
 -- cannot fan out the one-row-per-timelog grain.
 LEFT JOIN {tasks} parent ON parent.task_id = tk.parent_task_id
+LEFT JOIN {activity_groups} ag ON ag.activity = tk.activity
 LEFT JOIN {users} u ON u.user_id = tl.user_id
 LEFT JOIN {users} lb ON lb.user_id = tl.logged_by_user_id
 {proj_owner_join}
@@ -1129,9 +1142,12 @@ SELECT
   t.sequence_id,
   (t.sequence_id IS NOT NULL) AS is_recurring,
 
-  -- the Activity custom field
+  -- the Activity custom field, with its report grouping and sort order
   t.activity,
   (t.activity IS NOT NULL) AS has_activity,
+  ag.activity_group,
+  ag.ag_sort,
+  ag.activity_sort,
 
   -- estimate
   t.estimate_minutes,
@@ -1232,6 +1248,7 @@ LEFT JOIN task_time tt ON tt.task_id = t.task_id
 -- tasks is de-duplicated by task_id in the pipeline, so this self-join
 -- matches at most one row and cannot fan out the grain.
 LEFT JOIN {tasks} parent ON parent.task_id = t.parent_task_id
+LEFT JOIN {activity_groups} ag ON ag.activity = t.activity
 WHERE p.archived_at IS NULL
 """
 
@@ -1608,6 +1625,9 @@ classified AS (
     d.company_id,
     d.client_name,
     d.activity,
+    d.activity_group,
+    d.ag_sort,
+    d.activity_sort,
     d.minutes,
     r.pto_day,
     CASE
@@ -1641,6 +1661,9 @@ SELECT
   client_name,
   client_type,
   activity,
+  activity_group,
+  ag_sort,
+  activity_sort,
   SUM(IF(time_class = 'PTO', minutes, 0)) / 60 AS pto_hours,
   -- PTO in days: pto_hours / the person's pto_day (hours one PTO day is worth
   -- for them). Additive, so it sums over any range of days or people. 0 when
@@ -1657,7 +1680,7 @@ SELECT
   SUM(minutes) / 60 AS total_hours,
   COUNT(*) AS time_entry_count
 FROM classified
-GROUP BY log_date, week_start, week_label, user_id, user_name, user_email, company_id, client_name, client_type, activity
+GROUP BY log_date, week_start, week_label, user_id, user_name, user_email, company_id, client_name, client_type, activity, activity_group, ag_sort, activity_sort
 """
 
     # One row, and the only view here whose subject is the pipeline itself

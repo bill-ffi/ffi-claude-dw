@@ -36,6 +36,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import bigquery_sync
+import reference_data
 import schemas
 import transform
 import views
@@ -827,6 +828,25 @@ def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids, allow_s
         logger.error("Activity enrichment failed, continuing without it:\n%s", traceback.format_exc())
         activity_stats = {"field_found": False, "error": "enrichment raised an exception, see logs"}
 
+    # Every Activity -- whether offered by Teamwork today or still sitting on an
+    # older task -- should have a group in reference/activity_groups.csv. A new
+    # or renamed option would otherwise land in reports with a blank group and
+    # nothing would say so. Informational, never fatal.
+    try:
+        activity_stats["unmapped_activities"] = reference_data.unmapped_activities(
+            list(activity_stats.get("options") or []) + [r.get("activity") for r in rows]
+        )
+        if activity_stats["unmapped_activities"]:
+            logger.warning(
+                "%d Activity value(s) have no group in reference/activity_groups.csv, "
+                "so their time shows with a blank activity_group: %s",
+                len(activity_stats["unmapped_activities"]),
+                ", ".join(activity_stats["unmapped_activities"]),
+            )
+    except Exception as exc:
+        logger.warning("Could not check Activity groups: %s", exc)
+        activity_stats["unmapped_activities"] = None
+
     written = bigquery_sync.truncate_and_load(
         bq_client, dataset_ref, schemas.TASKS_TABLE, schemas.TASKS_SCHEMA, rows,
         allow_shrink=allow_shrink,
@@ -1022,6 +1042,19 @@ def run_create_views(cfg):
     )
     bigquery_sync.ensure_all_tables(bq_client, dataset_ref)
 
+    # Reference tables first: views join them, and BigQuery refuses to create
+    # a view over a table that does not exist yet. A bad CSV fails the run
+    # (validation happens before anything is written, so the tables keep their
+    # last good contents) but the views are still refreshed against those.
+    try:
+        reference_tables = reference_data.load_reference_tables(bq_client, dataset_ref)
+        for name, count in reference_tables.items():
+            print(f"  {name}: {count} rows loaded")
+    except Exception as exc:
+        logger.error("Reference tables not loaded: %s", exc)
+        print(f"  REFERENCE TABLES FAILED: {exc}")
+        reference_tables = {"error": str(exc)}
+
     results = views.create_or_replace_views(bq_client, cfg.gcp_project_id, cfg.bq_dataset)
     for view_name, status in results.items():
         print(f"  {view_name}: {status}")
@@ -1058,13 +1091,14 @@ def run_create_views(cfg):
         "mode": "create_views",
         "gcp_project_id": cfg.gcp_project_id,
         "bq_dataset": cfg.bq_dataset,
+        "reference_tables": reference_tables,
         "views": results,
         "orphaned_views": orphans,
         "table_expirations": expirations,
     }
     logger.info("RUN_SUMMARY %s", json.dumps(summary, default=str))
 
-    all_ok = all(status == "ok" for status in results.values())
+    all_ok = all(status == "ok" for status in results.values()) and "error" not in reference_tables
     return 0 if all_ok else 1
 
 

@@ -1,0 +1,14 @@
+activity_group,ag_sort,activity,activity_sort
+Advisory,1,ADVISORY,1
+Advisory,1,FP&A,2
+Advisory,1,HR,3
+Books,2,A/P & EXP,4
+Books,2,A/R & INV,5
+Books,2,BANK RECS,6
+Books,2,BOOKS / GL,7
+Books,2,REVnCOGS,8
+Client Management,3,CLIENT MNGMT,9
+Controlling,4,CONTROLLING,10
+Payroll,6,COMPLIANCE,11
+Payroll,6,PAYROLL,12
+Projects,7,PROJECTS,13
