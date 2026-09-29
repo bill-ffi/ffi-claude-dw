@@ -16,7 +16,7 @@ import sync
 import views
 
 TABLE = rd.ACTIVITY_GROUPS_TABLE
-HEADER = "activity_group,ag_sort,activity,activity_sort\n"
+HEADER = "activity_group,ag_sort,activity,activity_sort,tw_color\n"
 
 
 def write(tmp_path, body, header=HEADER, name="activity_groups.csv", encoding="utf-8"):
@@ -39,38 +39,66 @@ class TestTheRealFile:
                    "FP&A", "PROJECTS", "COMPLIANCE"]
         assert rd.unmapped_activities(offered) == []
 
+    def test_sorts_step_by_ten(self):
+        # Confirmed 2026-09-29: gaps of 10, so a new group or Activity can be
+        # slotted between two others without renumbering the rest.
+        rows = rd.load_reference_rows(TABLE)
+        assert sorted({r["ag_sort"] for r in rows}) == [10, 20, 30, 40, 50, 60]
+        assert sorted(r["activity_sort"] for r in rows) == list(range(10, 140, 10))
+
+    def test_every_sort_stays_below_the_missing_sort(self):
+        # 'Missing' must sort after every real group and Activity.
+        rows = rd.load_reference_rows(TABLE)
+        top = max(max(r["ag_sort"], r["activity_sort"]) for r in rows)
+        assert top < views.MISSING_ACTIVITY_SORT
+
+    def test_colours_match_teamwork_on_2026_09_29(self):
+        # The Activity field's option colours from that day's dry run. A
+        # snapshot; activity_color_mismatches is what catches later changes.
+        teamwork = {
+            "BOOKS / GL": "#4461d7", "BANK RECS": "#4461d7", "A/P & EXP": "#4461d7",
+            "A/R & INV": "#4461d7", "REVnCOGS": "#4461d7", "CONTROLLING": "#4461d7",
+            "PAYROLL": "#4ecd97", "HR": "#4ecd97", "ADVISORY": "#bba1ff",
+            "CLIENT MNGMT": "#bba1ff", "FP&A": "#bba1ff", "PROJECTS": "#bba1ff",
+            "COMPLIANCE": "#ffc63c",
+        }
+        assert rd.activity_color_mismatches(teamwork) == []
+
 
 class TestValidation:
     def test_a_good_file_loads_typed(self, tmp_path):
-        d = write(tmp_path, "Books,2,BANK RECS,6\n")
+        d = write(tmp_path, "Books,2,BANK RECS,6,#4461d7\n")
         assert rd.load_reference_rows(TABLE, d) == [
-            {"activity_group": "Books", "ag_sort": 2, "activity": "BANK RECS", "activity_sort": 6}
+            {"activity_group": "Books", "ag_sort": 2, "activity": "BANK RECS",
+             "activity_sort": 6, "tw_color": "#4461d7"}
         ]
 
     def test_excel_byte_order_mark_and_crlf_are_tolerated(self, tmp_path):
-        d = write(tmp_path, "Books,2,BANK RECS,6\r\n", header=HEADER.replace("\n", "\r\n"),
+        d = write(tmp_path, "Books,2,BANK RECS,6,#4461d7\r\n", header=HEADER.replace("\n", "\r\n"),
                   encoding="utf-8-sig")
         assert rd.load_reference_rows(TABLE, d)[0]["activity_group"] == "Books"
 
     def test_trailing_blank_lines_are_ignored(self, tmp_path):
-        d = write(tmp_path, "Books,2,BANK RECS,6\n\n,,,\n")
+        d = write(tmp_path, "Books,2,BANK RECS,6,#4461d7\n\n,,,\n")
         assert len(rd.load_reference_rows(TABLE, d)) == 1
 
     def test_surrounding_spaces_are_stripped(self, tmp_path):
         # "BANK RECS " would silently fail to match the Activity in the join.
-        d = write(tmp_path, "Books , 2 , BANK RECS ,6\n")
+        d = write(tmp_path, "Books , 2 , BANK RECS ,6,#4461d7\n")
         assert rd.load_reference_rows(TABLE, d)[0]["activity"] == "BANK RECS"
 
     @pytest.mark.parametrize("body, complaint", [
         # A duplicate key fans out the view join and doubles that Activity's hours.
-        ("Books,2,BANK RECS,6\nBooks,2,BANK RECS,7\n", "'activity' value 'BANK RECS' appears twice"),
-        ("Books,2,BANK RECS,6\nBooks,2,BOOKS / GL,6\n", "'activity_sort' value 6 appears twice"),
+        ("Books,2,BANK RECS,6,#4461d7\nBooks,2,BANK RECS,7,#4461d7\n", "'activity' value 'BANK RECS' appears twice"),
+        ("Books,2,BANK RECS,6,#4461d7\nBooks,2,BOOKS / GL,6,#4461d7\n", "'activity_sort' value 6 appears twice"),
         # One group, two sort numbers: it would sort in two places at once.
-        ("Books,2,BANK RECS,6\nBooks,3,BOOKS / GL,7\n", "has two ag_sort values"),
+        ("Books,2,BANK RECS,6,#4461d7\nBooks,3,BOOKS / GL,7,#4461d7\n", "has two ag_sort values"),
         # Two groups, one sort number: their order would be arbitrary.
-        ("Books,2,BANK RECS,6\nPayroll,2,PAYROLL,7\n", "ag_sort 2 is shared"),
-        ("Books,,BANK RECS,6\n", "'ag_sort' is blank"),
-        ("Books,two,BANK RECS,6\n", "must be a whole number"),
+        ("Books,2,BANK RECS,6,#4461d7\nPayroll,2,PAYROLL,7,#4461d7\n", "ag_sort 2 is shared"),
+        ("Books,,BANK RECS,6,#4461d7\n", "'ag_sort' is blank"),
+        ("Books,two,BANK RECS,6,#4461d7\n", "must be a whole number"),
+        ("Books,2,BANK RECS,6,blue\n", "must look like #4461d7"),
+        ("Books,2,BANK RECS,6,#4461d\n", "must look like #4461d7"),
         ("", "no rows"),
     ])
     def test_rejects(self, tmp_path, body, complaint):
@@ -78,8 +106,8 @@ class TestValidation:
             rd.load_reference_rows(TABLE, write(tmp_path, body))
 
     def test_rejects_a_renamed_or_missing_column(self, tmp_path):
-        d = write(tmp_path, "Books,2,BANK RECS,6\n",
-                  header="activity_group,group_sort,activity,activity_sort\n")
+        d = write(tmp_path, "Books,2,BANK RECS,6,#4461d7\n",
+                  header="activity_group,group_sort,activity,activity_sort,tw_color\n")
         with pytest.raises(rd.ReferenceDataError, match="columns must be exactly"):
             rd.load_reference_rows(TABLE, d)
 
@@ -111,8 +139,8 @@ class TestLoading:
     def test_one_bad_file_loads_nothing(self, tmp_path, monkeypatch):
         # Validate everything before writing anything, so a bad edit cannot
         # leave the set half-updated.
-        write(tmp_path, "Books,2,BANK RECS,6\n")
-        write(tmp_path, "Books,2,BANK RECS,6\nBooks,2,BANK RECS,6\n", name="bad.csv")
+        write(tmp_path, "Books,2,BANK RECS,6,#4461d7\n")
+        write(tmp_path, "Books,2,BANK RECS,6,#4461d7\nBooks,2,BANK RECS,6,#4461d7\n", name="bad.csv")
         monkeypatch.setattr(rd, "REFERENCE_TABLES", {
             TABLE: rd.REFERENCE_TABLES[TABLE],
             "ref_bad": {**rd.REFERENCE_TABLES[TABLE], "file": "bad.csv"},
@@ -164,3 +192,52 @@ class TestViewsJoinTheGroups:
         body = sql["v_user_daily_time_split"]
         assert self.GROUPS not in body
         assert "    d.activity_group,\n    d.ag_sort,\n    d.activity_sort,\n" in body
+
+
+class TestColourMismatches:
+    def test_reports_a_recoloured_activity(self):
+        assert rd.activity_color_mismatches({"PAYROLL": "#ff0000"}) == [
+            {"activity": "PAYROLL", "teamwork": "#ff0000", "reference": "#4ecd97"}
+        ]
+
+    def test_case_is_not_a_difference(self):
+        assert rd.activity_color_mismatches({"PAYROLL": "#4ECD97"}) == []
+
+    def test_activities_teamwork_did_not_report_are_skipped(self):
+        # Missing or renamed options are unmapped_activities' concern.
+        assert rd.activity_color_mismatches({}) == []
+
+
+class TestOptionColourMap:
+    def test_reads_the_live_option_shape(self):
+        import transform
+        field = {"options": {"choices": [{"value": "PAYROLL", "color": "#4ecd97"},
+                                         {"value": "HR"}]}}
+        assert transform.build_option_color_map(field) == {"PAYROLL": "#4ecd97"}
+
+
+class TestMissingActivity:
+    """No Activity reads 'Missing' and sorts last -- confirmed 2026-09-29."""
+
+    @pytest.mark.parametrize("name, alias", [("v_timelog_detail", "tk"), ("v_task_review", "t")])
+    def test_missing_label_and_sorts(self, sql, name, alias):
+        body = sql[name]
+        assert (f"CASE WHEN {alias}.activity IS NULL THEN 'Missing' ELSE ag.activity_group END"
+                " AS activity_group,") in body
+        assert f"CASE WHEN {alias}.activity IS NULL THEN 999 ELSE ag.ag_sort END AS ag_sort," in body
+        assert (f"CASE WHEN {alias}.activity IS NULL THEN 999 ELSE ag.activity_sort END"
+                " AS activity_sort,") in body
+
+    @pytest.mark.parametrize("name, alias", [("v_timelog_detail", "tk"), ("v_task_review", "t")])
+    def test_the_activity_column_itself_is_left_null(self, sql, name, alias):
+        # has_activity and the missing-Activity exception rules test
+        # activity IS NULL; relabelling the column would silently break them.
+        body = sql[name]
+        assert f"\n  {alias}.activity,\n" in body
+        assert f"COALESCE({alias}.activity" not in body
+
+    def test_time_split_carries_the_colour(self, sql):
+        body = sql["v_user_daily_time_split"]
+        assert "    d.tw_color,\n" in body
+        group_line = [l for l in body.splitlines() if l.startswith("GROUP BY ")][0]
+        assert "tw_color" in group_line

@@ -20,6 +20,7 @@ loudly instead of quietly fanning out a join or scrambling a sort order.
 import csv
 import logging
 import os
+import re
 
 from google.cloud import bigquery
 
@@ -37,6 +38,10 @@ REFERENCE_TABLES = {
             bigquery.SchemaField("ag_sort", "INT64", mode="REQUIRED"),
             bigquery.SchemaField("activity", "STRING", mode="REQUIRED"),
             bigquery.SchemaField("activity_sort", "INT64", mode="REQUIRED"),
+            # The Activity's colour in Teamwork, copied from the custom field's
+            # option list. A copy can drift, so every sync compares it with
+            # Teamwork's live value (activity_color_mismatches) and warns.
+            bigquery.SchemaField("tw_color", "STRING", mode="REQUIRED"),
         ],
         # One row per Activity. Views LEFT JOIN on this, so a duplicate key
         # would fan out and double every hour on that Activity's time.
@@ -46,9 +51,15 @@ REFERENCE_TABLES = {
         "unique": ["activity_sort"],
         # (label, sort) pairs where every row with the same label must carry
         # the same sort, or a group would sort in two places at once.
+        # Kept as one table, not normalised into separate group and activity
+        # tables: the group -> ag_sort rule below gives the same guarantee as a
+        # separate groups table, and one 13-row file is far easier to edit.
         "consistent": [("activity_group", "ag_sort")],
+        "hex_colors": ["tw_color"],
     },
 }
+
+HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 
 
 class ReferenceDataError(ValueError):
@@ -94,6 +105,13 @@ def load_reference_rows(table_name, directory=REFERENCE_DIR):
 
     if not rows:
         raise ReferenceDataError(f"{spec['file']}: no rows")
+
+    for col in spec.get("hex_colors", []):
+        for row in rows:
+            if not HEX_COLOR.fullmatch(row[col]):
+                raise ReferenceDataError(
+                    f"{spec['file']}: '{col}' must look like #4461d7, got {row[col]!r}"
+                )
 
     for col in [spec["key"]] + spec.get("unique", []):
         seen = {}
@@ -145,3 +163,18 @@ def unmapped_activities(activities, directory=REFERENCE_DIR):
     renamed Activity in Teamwork visible instead of silently ungrouped."""
     mapped = {r["activity"] for r in load_reference_rows(ACTIVITY_GROUPS_TABLE, directory)}
     return sorted({a for a in activities if a is not None} - mapped)
+
+
+def activity_color_mismatches(teamwork_colors, directory=REFERENCE_DIR):
+    """Activities whose tw_color in the CSV differs from Teamwork's live colour.
+    `teamwork_colors` is {activity: "#rrggbb"} from the custom field's options.
+    Compared case-insensitively, since #BBA1FF and #bba1ff are the same colour.
+    Activities absent from either side are unmapped_activities' concern."""
+    mismatches = []
+    for row in load_reference_rows(ACTIVITY_GROUPS_TABLE, directory):
+        live = teamwork_colors.get(row["activity"])
+        if live and live.lower() != row["tw_color"].lower():
+            mismatches.append(
+                {"activity": row["activity"], "teamwork": live, "reference": row["tw_color"]}
+            )
+    return mismatches

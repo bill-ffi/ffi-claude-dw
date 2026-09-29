@@ -348,6 +348,21 @@ def find_custom_field_by_name(custom_fields, name):
     return None
 
 
+def build_option_color_map(custom_field):
+    """Maps a dropdown custom field's option label -> its Teamwork colour
+    ("#4461d7"). Options without a colour are left out."""
+    options = custom_field.get("options")
+    choices = options.get("choices") or [] if isinstance(options, dict) else (options or [])
+    colors = {}
+    for opt in choices:
+        if not isinstance(opt, dict):
+            continue
+        label = opt.get("label") or opt.get("name") or opt.get("value")
+        if label is not None and opt.get("color"):
+            colors[label] = opt["color"]
+    return colors
+
+
 def build_option_label_map(custom_field):
     """Maps a dropdown custom field's option key -> display label.
 

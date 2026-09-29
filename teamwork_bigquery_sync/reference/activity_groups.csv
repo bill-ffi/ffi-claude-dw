@@ -1,14 +1,14 @@
-activity_group,ag_sort,activity,activity_sort
-Advisory,1,ADVISORY,1
-Advisory,1,FP&A,2
-Advisory,1,HR,3
-Books,2,A/P & EXP,4
-Books,2,A/R & INV,5
-Books,2,BANK RECS,6
-Books,2,BOOKS / GL,7
-Books,2,REVnCOGS,8
-Client Management,3,CLIENT MNGMT,9
-Controlling,4,CONTROLLING,10
-Payroll,6,COMPLIANCE,11
-Payroll,6,PAYROLL,12
-Projects,7,PROJECTS,13
+activity_group,ag_sort,activity,activity_sort,tw_color
+Advisory,10,ADVISORY,10,#bba1ff
+Advisory,10,FP&A,20,#bba1ff
+Advisory,10,HR,30,#4ecd97
+Books,20,A/P & EXP,40,#4461d7
+Books,20,A/R & INV,50,#4461d7
+Books,20,BANK RECS,60,#4461d7
+Books,20,BOOKS / GL,70,#4461d7
+Books,20,REVnCOGS,80,#4461d7
+Client Management,30,CLIENT MNGMT,90,#bba1ff
+Controlling,40,CONTROLLING,100,#4461d7
+Payroll,50,COMPLIANCE,110,#ffc63c
+Payroll,50,PAYROLL,120,#4ecd97
+Projects,60,PROJECTS,130,#bba1ff

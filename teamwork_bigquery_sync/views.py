@@ -34,6 +34,13 @@ import logging
 
 from reference_data import ACTIVITY_GROUPS_TABLE
 
+# What activity_group shows for time or tasks with NO Activity at all
+# (confirmed 2026-09-29), and where it sorts: after every real group, since
+# reference sorts step by 10. The activity column itself stays NULL, so
+# has_activity and the missing-Activity exception rules are unaffected.
+MISSING_ACTIVITY_GROUP = "Missing"
+MISSING_ACTIVITY_SORT = 999
+
 logger = logging.getLogger(__name__)
 
 # The project categories that make up "all of the billable projects we are
@@ -235,6 +242,19 @@ def build_view_sql(project_id, dataset):
     # loaded by reference_data.py before the views). Unique on activity --
     # validated at load -- so joining it cannot fan out a row.
     activity_groups = fqn(ACTIVITY_GROUPS_TABLE)
+
+    def activity_group_cols(alias):
+        """The grouping/sort/colour columns for `alias`.activity, joined as `ag`.
+        No Activity at all reads 'Missing' and sorts last. An Activity that is
+        present but absent from the reference file stays NULL -- a different
+        problem, which the sync reports as unmapped_activities."""
+        missing = f"{alias}.activity IS NULL"
+        return (
+            f"CASE WHEN {missing} THEN '{MISSING_ACTIVITY_GROUP}' ELSE ag.activity_group END AS activity_group,\n"
+            f"  CASE WHEN {missing} THEN {int(MISSING_ACTIVITY_SORT)} ELSE ag.ag_sort END AS ag_sort,\n"
+            f"  CASE WHEN {missing} THEN {int(MISSING_ACTIVITY_SORT)} ELSE ag.activity_sort END AS activity_sort,\n"
+            f"  ag.tw_color"
+        )
     users = fqn("users")
 
     monitored = _sql_string_array(MONITORED_CATEGORIES)
@@ -926,12 +946,12 @@ SELECT
   tk.tasklist_id,
   tk.tasklist_name,
   tk.activity,
-  -- Report grouping and sort order for the Activity, from
-  -- reference/activity_groups.csv. NULL when the entry has no Activity, or
-  -- for an Activity missing from that file (the sync warns about the latter).
-  ag.activity_group,
-  ag.ag_sort,
-  ag.activity_sort,
+  -- Report grouping, sort order and Teamwork colour for the Activity, from
+  -- reference/activity_groups.csv. No Activity at all reads 'Missing' --
+  -- which includes time on a task outside the tasks-table scope, whose
+  -- Activity is unknown rather than unset; task_join_status tells the two
+  -- apart. An Activity absent from the file stays NULL (the sync warns).
+  {activity_group_cols("tk")},
   tk.status AS task_status,
   tk.estimate_minutes,
   tk.due_date AS task_due_date,
@@ -1145,9 +1165,7 @@ SELECT
   -- the Activity custom field, with its report grouping and sort order
   t.activity,
   (t.activity IS NOT NULL) AS has_activity,
-  ag.activity_group,
-  ag.ag_sort,
-  ag.activity_sort,
+  {activity_group_cols("t")},
 
   -- estimate
   t.estimate_minutes,
@@ -1628,6 +1646,7 @@ classified AS (
     d.activity_group,
     d.ag_sort,
     d.activity_sort,
+    d.tw_color,
     d.minutes,
     r.pto_day,
     CASE
@@ -1664,6 +1683,7 @@ SELECT
   activity_group,
   ag_sort,
   activity_sort,
+  tw_color,
   SUM(IF(time_class = 'PTO', minutes, 0)) / 60 AS pto_hours,
   -- PTO in days: pto_hours / the person's pto_day (hours one PTO day is worth
   -- for them). Additive, so it sums over any range of days or people. 0 when
@@ -1680,7 +1700,7 @@ SELECT
   SUM(minutes) / 60 AS total_hours,
   COUNT(*) AS time_entry_count
 FROM classified
-GROUP BY log_date, week_start, week_label, user_id, user_name, user_email, company_id, client_name, client_type, activity, activity_group, ag_sort, activity_sort
+GROUP BY log_date, week_start, week_label, user_id, user_name, user_email, company_id, client_name, client_type, activity, activity_group, ag_sort, activity_sort, tw_color
 """
 
     # One row, and the only view here whose subject is the pipeline itself

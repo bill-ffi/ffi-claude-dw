@@ -747,6 +747,7 @@ def enrich_tasks_with_activity(tw_client, rows, tasks_included):
         "field_id": activity_field_id,
         "method": method,
         "options": list(option_labels.values()),
+        "option_colors": transform.build_option_color_map(activity_field),
         "tasks_resolved": resolved,
     }
     if method == "per_task_fallback":
@@ -846,6 +847,24 @@ def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids, allow_s
     except Exception as exc:
         logger.warning("Could not check Activity groups: %s", exc)
         activity_stats["unmapped_activities"] = None
+
+    # The same file carries each Activity's Teamwork colour -- a copy, so it
+    # can go stale when someone recolours an option in Teamwork.
+    try:
+        activity_stats["activity_color_mismatches"] = reference_data.activity_color_mismatches(
+            activity_stats.get("option_colors") or {}
+        )
+        if activity_stats["activity_color_mismatches"]:
+            logger.warning(
+                "tw_color in reference/activity_groups.csv no longer matches Teamwork for: %s",
+                ", ".join(
+                    f"{m['activity']} (Teamwork {m['teamwork']}, file {m['reference']})"
+                    for m in activity_stats["activity_color_mismatches"]
+                ),
+            )
+    except Exception as exc:
+        logger.warning("Could not check Activity colours: %s", exc)
+        activity_stats["activity_color_mismatches"] = None
 
     written = bigquery_sync.truncate_and_load(
         bq_client, dataset_ref, schemas.TASKS_TABLE, schemas.TASKS_SCHEMA, rows,
