@@ -46,12 +46,6 @@ class TestTheRealFile:
         assert sorted({r["ag_sort"] for r in rows}) == [10, 20, 30, 40, 50, 60]
         assert sorted(r["activity_sort"] for r in rows) == list(range(10, 140, 10))
 
-    def test_every_sort_stays_below_the_missing_sort(self):
-        # 'Missing' must sort after every real group and Activity.
-        rows = rd.load_reference_rows(TABLE)
-        top = max(max(r["ag_sort"], r["activity_sort"]) for r in rows)
-        assert top < views.MISSING_ACTIVITY_SORT
-
     def test_colours_match_teamwork_on_2026_09_29(self):
         # The Activity field's option colours from that day's dry run. A
         # snapshot; activity_color_mismatches is what catches later changes.
@@ -230,18 +224,107 @@ class TestOptionColourMap:
         assert transform.build_option_color_map(field) == {"PAYROLL": "#4ecd97"}
 
 
+def _case(body, alias):
+    """(predicate, result) arms plus the ELSE result of `CASE ... END AS alias`."""
+    import re
+    end = re.search(r"\n\s*END AS " + alias + r"\b", body)
+    assert end, alias
+    start = body.rindex("CASE\n", 0, end.start()) + len("CASE\n")
+    arms, default = [], None
+    for line in body[start:end.start()].splitlines():
+        line = line.strip()
+        m = re.fullmatch(r"WHEN (.+) THEN (.+)", line)
+        if m:
+            arms.append((m.group(1), m.group(2)))
+            continue
+        m = re.fullmatch(r"ELSE (.+)", line)
+        assert m, line
+        default = m.group(1)
+    return arms, default
+
+
+def _evaluate(arms, default, row):
+    """SQL NULL semantics for the predicate shapes these CASEs use; anything
+    else fails loudly rather than being guessed at."""
+    import re
+    for predicate, result in arms + [(None, default)]:
+        if predicate is None:
+            hit = True
+        elif m := re.fullmatch(r"\w+\.task_id = (\d+)", predicate):
+            hit = row["task_id"] is not None and row["task_id"] == int(m.group(1))
+        elif re.fullmatch(r"\w+\.activity IS NOT NULL", predicate):
+            hit = row["activity"] is not None
+        elif m := re.fullmatch(r"p\.company_id = (\d+)", predicate):
+            hit = row["company_id"] is not None and row["company_id"] == int(m.group(1))
+        else:
+            raise AssertionError(f"unsupported predicate: {predicate!r}")
+        if hit:
+            if result.startswith("ag."):
+                return row["ref"][result[3:]] if row["ref"] else None
+            return result.strip("'") if result.startswith("'") else int(result)
+
+
+FFI, PTO, CLIENT = 1380118, 47878044, 555
+BANK_RECS = {"activity_group": "Books", "ag_sort": 20, "activity_sort": 60}
+
+
+class TestNoActivityBuckets:
+    """With no Activity to group by: PTO, then Internal (FFI work, where
+    Activity is not tracked), then Missing -- the only one that needs fixing.
+    Confirmed 2026-09-29."""
+
+    @pytest.mark.parametrize("task_id, activity, company, ref, expected", [
+        # PTO first, whatever else is set.
+        (PTO, None, FFI, None, ("PTO", 970, 970)),
+        (PTO, "HR", FFI, {"activity_group": "Advisory", "ag_sort": 10, "activity_sort": 30},
+         ("PTO", 970, 970)),
+        # A real Activity keeps its group -- internal or client.
+        (1, "BANK RECS", FFI, BANK_RECS, ("Books", 20, 60)),
+        (1, "BANK RECS", CLIENT, BANK_RECS, ("Books", 20, 60)),
+        # Internal work with no Activity is expected, task or not.
+        (1, None, FFI, None, ("Internal", 980, 980)),
+        (None, None, FFI, None, ("Internal", 980, 980)),
+        # Client work with no Activity is the gap.
+        (1, None, CLIENT, None, ("Missing", 999, 999)),
+        (None, None, CLIENT, None, ("Missing", 999, 999)),
+        # No client at all is not internal.
+        (1, None, None, None, ("Missing", 999, 999)),
+        # An Activity missing from the reference file stays blank, for the
+        # sync's unmapped_activities check to report -- not relabelled.
+        (1, "NEW THING", CLIENT, None, (None, None, None)),
+    ])
+    @pytest.mark.parametrize("name", ["v_timelog_detail", "v_task_review"])
+    def test_buckets(self, sql, name, task_id, activity, company, ref, expected):
+        row = {"task_id": task_id, "activity": activity, "company_id": company, "ref": ref}
+        got = tuple(_evaluate(*_case(sql[name], col), row)
+                    for col in ("activity_group", "ag_sort", "activity_sort"))
+        assert got == expected
+
+    @pytest.mark.parametrize("name", ["v_timelog_detail", "v_task_review"])
+    def test_group_and_sorts_branch_identically(self, sql, name):
+        # A group and its sorts on different conditions would let a row read
+        # 'Internal' while sorting as 'Missing'.
+        preds = [[p for p, _ in _case(sql[name], col)[0]]
+                 for col in ("activity_group", "ag_sort", "activity_sort")]
+        assert preds[0] == preds[1] == preds[2]
+
+    @pytest.mark.parametrize("name, task", [("v_timelog_detail", "tl"), ("v_task_review", "t")])
+    def test_pto_is_the_time_entrys_own_task(self, sql, name, task):
+        # tl.task_id, not tk.task_id: PTO time must read PTO even though its
+        # task could fall outside the tasks-table scope.
+        assert f"WHEN {task}.task_id = {PTO} THEN 'PTO'" in sql[name]
+
+    def test_special_sorts_follow_every_real_sort(self):
+        rows = rd.load_reference_rows(TABLE)
+        top = max(max(r["ag_sort"], r["activity_sort"]) for r in rows)
+        assert top < views.PTO_ACTIVITY_SORT < views.INTERNAL_ACTIVITY_SORT < views.MISSING_ACTIVITY_SORT
+
+    def test_pto_has_no_colour(self, sql):
+        assert (f"CASE WHEN tl.task_id = {PTO} THEN NULL ELSE ag.tw_color END AS tw_color"
+                in sql["v_timelog_detail"])
+
+
 class TestMissingActivity:
-    """No Activity reads 'Missing' and sorts last -- confirmed 2026-09-29."""
-
-    @pytest.mark.parametrize("name, alias", [("v_timelog_detail", "tk"), ("v_task_review", "t")])
-    def test_missing_label_and_sorts(self, sql, name, alias):
-        body = sql[name]
-        assert (f"CASE WHEN {alias}.activity IS NULL THEN 'Missing' ELSE ag.activity_group END"
-                " AS activity_group,") in body
-        assert f"CASE WHEN {alias}.activity IS NULL THEN 999 ELSE ag.ag_sort END AS ag_sort," in body
-        assert (f"CASE WHEN {alias}.activity IS NULL THEN 999 ELSE ag.activity_sort END"
-                " AS activity_sort,") in body
-
     @pytest.mark.parametrize("name, alias", [("v_timelog_detail", "tk"), ("v_task_review", "t")])
     def test_the_activity_column_itself_is_left_null(self, sql, name, alias):
         # has_activity and the missing-Activity exception rules test

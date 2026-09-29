@@ -129,13 +129,22 @@ class TestRuleConstantsReachTheSql:
 
     def test_task_exemption_applies_only_to_the_long_entry_rule(self, sql):
         """PTO is exempt from the long-entry rule, not hidden account-wide."""
-        # v_user_daily_time_split names the PTO task to CLASSIFY its hours into
-        # pto_hours -- checked separately below that it never filters them out.
+        # Three views name the PTO task to CLASSIFY it -- pto_hours in the time
+        # split, the 'PTO' activity_group in the other two -- checked below
+        # that they only ever label with it, never filter.
         for name, body in sql.items():
-            if name in ("v_exception_long_time_entries", "v_user_daily_time_split"):
+            if name in ("v_exception_long_time_entries", "v_user_daily_time_split",
+                        "v_timelog_detail", "v_task_review"):
                 continue
             for task_id in views.LONG_ENTRY_EXEMPT_TASK_IDS:
                 assert str(task_id) not in body, name
+
+    @pytest.mark.parametrize("name", ["v_timelog_detail", "v_task_review"])
+    def test_activity_group_only_labels_pto(self, sql, name):
+        body = sql[name]
+        for line in body.splitlines():
+            if str(views.PTO_TASK_ID) in line:
+                assert re.match(rf"\s*(CASE )?WHEN \w+\.task_id = {views.PTO_TASK_ID} THEN ", line), line
 
     def test_time_split_classifies_pto_and_never_filters_it(self, sql):
         body = sql["v_user_daily_time_split"]

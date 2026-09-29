@@ -34,10 +34,24 @@ import logging
 
 from reference_data import ACTIVITY_GROUPS_TABLE
 
-# What activity_group shows for time or tasks with NO Activity at all
-# (confirmed 2026-09-29), and where it sorts: after every real group, since
-# reference sorts step by 10. The activity column itself stays NULL, so
-# has_activity and the missing-Activity exception rules are unaffected.
+# What activity_group shows when there is no Activity to group by, and where
+# each sorts: after every real group, since reference sorts step by 10.
+# Confirmed 2026-09-29, tested in this order:
+#   PTO      -- time on (or the task) PTO_TASK_ID, whatever else is set;
+#   (the Activity's own group, from reference/activity_groups.csv, if it has one);
+#   Internal -- FFI (INTERNAL_CLIENT_COMPANY_ID) work with no Activity. Activity
+#               is not tracked for internal time, so this is expected, not a gap;
+#   Missing  -- anything else with no Activity: in practice client work, and
+#               the only one of the three that needs fixing in Teamwork.
+# Before this split, 'Missing' held 5,965h, 95% of it PTO and internal time,
+# which hid the ~280h of client work genuinely lacking an Activity.
+#
+# The activity column itself stays NULL in every case, so has_activity and the
+# missing-Activity exception rules are unaffected.
+PTO_ACTIVITY_GROUP = "PTO"
+PTO_ACTIVITY_SORT = 970
+INTERNAL_ACTIVITY_GROUP = "Internal"
+INTERNAL_ACTIVITY_SORT = 980
 MISSING_ACTIVITY_GROUP = "Missing"
 MISSING_ACTIVITY_SORT = 999
 
@@ -243,18 +257,39 @@ def build_view_sql(project_id, dataset):
     # validated at load -- so joining it cannot fan out a row.
     activity_groups = fqn(ACTIVITY_GROUPS_TABLE)
 
-    def activity_group_cols(alias):
-        """The grouping/sort/colour columns for `alias`.activity, joined as `ag`.
-        No Activity at all reads 'Missing' and sorts last. An Activity that is
-        present but absent from the reference file stays NULL -- a different
-        problem, which the sync reports as unmapped_activities."""
-        missing = f"{alias}.activity IS NULL"
-        return (
-            f"CASE WHEN {missing} THEN '{MISSING_ACTIVITY_GROUP}' ELSE ag.activity_group END AS activity_group,\n"
-            f"  CASE WHEN {missing} THEN {int(MISSING_ACTIVITY_SORT)} ELSE ag.ag_sort END AS ag_sort,\n"
-            f"  CASE WHEN {missing} THEN {int(MISSING_ACTIVITY_SORT)} ELSE ag.activity_sort END AS activity_sort,\n"
-            f"  ag.tw_color"
-        )
+    def activity_group_cols(activity, task_id, company_id):
+        """The grouping/sort/colour columns, from the reference table joined as
+        `ag`, with PTO / Internal / Missing when there is no Activity to group
+        by (see PTO_ACTIVITY_GROUP above for the order and why).
+
+        An Activity that is present but absent from the reference file falls
+        into the second branch and reads NULL -- a different problem, which the
+        sync reports as unmapped_activities.
+
+        All three expressions branch on the SAME conditions in the same order,
+        so a row's group and its sorts always describe one bucket.
+        """
+        def case(alias, pto, grouped, internal, missing):
+            return (
+                "CASE\n"
+                f"    WHEN {task_id} = {int(PTO_TASK_ID)} THEN {pto}\n"
+                f"    WHEN {activity} IS NOT NULL THEN {grouped}\n"
+                f"    WHEN {company_id} = {int(INTERNAL_CLIENT_COMPANY_ID)} THEN {internal}\n"
+                f"    ELSE {missing}\n"
+                f"  END AS {alias}"
+            )
+        return ",\n  ".join([
+            case("activity_group", f"'{PTO_ACTIVITY_GROUP}'", "ag.activity_group",
+                 f"'{INTERNAL_ACTIVITY_GROUP}'", f"'{MISSING_ACTIVITY_GROUP}'"),
+            case("ag_sort", int(PTO_ACTIVITY_SORT), "ag.ag_sort",
+                 int(INTERNAL_ACTIVITY_SORT), int(MISSING_ACTIVITY_SORT)),
+            case("activity_sort", int(PTO_ACTIVITY_SORT), "ag.activity_sort",
+                 int(INTERNAL_ACTIVITY_SORT), int(MISSING_ACTIVITY_SORT)),
+            # A colour only for a real Activity group. With no Activity the
+            # reference join finds nothing, so ag.tw_color is already NULL;
+            # only PTO needs blanking, in case its task ever gains an Activity.
+            f"CASE WHEN {task_id} = {int(PTO_TASK_ID)} THEN NULL ELSE ag.tw_color END AS tw_color",
+        ])
     users = fqn("users")
 
     monitored = _sql_string_array(MONITORED_CATEGORIES)
@@ -947,11 +982,12 @@ SELECT
   tk.tasklist_name,
   tk.activity,
   -- Report grouping, sort order and Teamwork colour name for the Activity, from
-  -- reference/activity_groups.csv. No Activity at all reads 'Missing' --
-  -- which includes time on a task outside the tasks-table scope, whose
-  -- Activity is unknown rather than unset; task_join_status tells the two
-  -- apart. An Activity absent from the file stays NULL (the sync warns).
-  {activity_group_cols("tk")},
+  -- reference/activity_groups.csv. With no Activity: 'PTO', 'Internal' (FFI
+  -- work) or 'Missing' (anything else -- see PTO_ACTIVITY_GROUP in views.py).
+  -- 'Missing' includes client time on a task outside the tasks-table scope,
+  -- whose Activity is unknown rather than unset; task_join_status tells the
+  -- two apart. An Activity absent from the file stays NULL (the sync warns).
+  {activity_group_cols("tk.activity", "tl.task_id", "p.company_id")},
   tk.status AS task_status,
   tk.estimate_minutes,
   tk.due_date AS task_due_date,
@@ -1165,7 +1201,7 @@ SELECT
   -- the Activity custom field, with its report grouping and sort order
   t.activity,
   (t.activity IS NOT NULL) AS has_activity,
-  {activity_group_cols("t")},
+  {activity_group_cols("t.activity", "t.task_id", "p.company_id")},
 
   -- estimate
   t.estimate_minutes,
