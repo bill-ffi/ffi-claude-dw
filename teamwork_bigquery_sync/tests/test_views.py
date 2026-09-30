@@ -1669,8 +1669,10 @@ class TestClientActivityAnalysis:
         assert (f"DATE_SUB(DATE_TRUNC(CURRENT_DATE('{tz}'), MONTH), INTERVAL 3 MONTH)"
                 " AS window_start") in body
         assert f"DATE_TRUNC(CURRENT_DATE('{tz}'), MONTH) AS window_end_exclusive" in body
-        assert "d.log_month < b.window_end_exclusive" in body
-        assert "m.month_start < b.window_end_exclusive" in body
+        # Both ends on BOTH sides: revenue and budget must cover the same
+        # months, or the average budget would span all history.
+        assert "WHERE d.log_month >= b.window_start\n    AND d.log_month < b.window_end_exclusive" in body
+        assert "WHERE m.month_start >= b.window_start\n    AND m.month_start < b.window_end_exclusive" in body
         assert "<= b.window_end_exclusive" not in body
 
     def test_threshold_is_total_revenue_at_least_6000(self, sql):
