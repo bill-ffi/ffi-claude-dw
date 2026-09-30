@@ -32,7 +32,9 @@ Update the constants below (not the SQL) if any of these lists change.
 
 import logging
 
-from reference_data import ACTIVITY_GROUPS_TABLE
+import re
+
+from reference_data import ACTIVITY_GROUPS_TABLE, load_reference_rows
 
 # What activity_group shows when there is no Activity to group by, and where
 # each sorts: after every real group, since reference sorts step by 10.
@@ -203,6 +205,12 @@ DATA_FRESHNESS_STALE_AFTER_HOURS = 18
 # --backfill-months; lower it only if earlier history is actually loaded.
 CLIENT_MONTH_HISTORY_FLOOR = "2026-01-01"
 
+# v_client_activity_analysis: clients with at least this much billable revenue
+# in TOTAL over the last CLIENT_ACTIVITY_MONTHS complete calendar months (not
+# per month), and the length of that window (confirmed 2026-09-30).
+CLIENT_ACTIVITY_MIN_REVENUE = 6000
+CLIENT_ACTIVITY_MONTHS = 3
+
 # The Teamwork company id of the one client whose time v_user_daily_time_split
 # counts as INTERNAL: Forward Financial Intelligence, Inc. (confirmed
 # 2026-09-24). Every other client is external work, split into billable and CNB
@@ -230,6 +238,7 @@ VIEW_NAMES = [
     "v_task_review",
     "v_project_detail",
     "v_client_month",
+    "v_client_activity_analysis",
     "v_user_daily_time_split",
     "v_data_freshness",
 ]
@@ -237,6 +246,33 @@ VIEW_NAMES = [
 
 def _sql_string_array(values):
     return "[" + ", ".join("'" + v.replace("'", "\\'") + "'" for v in values) + "]"
+
+
+def _column_slug(label):
+    """'Client Management' -> 'client_management', for generated column names."""
+    slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+    if not slug:
+        raise ValueError(f"cannot make a column name from {label!r}")
+    return slug
+
+
+def activity_revenue_columns():
+    """[(column_suffix, activity_group_label), ...] for v_client_activity_analysis:
+    one per group in reference/activity_groups.csv, in ag_sort order, then
+    'Missing' (client work with no Activity). Built from the reference file at
+    --create-views time -- the same file that run loads into ref_activity_groups
+    -- so a new group gets its own column without a code change. Renaming a
+    group renames its column, which breaks any Looker chart using the old name.
+    """
+    sort_by_group = {}
+    for row in load_reference_rows(ACTIVITY_GROUPS_TABLE):
+        sort_by_group[row["activity_group"]] = row["ag_sort"]
+    groups = sorted(sort_by_group, key=sort_by_group.get) + [MISSING_ACTIVITY_GROUP]
+    columns = [(_column_slug(g), g) for g in groups]
+    slugs = [c for c, _ in columns]
+    if len(set(slugs)) != len(slugs) or "ungrouped" in slugs:
+        raise ValueError(f"activity groups collide as column names: {slugs}")
+    return columns
 
 
 def _sql_int_array(values):
@@ -1588,6 +1624,94 @@ FROM client_month_budget b
 FULL OUTER JOIN client_month_actuals a
   ON a.client_name = b.client_name
  AND a.month_start = b.month_start
+"""
+
+    # Client activity analysis: one row per client with at least
+    # CLIENT_ACTIVITY_MIN_REVENUE of billable revenue over the last
+    # CLIENT_ACTIVITY_MONTHS COMPLETE calendar months -- the current month is
+    # never in the window, so a figure does not move while the month is open.
+    # For each: the average monthly budget, average monthly billable revenue,
+    # and that average split by activity group.
+    #
+    # ONE ROW PER CLIENT, groups as columns, deliberately. A row per client x
+    # group would repeat the client's budget and total on every group row, and
+    # Looker SUMs them. Here every column is additive, so a total row or a
+    # scorecard over several clients is correct. The group columns always sum
+    # to avg_monthly_revenue: one per reference group, one for 'Missing'
+    # (client work with no Activity), and avg_revenue_ungrouped for an Activity
+    # absent from the reference file (the sync reports those), so no revenue
+    # can fall between the columns.
+    #
+    # Averages divide by the full window even for a month with no revenue: a
+    # client billed $9k in one month of three averaged $3k a month.
+    #
+    # The budget is v_client_month's monthly_budget averaged over the SAME
+    # months, so it inherits that view's rules (budgeted projects only, bounded
+    # by project start and end dates) rather than restating them. Joined by
+    # client_name, as v_client_month is keyed; a client with no budget keeps
+    # its row with a budget of 0.
+    #
+    # FFI (INTERNAL_CLIENT_COMPANY_ID) is excluded: it is internal, not a
+    # client. IS DISTINCT FROM, so a project with no company is not dropped by
+    # a NULL comparison -- though it has no client_name and is excluded anyway.
+    #
+    # Built on v_timelog_detail and v_client_month; created after both.
+    months = int(CLIENT_ACTIVITY_MONTHS)
+    group_columns = activity_revenue_columns()
+    known_groups = _sql_string_array([g for _, g in group_columns])
+    group_sums = "".join(
+        f"    SUM(IF(d.activity_group = '{g.replace(chr(39), chr(92) + chr(39))}', d.billable_amount, 0)) AS revenue_{slug},\n"
+        for slug, g in group_columns
+    )
+    group_avgs = "".join(
+        f"  r.revenue_{slug} / {months} AS avg_revenue_{slug},\n" for slug, _ in group_columns
+    )
+    views["v_client_activity_analysis"] = f"""
+CREATE OR REPLACE VIEW {fqn("v_client_activity_analysis")} AS
+WITH bounds AS (
+  SELECT
+    DATE_SUB(DATE_TRUNC(CURRENT_DATE('{REPORTING_TIMEZONE}'), MONTH), INTERVAL {months} MONTH) AS window_start,
+    DATE_TRUNC(CURRENT_DATE('{REPORTING_TIMEZONE}'), MONTH) AS window_end_exclusive
+),
+revenue AS (
+  SELECT
+    d.client_name,
+    SUM(d.billable_amount) AS total_revenue,
+    SUM(IF(d.is_billable IS TRUE, d.minutes, 0)) / 60 AS billable_hours,
+{group_sums}    SUM(IF(d.activity_group IS NULL OR d.activity_group NOT IN UNNEST({known_groups}), d.billable_amount, 0)) AS revenue_ungrouped
+  FROM {fqn("v_timelog_detail")} d
+  CROSS JOIN bounds b
+  WHERE d.log_month >= b.window_start
+    AND d.log_month < b.window_end_exclusive
+    AND d.client_name IS NOT NULL
+    AND d.company_id IS DISTINCT FROM {int(INTERNAL_CLIENT_COMPANY_ID)}
+  GROUP BY d.client_name
+),
+budget AS (
+  SELECT m.client_name, SUM(m.monthly_budget) AS total_budget
+  FROM {fqn("v_client_month")} m
+  CROSS JOIN bounds b
+  WHERE m.month_start >= b.window_start
+    AND m.month_start < b.window_end_exclusive
+  GROUP BY m.client_name
+)
+SELECT
+  r.client_name,
+  b.window_start,
+  DATE_SUB(b.window_end_exclusive, INTERVAL 1 DAY) AS window_end,
+  CONCAT(
+    FORMAT_DATE('%Y-%m', b.window_start), ' to ',
+    FORMAT_DATE('%Y-%m', DATE_SUB(b.window_end_exclusive, INTERVAL 1 MONTH))
+  ) AS window_label,
+  COALESCE(bu.total_budget, 0) / {months} AS avg_monthly_budget,
+  r.total_revenue / {months} AS avg_monthly_revenue,
+  r.total_revenue AS total_revenue,
+  r.billable_hours / {months} AS avg_monthly_billable_hours,
+{group_avgs}  r.revenue_ungrouped / {months} AS avg_revenue_ungrouped
+FROM revenue r
+CROSS JOIN bounds b
+LEFT JOIN budget bu ON bu.client_name = r.client_name
+WHERE r.total_revenue >= {int(CLIENT_ACTIVITY_MIN_REVENUE)}
 """
 
     # One row per logged date x user x client x Activity, with the hours split

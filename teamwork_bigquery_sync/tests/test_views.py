@@ -1640,3 +1640,115 @@ class TestTimeSplitPtoInDays:
                 "    WHEN SUM(IF(time_class = 'PTO', minutes, 0)) = 0 THEN 0\n"
                 "    ELSE SUM(IF(time_class = 'PTO', minutes, 0)) / 60 / NULLIF(MAX(pto_day), 0)\n"
                 "  END AS pto_in_days,\n") in body
+
+
+class TestClientActivityAnalysis:
+    """Clients with >= $6k billable revenue over the last three COMPLETE
+    months, one row each: average monthly budget and revenue, and revenue by
+    activity group as columns. Confirmed 2026-09-30."""
+
+    NAME = "v_client_activity_analysis"
+
+    def test_created_after_both_views_it_reads(self, sql):
+        order = list(sql)
+        assert order.index("v_timelog_detail") < order.index(self.NAME)
+        assert order.index("v_client_month") < order.index(self.NAME)
+
+    def test_reads_the_base_views_not_raw_tables(self, sql):
+        body = sql[self.NAME]
+        assert f"FROM `{PROJECT}.{DATASET}.v_timelog_detail` d" in body
+        assert f"FROM `{PROJECT}.{DATASET}.v_client_month` m" in body
+        for raw in ("timelogs", "projects", "tasks", "users"):
+            assert f"`{PROJECT}.{DATASET}.{raw}`" not in body, raw
+
+    def test_window_is_the_last_three_complete_months(self, sql):
+        # Ends at the start of the CURRENT month (exclusive), so the open month
+        # is never included; reporting-timezone "today", never UTC.
+        body = sql[self.NAME]
+        tz = views.REPORTING_TIMEZONE
+        assert (f"DATE_SUB(DATE_TRUNC(CURRENT_DATE('{tz}'), MONTH), INTERVAL 3 MONTH)"
+                " AS window_start") in body
+        assert f"DATE_TRUNC(CURRENT_DATE('{tz}'), MONTH) AS window_end_exclusive" in body
+        assert "d.log_month < b.window_end_exclusive" in body
+        assert "m.month_start < b.window_end_exclusive" in body
+        assert "<= b.window_end_exclusive" not in body
+
+    def test_threshold_is_total_revenue_at_least_6000(self, sql):
+        assert views.CLIENT_ACTIVITY_MIN_REVENUE == 6000
+        assert views.CLIENT_ACTIVITY_MONTHS == 3
+        assert sql[self.NAME].rstrip().endswith("WHERE r.total_revenue >= 6000")
+
+    def test_averages_divide_by_the_whole_window(self, sql):
+        # A month with no revenue still counts: $9k in one month of three is
+        # $3k a month, not $9k.
+        body = sql[self.NAME]
+        averages = re.findall(r"/ (\d+) AS (avg_\w+)", body)
+        assert averages and all(n == "3" for n, _ in averages), averages
+        assert "COUNT(DISTINCT" not in body
+
+    def test_ffi_is_excluded_null_safely(self, sql):
+        assert f"AND d.company_id IS DISTINCT FROM {views.INTERNAL_CLIENT_COMPANY_ID}" in sql[self.NAME]
+
+    def test_clients_without_a_budget_keep_their_row(self, sql):
+        body = sql[self.NAME]
+        assert "\nLEFT JOIN budget bu ON bu.client_name = r.client_name\n" in body
+        assert "COALESCE(bu.total_budget, 0) / 3 AS avg_monthly_budget" in body
+
+    def test_one_column_per_reference_group_plus_missing(self, sql):
+        body = sql[self.NAME]
+        groups = re.findall(r"SUM\(IF\(d\.activity_group = '([^']+)', d\.billable_amount, 0\)\)", body)
+        reference = []
+        for row in views.load_reference_rows(views.ACTIVITY_GROUPS_TABLE):
+            if row["activity_group"] not in reference:
+                reference.append(row["activity_group"])
+        assert groups == reference + [views.MISSING_ACTIVITY_GROUP]
+
+    def test_group_columns_always_sum_to_the_total(self, sql):
+        # Every billable dollar lands in exactly one column: the named groups,
+        # or ungrouped for anything outside them (an unmapped Activity). The
+        # ungrouped list must be exactly the named ones, or revenue could fall
+        # between columns or be counted twice.
+        body = sql[self.NAME]
+        named = re.findall(r"SUM\(IF\(d\.activity_group = '([^']+)', d\.billable_amount, 0\)\)", body)
+        ungrouped = re.search(
+            r"SUM\(IF\(d\.activity_group IS NULL OR d\.activity_group NOT IN UNNEST\(\[([^\]]*)\]\), "
+            r"d\.billable_amount, 0\)\) AS revenue_ungrouped", body)
+        assert ungrouped, "revenue_ungrouped is missing or reshaped"
+        listed = re.findall(r"'([^']+)'", ungrouped.group(1))
+        assert sorted(listed) == sorted(named)
+        assert "SUM(d.billable_amount) AS total_revenue" in body
+
+    def test_every_revenue_sum_has_an_average_column(self, sql):
+        body = sql[self.NAME]
+        sums = re.findall(r"AS revenue_(\w+)", body)
+        avgs = re.findall(r"r\.revenue_(\w+) / 3 AS avg_revenue_(\w+)", body)
+        assert sorted(sums) == sorted(a for a, _ in avgs)
+        assert all(a == b for a, b in avgs)
+
+
+class TestActivityRevenueColumns:
+    def test_slugs(self):
+        assert views._column_slug("Client Management") == "client_management"
+        assert views._column_slug("A/R & Inv.") == "a_r_inv"
+
+    def test_follows_ag_sort_then_missing(self):
+        cols = views.activity_revenue_columns()
+        assert cols[0] == ("advisory", "Advisory")
+        assert cols[-1] == ("missing", "Missing")
+
+    def test_colliding_group_names_are_refused(self, monkeypatch):
+        # 'Client-Management' and 'Client Management' would both become
+        # client_management; BigQuery would reject the view, or worse.
+        rows = [
+            {"activity_group": "Client Management", "ag_sort": 10},
+            {"activity_group": "Client-Management", "ag_sort": 20},
+        ]
+        monkeypatch.setattr(views, "load_reference_rows", lambda name: rows)
+        with pytest.raises(ValueError, match="collide"):
+            views.activity_revenue_columns()
+
+    def test_a_group_named_ungrouped_is_refused(self, monkeypatch):
+        monkeypatch.setattr(views, "load_reference_rows",
+                            lambda name: [{"activity_group": "Ungrouped", "ag_sort": 10}])
+        with pytest.raises(ValueError, match="collide"):
+            views.activity_revenue_columns()
