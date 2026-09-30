@@ -59,6 +59,18 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
   occurrences of a recurring task share the same `sequence_id`; `NULL` for
   non-recurring tasks. No extra API call needed, it rides on the normal
   tasks pull.
+- **`timelogs.is_oosoob`** / **`timelogs.tag_ids`** (added 2026-09-30): the
+  time entry's own Teamwork tags, and whether one of them is **OOSOOB**
+  ("out of scope, out of budget", tag id **395371**, `transform.OOSOOB_TAG_ID`).
+  Matched by id, so renaming the tag cannot switch the flag off; a tag on the
+  entry's *task* deliberately does not count. `time.json` already returns
+  `tagIds` on tagged entries (and omits it on untagged ones), so this costs no
+  extra pull. Each timelogs window also asks Teamwork for its own count of
+  entries carrying the tag (`time.json?tagIds=395371` — the bracketed
+  `tagIds[]=` form is silently ignored) and reports both numbers as `oosoob`
+  in that stage of `RUN_SUMMARY`, warning if they differ. **Months not re-pulled
+  since the column was added read `is_oosoob` = NULL (unknown), not FALSE,**
+  until `--backfill-months` fills them. Exposed in `v_timelog_detail`.
 - **`tasks.activity`**: the "Activity" preset-list custom field, resolved to
   its option label. Pulled in bulk at zero extra API cost via
   `tasks.json?includeCustomFields=true` (confirmed real via Teamwork's own
@@ -1218,6 +1230,17 @@ leaves GCP).
 
 ## Known gaps / things to verify before relying on this
 
+- **Adding a column to an existing table (added 2026-09-30, with
+  `is_oosoob`).** `ensure_table()` only ever created *missing* tables, so a
+  column added to a schema never reached a table that already existed — and
+  the timelogs replace `INSERT`s every schema column by name, so the next sync
+  would have failed. `bigquery_sync.ensure_table_columns()` now runs for every
+  table on every run and adds whatever columns the table lacks. BigQuery only
+  allows adding NULLABLE or REPEATED columns (old rows read NULL / `[]`), so a
+  new REQUIRED column is refused with a clear error rather than attempted. It
+  never drops or alters a column. A new column on `timelogs` is only filled
+  for months a sync re-pulls afterwards — backfill the rest.
+
 - **Every table and view was set to delete itself after 60 days (fixed
   2026-09-26).** The dataset carried a default table expiration of 60 days —
   set outside this pipeline, which never sets one — so every object got a
@@ -2061,7 +2084,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-496 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
+519 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
