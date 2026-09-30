@@ -429,6 +429,27 @@ def run_dry_run(client):
         any_failed = True
         print(f"[FAIL] former-staff diagnostic — {exc}")
 
+    # OOSOOB tag diagnostic. is_oosoob matches transform.OOSOOB_TAG_ID, so
+    # confirm that id still exists and still carries the expected name, and
+    # show how many entries carry it. Informational: nothing sets any_failed.
+    print("\n--- OOSOOB tag diagnostic ---")
+    try:
+        tag = next((t for t in client.list_tags()
+                    if t.get("id") == transform.OOSOOB_TAG_ID), None)
+        if tag is None:
+            print(f"     WARNING: tag id {transform.OOSOOB_TAG_ID} not found -- is_oosoob "
+                  "will be FALSE everywhere. Was the tag deleted and recreated?")
+        else:
+            print(f"[OK] tag {transform.OOSOOB_TAG_ID} is named {tag.get('name')!r}")
+            if tag.get("name") != "OOSOOB":
+                print("     WARNING: renamed. The flag still follows the id; update "
+                      "transform.OOSOOB_TAG_ID's comment if the meaning changed.")
+        count = client.count_timelogs_with_tag("2026-01-01", date.today().isoformat(),
+                                               transform.OOSOOB_TAG_ID)
+        print(f"     time entries carrying it since 2026-01-01: {count}")
+    except Exception as exc:
+        print(f"     WARNING: OOSOOB diagnostic could not run -- {exc}")
+
     print()
     if any_failed:
         print("One or more checks failed. Fix TEAMWORK_BASE_URL/API key or the")
@@ -914,6 +935,8 @@ def sync_timelogs_for_window(tw_client, bq_client, gcp_project_id, dataset_id, w
         if row is not None:
             rows.append(row)
 
+    oosoob = oosoob_cross_check(tw_client, rows, window_start, last_day_inclusive)
+
     written = bigquery_sync.replace_timelogs_window(
         bq_client,
         gcp_project_id,
@@ -929,7 +952,35 @@ def sync_timelogs_for_window(tw_client, bq_client, gcp_project_id, dataset_id, w
         **fill_rate_report(schemas.TIMELOGS_TABLE, rows),
         "window": [window_start.isoformat(), window_end_exclusive.isoformat()],
         "months_covered": _months_in_window(window_start, window_end_exclusive),
+        "oosoob": oosoob,
     }
+
+
+def oosoob_cross_check(tw_client, rows, window_start, last_day_inclusive):
+    """{"marked": entries this pull flagged is_oosoob, "teamwork_count":
+    Teamwork's own count of entries carrying the tag in the same window}.
+
+    The flag is derived from the tagIds on each pulled entry; this asks
+    Teamwork the same question a second, independent way (a tagIds= filter),
+    so a change in how time.json reports tags shows up as a mismatch instead
+    of the flag silently going FALSE everywhere. Informational, never fatal;
+    teamwork_count is None if that request fails.
+    """
+    marked = sum(1 for row in rows if row.get("is_oosoob"))
+    try:
+        teamwork_count = tw_client.count_timelogs_with_tag(
+            window_start.isoformat(), last_day_inclusive.isoformat(), transform.OOSOOB_TAG_ID
+        )
+    except Exception as exc:
+        logger.warning("Could not cross-check OOSOOB against Teamwork: %s", exc)
+        teamwork_count = None
+    if teamwork_count is not None and teamwork_count != marked:
+        logger.warning(
+            "OOSOOB mismatch for %s to %s: %d entries flagged from tagIds, but "
+            "Teamwork counts %d carrying tag %d. Check time.json's tag fields.",
+            window_start, last_day_inclusive, marked, teamwork_count, transform.OOSOOB_TAG_ID,
+        )
+    return {"marked": marked, "teamwork_count": teamwork_count}
 
 
 def warn_on_table_expirations(report, dataset_path):

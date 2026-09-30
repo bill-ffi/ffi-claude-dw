@@ -70,6 +70,7 @@ CUSTOM_FIELDS_PATH = "/projects/api/v3/customfields.json"
 TASK_CUSTOM_FIELDS_PATH_TEMPLATE = "/projects/api/v3/tasks/{task_id}/customfields.json"
 PROJECT_CATEGORIES_PATH = "/projects/api/v3/projectcategories.json"
 COMPANIES_PATH = "/projects/api/v3/companies.json"
+TAGS_PATH = "/projects/api/v3/tags.json"
 
 # How many task-custom-field-value requests to have in flight at once when
 # fetching per-task (no bulk endpoint exists for this). Kept modest given
@@ -403,6 +404,23 @@ class TeamworkClient:
         """
         params = {"startDate": start_date, "endDate": end_date}
         return list(self._paginate(TIMELOGS_PATH, params, "timelogs"))
+
+    def list_tags(self):
+        """Every tag on the account ({"id", "name", "projectId", ...}); item key
+        "tags", confirmed live 2026-09-30."""
+        return list(self._paginate(TAGS_PATH, {}, "tags"))
+
+    def count_timelogs_with_tag(self, start_date, end_date, tag_id):
+        """How many time entries in [start_date, end_date] (inclusive, same
+        semantics as list_timelogs) carry `tag_id`, from meta.page.count at
+        pageSize=1 -- one request, no rows. Confirmed live 2026-09-30: time.json
+        honours `tagIds=<id>` (263 OOSOOB entries of 28,217 since January) and
+        silently ignores `tagIds[]=`. Returns None if no count comes back."""
+        payload = self._get(TIMELOGS_PATH, {
+            "startDate": start_date, "endDate": end_date,
+            "tagIds": str(tag_id), "page": 1, "pageSize": 1,
+        })
+        return ((payload.get("meta") or {}).get("page") or {}).get("count")
 
     def list_project_budgets(self):
         return list(self._paginate(PROJECT_BUDGETS_PATH, {}, "budgets"))

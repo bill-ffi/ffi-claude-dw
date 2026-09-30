@@ -278,12 +278,33 @@ def normalize_task(raw, in_scope_project_ids, base_url=None):
     }
 
 
+# Teamwork's "OOSOOB" tag -- "out of scope, out of budget" -- confirmed
+# 2026-09-30 by the dry-run discovery: id 395371, site-wide, and returned on
+# time entries as tagIds. Matched by id, not name, so renaming the tag in
+# Teamwork cannot silently switch the flag off; the dry run reports the name
+# this id currently carries. Only the time entry's OWN tags count: a tag on
+# the task is a different thing and deliberately ignored (confirmed that day).
+OOSOOB_TAG_ID = 395371
+
+
+def timelog_tag_ids(raw):
+    """Sorted, de-duplicated tag ids on a time entry. time.json sends
+    `tagIds`, plus a `tags` list of {"id", "type"} refs, and omits both when
+    the entry has no tags -- which is why an untagged sample showed no tag
+    field at all."""
+    ids = raw.get("tagIds")
+    if ids is None:
+        ids = [_ref_id(t) for t in raw.get("tags") or []]
+    return sorted({int(i) for i in ids if i is not None})
+
+
 def normalize_timelog(raw):
     if raw.get("deleted") or raw.get("deletedAt"):
         return None
 
     minutes = raw.get("minutes")
     logged_at = raw.get("timeLogged")
+    tag_ids = timelog_tag_ids(raw)
 
     return {
         "timelog_id": raw["id"],
@@ -305,6 +326,8 @@ def normalize_timelog(raw):
         "created_at": raw.get("createdAt") or raw.get("dateCreated"),
         "updated_at": raw.get("updatedAt") or raw.get("dateEdited"),
         "synced_at": utc_now_iso(),
+        "tag_ids": tag_ids,
+        "is_oosoob": OOSOOB_TAG_ID in tag_ids,
     }
 
 

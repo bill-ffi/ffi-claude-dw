@@ -101,6 +101,15 @@ TIMELOGS_SCHEMA = [
     bigquery.SchemaField("created_at", "TIMESTAMP"),
     bigquery.SchemaField("updated_at", "TIMESTAMP"),
     bigquery.SchemaField("synced_at", "TIMESTAMP", mode="REQUIRED"),
+    # Tags on the time entry itself (not its task), as Teamwork tag ids, and
+    # the one tag reports filter on. Added 2026-09-30; appended last so the
+    # column-adding migration (bigquery_sync.ensure_table_columns) leaves the
+    # table's columns in schema order. Both are nullable/repeated, as any
+    # column added to an existing table must be. Rows in months not yet
+    # re-pulled since then read tag_ids = [] and is_oosoob = NULL (unknown),
+    # never FALSE -- see transform.OOSOOB_TAG_ID.
+    bigquery.SchemaField("tag_ids", "INT64", mode="REPEATED"),
+    bigquery.SchemaField("is_oosoob", "BOOL"),
 ]
 
 USERS_SCHEMA = [

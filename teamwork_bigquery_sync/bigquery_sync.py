@@ -81,12 +81,45 @@ def ensure_table(client, dataset_ref, table_name, schema):
     return table_ref
 
 
+def ensure_table_columns(client, dataset_ref, table_name, schema):
+    """Adds any column in `schema` that the existing table lacks, and returns
+    the names added ([] when nothing changed).
+
+    ensure_table() only creates a MISSING table (exists_ok), so a column
+    added to a schema never reached an existing table -- and the timelogs
+    replace INSERTs every schema column by name, so it would fail outright.
+    BigQuery can add a column in place, but only a NULLABLE or REPEATED one:
+    old rows read NULL / [] for it. A new REQUIRED column is refused here
+    rather than attempted. Never removes or alters an existing column.
+    """
+    table = client.get_table(dataset_ref.table(table_name))
+    existing = {field.name for field in table.schema}
+    missing = [field for field in schema if field.name not in existing]
+    if not missing:
+        return []
+    required = [field.name for field in missing if field.mode == "REQUIRED"]
+    if required:
+        raise ValueError(
+            f"Cannot add REQUIRED column(s) {required} to existing table {table_name}; "
+            "make them NULLABLE or REPEATED."
+        )
+    table.schema = list(table.schema) + missing
+    client.update_table(table, ["schema"])
+    added = [field.name for field in missing]
+    logger.info("Added column(s) %s to %s", ", ".join(added), table_name)
+    return added
+
+
 def ensure_all_tables(client, dataset_ref):
-    ensure_table(client, dataset_ref, PROJECTS_TABLE, PROJECTS_SCHEMA)
-    ensure_table(client, dataset_ref, TASKS_TABLE, TASKS_SCHEMA)
-    ensure_table(client, dataset_ref, TIMELOGS_TABLE, TIMELOGS_SCHEMA)
-    ensure_table(client, dataset_ref, TIMELOGS_STAGING_TABLE, TIMELOGS_SCHEMA)
-    ensure_table(client, dataset_ref, USERS_TABLE, USERS_SCHEMA)
+    for table_name, schema in (
+        (PROJECTS_TABLE, PROJECTS_SCHEMA),
+        (TASKS_TABLE, TASKS_SCHEMA),
+        (TIMELOGS_TABLE, TIMELOGS_SCHEMA),
+        (TIMELOGS_STAGING_TABLE, TIMELOGS_SCHEMA),
+        (USERS_TABLE, USERS_SCHEMA),
+    ):
+        ensure_table(client, dataset_ref, table_name, schema)
+        ensure_table_columns(client, dataset_ref, table_name, schema)
 
 
 def truncate_and_load(client, dataset_ref, table_name, schema, rows, allow_shrink=False):

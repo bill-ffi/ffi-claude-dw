@@ -982,6 +982,11 @@ SELECT
     WHEN tl.is_billable IS FALSE THEN 'Non-billable'
     ELSE 'Unknown'
   END AS billable_status,
+  -- OOSOOB ("out of scope, out of budget"): TRUE when the time entry itself
+  -- carries Teamwork's OOSOOB tag. NULL for a month not re-pulled since the
+  -- column was added (2026-09-30) -- unknown, not "no"; --backfill-months
+  -- fills it. A tag on the task does not count.
+  tl.is_oosoob,
   tl.description AS timelog_description,
   tl.is_locked,
 
