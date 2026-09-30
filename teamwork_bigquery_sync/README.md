@@ -108,12 +108,12 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
 Seven BigQuery views, meant to be the direct data source for Looker Studio
 reports for leadership — each one is filterable by user / project / client /
 tasklist directly off its columns (no extra joins needed in Looker). Plus
-nine more that aren't exception rules: `v_usermins` (see "External reference
+ten more that aren't exception rules: `v_usermins` (see "External reference
 data" below), the user report's `v_user_daily_billable_hours_base` /
 `v_user_weekly_billable_hours` (see "User report" below),
 `v_timelog_detail` (see "Drill-down reporting" below), `v_task_review`,
-`v_project_detail`, `v_client_month`, `v_user_daily_time_split` and
-`v_data_freshness` (see "Last updated" below). **Sixteen** views in total, all defined in `views.py`;
+`v_project_detail`, `v_client_month`, `v_client_activity_analysis`,
+`v_user_daily_time_split` and `v_data_freshness` (see "Last updated" below). **Seventeen** views in total, all defined in `views.py`;
 created/updated via:
 
 ```
@@ -226,6 +226,39 @@ months. Accepted deliberately — the feature is new in Teamwork — but if a
 recurring budget is ever edited, past months silently re-base. Fixing that
 means persisting the budgets the pipeline already fetches and discards; see the
 budget entry under "Known gaps".
+
+### `v_client_activity_analysis` — revenue mix for the larger clients
+
+**One row per client** with at least **$6,000 of billable revenue in total**
+over the **last three complete calendar months** (`CLIENT_ACTIVITY_MIN_REVENUE`
+and `CLIENT_ACTIVITY_MONTHS` in `views.py`). "Complete" means the current month
+is never included, so the figures do not move while a month is still open: on
+2026-09-30 the window is June to August; on 2026-10-01 it becomes July to
+September. "Today" is Eastern time. FFI itself is excluded.
+
+| Column | Meaning |
+|---|---|
+| `client_name`, `window_start`, `window_end`, `window_label` | Who, and which months (`window_label` reads `2026-06 to 2026-08`) |
+| `avg_monthly_budget` | The client's monthly budget, averaged over the same three months, from `v_client_month` (so the same rules: budgeted projects only, within project start/end dates). `0` if no budget |
+| `avg_monthly_revenue`, `total_revenue` | Billable revenue, averaged per month and in total |
+| `avg_monthly_billable_hours` | Billable hours per month |
+| `avg_revenue_<group>` | Average monthly revenue for each activity group — `advisory`, `books`, `client_management`, `controlling`, `payroll`, `projects` — plus `avg_revenue_missing` (client work with no Activity) |
+| `avg_revenue_ungrouped` | Revenue on an Activity missing from the reference file — normally `0`; the sync warns when it would not be |
+
+- **Groups are columns, not rows, so every column adds up.** One row per client
+  per group would repeat the budget and total on each group row, and Looker
+  would sum them. The group columns always add up to `avg_monthly_revenue`.
+- **The group columns come from `reference/activity_groups.csv`**, generated at
+  `--create-views` time: a new group gets a column automatically. Renaming a
+  group renames its column and breaks any Looker chart using the old name.
+- **Averages divide by all three months**, including a month with no revenue:
+  $9k in one month of three is $3k a month.
+- **Percentages belong in Looker**, as aggregates — for example
+  `SUM(avg_revenue_books) / SUM(avg_monthly_revenue)` for Books' share, or
+  `SUM(avg_monthly_revenue) / SUM(avg_monthly_budget)` against budget. See
+  `v_client_month` for why there is no row-level percentage.
+- The two months older than the sync's rolling window are no longer refreshed,
+  so a late correction to them in Teamwork needs `--backfill-months` to appear.
 
 ### `v_project_detail` — the project-level Looker source
 
@@ -2028,7 +2061,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-482 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
+496 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
