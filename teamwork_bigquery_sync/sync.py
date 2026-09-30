@@ -409,6 +409,11 @@ def run_dry_run(client):
     # USERS_LIST_PARAMS (showDeleted=true), and nothing fails when that flag
     # stops working -- names just go blank. This confirms the flag still adds
     # the deleted people. See teamwork_client.list_users().
+    # OOSOOB discovery (2026-09-30). Read-only: finds the tag's id and how, if
+    # at all, time.json exposes tags on time entries. Informational only.
+    print("\n--- OOSOOB tag discovery ---")
+    run_oosoob_discovery(client)
+
     print("\n--- Former-staff (deleted people) diagnostic ---")
     try:
         current = {str(p.get("id")) for p in client._paginate(USERS_PATH, {}, "people")}
@@ -446,6 +451,90 @@ def _identity_fields(person):
         if k == "id" or "name" in k.lower() or "email" in k.lower()
         or "deleted" in k.lower() or k.lower() in ("status", "inactive", "type", "user-type")
     }
+
+
+OOSOOB_TAG_NAME = "OOSOOB"
+TAGS_PATH = "/projects/api/v3/tags.json"
+
+
+def _tag_fields(item):
+    """Only the fields of a time entry that could carry tags, plus its id --
+    never the description, which is client work text."""
+    return {k: v for k, v in item.items() if k == "id" or "tag" in k.lower()}
+
+
+def run_oosoob_discovery(client, today=None):
+    today = today or date.today()
+    tag_id = None
+
+    # A. The tag itself.
+    try:
+        tags = list(client._paginate(TAGS_PATH, {}, "tags"))
+        exact = [t for t in tags if t.get("name") == OOSOOB_TAG_NAME]
+        loose = [t for t in tags if (t.get("name") or "").strip().lower() == OOSOOB_TAG_NAME.lower()]
+        print(f"[OK] tags.json — {len(tags)} tags; exact '{OOSOOB_TAG_NAME}' matches: {len(exact)}, "
+              f"case/space-insensitive: {len(loose)}")
+        if tags:
+            print(f"     tag fields: {', '.join(sorted(tags[0].keys()))}")
+        for t in loose:
+            print(f"     match: {json.dumps(t, default=str)}")
+        if exact:
+            tag_id = exact[0].get("id")
+    except Exception as exc:
+        print(f"[FAIL] tags.json — {exc}")
+
+    # B. Do time entries carry tags, and with which parameter?
+    window = {"startDate": (today - timedelta(days=90)).isoformat(), "endDate": today.isoformat()}
+    for label, extra in [
+        ("default", {}),
+        ("include=tags", {"include": "tags"}),
+        ("includeTags=true", {"includeTags": "true"}),
+        ("fields[timelogs]=tagIds", {"fields[timelogs]": "id,tagIds"}),
+    ]:
+        try:
+            payload = client._get(TIMELOGS_PATH, {"page": 1, "pageSize": 100, **window, **extra})
+            items = payload.get("timelogs", [])
+            tag_keys = sorted({k for it in items for k in it if "tag" in k.lower()})
+            tagged = [it for it in items if any(it.get(k) for k in tag_keys)]
+            included = sorted((payload.get("included") or {}).keys())
+            print(f"[OK] time.json {label} — {len(items)} entries; tag fields: {tag_keys or 'none'}; "
+                  f"entries with a tag: {len(tagged)}; included: {included or 'none'}")
+            for it in tagged[:3]:
+                print(f"       {json.dumps(_tag_fields(it), default=str)}")
+            if "tags" in (payload.get("included") or {}):
+                sample = list((payload["included"]["tags"] or {}).values())[:3]
+                print(f"       included.tags sample: {json.dumps(sample, default=str)}")
+        except Exception as exc:
+            print(f"[FAIL] time.json {label} — {exc}")
+
+    # C. Can time.json filter to entries carrying the tag? Compare counts over
+    # the full loaded history.
+    if tag_id is None:
+        print("     (skipping the tag filter test: no exact OOSOOB tag found)")
+        return
+    history = {"startDate": "2026-01-01", "endDate": today.isoformat()}
+    try:
+        base = client._get(TIMELOGS_PATH, {"page": 1, "pageSize": 1, **history})
+        total = ((base.get("meta") or {}).get("page") or {}).get("count")
+        print(f"[OK] time.json since 2026-01-01, unfiltered — count: {total}")
+    except Exception as exc:
+        total = None
+        print(f"[FAIL] time.json unfiltered count — {exc}")
+    for label, extra in [
+        (f"tagIds={tag_id}", {"tagIds": str(tag_id)}),
+        (f"tagIds[]={tag_id}", {"tagIds[]": str(tag_id)}),
+    ]:
+        try:
+            payload = client._get(TIMELOGS_PATH, {"page": 1, "pageSize": 5, **history, **extra})
+            count = ((payload.get("meta") or {}).get("page") or {}).get("count")
+            items = payload.get("timelogs", [])
+            verdict = ("FILTERS" if count is not None and total is not None and count < total
+                       else "IGNORED (same as unfiltered)" if count == total else "unclear")
+            print(f"[OK] time.json {label} — count: {count} -> {verdict}")
+            for it in items[:5]:
+                print(f"       {json.dumps(_tag_fields(it), default=str)}")
+        except Exception as exc:
+            print(f"[FAIL] time.json {label} — {exc}")
 
 
 def run_explain_task_scope(cfg):
