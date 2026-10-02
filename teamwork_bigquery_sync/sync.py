@@ -450,6 +450,44 @@ def run_dry_run(client):
     except Exception as exc:
         print(f"     WARNING: OOSOOB diagnostic could not run -- {exc}")
 
+    # TEMPORARY probe (2026-10-02): does time.json skip archived projects?
+    print("\n--- PROBE: time.json and archived/completed projects ---")
+    try:
+        report_ids = {21580758, 21582262, 21582324, 21582392, 21592994, 21659699, 21775696}
+        variants = {
+            "baseline": {},
+            "includeArchivedProjects": {"includeArchivedProjects": "true"},
+            "archived+completed": {"includeArchivedProjects": "true",
+                                   "includeCompletedProjects": "true"},
+            "projectStatus=all": {"projectStatus": "all"},
+        }
+        for label, extra in variants.items():
+            ytd = client._get(TIMELOGS_PATH, dict(extra, startDate="2026-01-01",
+                              endDate=date.today().isoformat(), page=1, pageSize=1))
+            ytd_count = ((ytd.get("meta") or {}).get("page") or {}).get("count")
+            sept = list(client._paginate(TIMELOGS_PATH, dict(extra, startDate="2026-09-01",
+                                         endDate="2026-09-30"), "timelogs"))
+            found = sorted(report_ids & {t.get("id") for t in sept})
+            print(f"     {label:24} since-Jan={ytd_count}  sept={len(sept)}  "
+                  f"report ids found={len(found)}/7")
+        for tid in sorted(report_ids)[:2]:
+            try:
+                one = client._get(f"/projects/api/v3/time/{tid}.json", {})
+                t = one.get("timelog") or one.get("timeLog") or one.get("time") or {}
+                print(f"     direct GET {tid}: keys={sorted(one.keys())} "
+                      f"projectId={t.get('projectId')} userId={t.get('userId')} "
+                      f"date={t.get('timeLogged')} minutes={t.get('minutes')}")
+            except Exception as exc:
+                print(f"     direct GET {tid}: {exc}")
+        projects, _ = client.list_projects()
+        for pr in projects:
+            if "GRPN" in str(pr.get("name")):
+                print("     project: " + json.dumps({k: pr.get(k) for k in
+                      ("id", "name", "status", "subStatus", "archivedAt", "completedAt",
+                       "isArchived")}, default=str))
+    except Exception as exc:
+        print(f"     PROBE failed -- {exc}")
+
     print()
     if any_failed:
         print("One or more checks failed. Fix TEAMWORK_BASE_URL/API key or the")
