@@ -66,6 +66,9 @@ PROJECT_BUDGETS_PATH = "/projects/api/v3/budgets.json"
 USERS_PATH = "/projects/api/v3/people.json"
 # Without this, people.json omits deleted people. See list_users().
 USERS_LIST_PARAMS = {"showDeleted": "true"}
+# Without this, time.json omits every entry on an archived project. See
+# list_timelogs().
+TIMELOGS_LIST_PARAMS = {"includeArchivedProjects": "true"}
 CUSTOM_FIELDS_PATH = "/projects/api/v3/customfields.json"
 TASK_CUSTOM_FIELDS_PATH_TEMPLATE = "/projects/api/v3/tasks/{task_id}/customfields.json"
 PROJECT_CATEGORIES_PATH = "/projects/api/v3/projectcategories.json"
@@ -400,9 +403,17 @@ class TeamworkClient:
 
     def list_timelogs(self, start_date, end_date):
         """Timelogs with a log date in [start_date, end_date], both
-        YYYY-MM-DD, inclusive.
+        YYYY-MM-DD, inclusive -- including time on archived projects.
+
+        time.json silently omits every entry on an archived project unless
+        sent TIMELOGS_LIST_PARAMS (includeArchivedProjects=true), the same
+        trap as tasks.json. Confirmed live 2026-10-02: 28,659 entries since
+        January without it, 37,673 with it; projectStatus=all is ignored.
+        Because the timelogs window is a delete-and-reinsert, a project
+        archived after its month was loaded lost that time on the next
+        re-pull of the month.
         """
-        params = {"startDate": start_date, "endDate": end_date}
+        params = dict(TIMELOGS_LIST_PARAMS, startDate=start_date, endDate=end_date)
         return list(self._paginate(TIMELOGS_PATH, params, "timelogs"))
 
     def list_tags(self):
@@ -415,8 +426,11 @@ class TeamworkClient:
         semantics as list_timelogs) carry `tag_id`, from meta.page.count at
         pageSize=1 -- one request, no rows. Confirmed live 2026-09-30: time.json
         honours `tagIds=<id>` (263 OOSOOB entries of 28,217 since January) and
-        silently ignores `tagIds[]=`. Returns None if no count comes back."""
+        silently ignores `tagIds[]=`. Returns None if no count comes back.
+        Sends TIMELOGS_LIST_PARAMS so it counts what list_timelogs() pulls --
+        otherwise both would miss archived projects and still agree."""
         payload = self._get(TIMELOGS_PATH, {
+            **TIMELOGS_LIST_PARAMS,
             "startDate": start_date, "endDate": end_date,
             "tagIds": str(tag_id), "page": 1, "pageSize": 1,
         })

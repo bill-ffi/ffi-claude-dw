@@ -9,8 +9,9 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
 - **projects**, **tasks**, **users**: full truncate + reload every run.
 - **timelogs**: a rolling **two-month** window is deleted and reinserted
   each run — the current calendar month plus the one before it (by
-  `log_date`, derived from Teamwork's `timeLogged` field). Months older
-  than that are left untouched. The span is set by
+  `log_date`, derived from Teamwork's `timeLogged` field), **on every
+  project, archived ones included** (`includeArchivedProjects=true`; see
+  "Known gaps"). Months older than that are left untouched. The span is set by
   `TIMELOG_SYNC_MONTHS_BACK` in `sync.py` (`1` = one previous month;
   `0` restores the old current-month-only behaviour). The previous month
   is included so that timelogs entered *retroactively* against a
@@ -1260,6 +1261,33 @@ leaves GCP).
 
 ## Known gaps / things to verify before relying on this
 
+- **Time on archived projects (fixed 2026-10-02).** `time.json`, like
+  `tasks.json`, silently omits every entry on an archived project unless sent
+  `includeArchivedProjects=true` — and `list_timelogs()` sent only the dates.
+  Because each timelogs window is a delete-and-reinsert, time was loaded
+  while its project was open and then **deleted on the next re-pull after the
+  project was archived**. This account archives projects routinely (every
+  pay-cycle and monthly-books project), so the gap grew with each backfill:
+  confirmed live, **28,659 entries since January without the flag, 37,673
+  with it** — 9,014 entries, about a quarter of all time, missing from every
+  report. Found via a Teamwork time report for GRPN Payroll (2026), archived
+  Oct 1, whose seven September entries vanished on the Oct 2 sync.
+  `projectStatus=all` was tried and is ignored.
+  - **Fix**: `teamwork_client.TIMELOGS_LIST_PARAMS`
+    (`{"includeArchivedProjects": "true"}`), sent on every page of
+    `list_timelogs()` and on `count_timelogs_with_tag()`.
+  - **Why the OOSOOB cross-check missed it**: the tag count went to the same
+    endpoint without the flag, so `marked` and `teamwork_count` agreed while
+    both were short. The count now sends the same flag, so it measures what
+    the pull pulls.
+  - **Guard**: the dry run's archived-project diagnostic prints the count
+    since January with and without the flag, and warns if they are equal.
+  - **After deploying**: backfill every month from 2026-01 onward; only a
+    re-pull restores a month's missing time.
+  - **Earlier, wrong answer**: before this was found, `v_timelog_detail` was
+    described as including all archived-project time because the view has
+    no filter. The view was never the problem; the pull was.
+
 - **Adding a column to an existing table (added 2026-09-30, with
   `is_oosoob`).** `ensure_table()` only ever created *missing* tables, so a
   column added to a schema never reached a table that already existed — and
@@ -2114,7 +2142,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-530 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
+533 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 

@@ -48,6 +48,7 @@ from teamwork_client import (
     PROJECT_CATEGORIES_PATH,
     PROJECTS_PATH,
     TASKS_PATH,
+    TIMELOGS_LIST_PARAMS,
     TIMELOGS_PATH,
     USERS_LIST_PARAMS,
     USERS_PATH,
@@ -428,6 +429,28 @@ def run_dry_run(client):
     except Exception as exc:
         any_failed = True
         print(f"[FAIL] former-staff diagnostic — {exc}")
+
+    # Archived-project time diagnostic. time.json omits every entry on an
+    # archived project unless sent TIMELOGS_LIST_PARAMS, and nothing fails
+    # when that flag stops working -- a quarter of all time just vanishes on
+    # the next re-pull. This confirms the flag still adds those entries.
+    # Counts only (meta.page.count at pageSize=1); no entry is printed.
+    print("\n--- Archived-project time diagnostic ---")
+    try:
+        def _count(extra):
+            payload = client._get(TIMELOGS_PATH, dict(
+                extra, startDate="2026-01-01", endDate=date.today().isoformat(),
+                page=1, pageSize=1))
+            return ((payload.get("meta") or {}).get("page") or {}).get("count")
+        without_flag, with_flag = _count({}), _count(TIMELOGS_LIST_PARAMS)
+        print(f"[OK] time.json since 2026-01-01: {with_flag} entries with "
+              f"{TIMELOGS_LIST_PARAMS}, {without_flag} without it")
+        if with_flag is not None and with_flag == without_flag:
+            print("     WARNING: the flag added nothing. Either no project with "
+                  "time since January is archived, or Teamwork stopped honouring "
+                  "it and time on archived projects is being dropped.")
+    except Exception as exc:
+        print(f"     WARNING: archived-project diagnostic could not run -- {exc}")
 
     # OOSOOB tag diagnostic. is_oosoob matches transform.OOSOOB_TAG_ID, so
     # confirm that id still exists and still carries the expected name, and

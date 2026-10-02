@@ -228,3 +228,39 @@ class TestListUsersIncludesDeletedPeople:
         ])
         assert [p["id"] for p in c.list_users()] == [1, 2]
         assert all(r["params"].get("showDeleted") == "true" for r in c.session.requests)
+
+
+class TestListTimelogsIncludesArchivedProjects:
+    """time.json omits every entry on an archived project unless asked.
+    list_timelogs() sent only the dates, and because each window is a
+    delete-and-reinsert, a project archived after its month was loaded lost
+    that time on the next re-pull: 9,014 of 37,673 entries since January
+    (found 2026-10-02 via GRPN Payroll (2026), archived Oct 1)."""
+
+    def test_asks_for_archived_projects(self, client, no_sleep):
+        c = client([page([{"id": 1}], key="timelogs")])
+        c.list_timelogs("2026-09-01", "2026-09-30")
+        params = c.session.requests[0]["params"]
+        # Confirmed live 2026-10-02: includeArchivedProjects=true takes the
+        # count since January from 28,659 to 37,673. projectStatus=all is
+        # silently ignored.
+        assert params.get("includeArchivedProjects") == "true"
+        assert params["startDate"] == "2026-09-01" and params["endDate"] == "2026-09-30"
+
+    def test_every_page_carries_the_flag(self, client, no_sleep):
+        c = client([
+            page([{"id": 1}], has_more=True, key="timelogs"),
+            page([{"id": 2}], key="timelogs"),
+        ])
+        assert [t["id"] for t in c.list_timelogs("2026-09-01", "2026-09-30")] == [1, 2]
+        assert all(r["params"].get("includeArchivedProjects") == "true"
+                   for r in c.session.requests)
+
+    def test_the_oosoob_cross_check_counts_the_same_population(self, client, no_sleep):
+        # If the count omitted archived projects too, the RUN_SUMMARY's
+        # marked/teamwork_count would agree while both were short -- which is
+        # exactly how this went unnoticed.
+        c = client([FakeResponse(payload={"timelogs": [], "meta": {"page": {"count": 5}}})])
+        c.count_timelogs_with_tag("2026-01-01", "2026-09-30", 395371)
+        assert c.session.requests[0]["params"].get("includeArchivedProjects") == "true"
+
