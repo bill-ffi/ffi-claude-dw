@@ -471,6 +471,26 @@ def run_dry_run(client):
     except Exception as exc:
         print(f"     WARNING: budgets diagnostic could not run -- {exc}")
 
+    # TEMPORARY probe (2026-10-02): budgets.json paging and scope.
+    print("\n--- PROBE: budgets.json ---")
+    try:
+        from collections import Counter
+        archived = {pr.get("id"): bool(pr.get("archivedAt")) for pr in client.list_projects()[0]}
+        for label, extra in (("plain", {}), ("flag", {"includeArchivedProjects": "true"})):
+            for size in (50, 250):
+                first = client._get(PROJECT_BUDGETS_PATH, dict(extra, page=1, pageSize=size))
+                print(f"     {label} pageSize={size}: page1 items={len(first.get('budgets', []))} "
+                      f"meta={json.dumps(first.get('meta'), default=str)}")
+            second = client._get(PROJECT_BUDGETS_PATH, dict(extra, page=2, pageSize=200))
+            print(f"     {label} page2@200 items={len(second.get('budgets', []))}")
+            items = list(client._paginate(PROJECT_BUDGETS_PATH, dict(extra), "budgets"))
+            st = Counter(b.get("status") for b in items)
+            pids = {b.get("projectId") or (b.get("project") or {}).get("id") for b in items}
+            arch = Counter("archived" if archived.get(pid) else ("active" if pid in archived else "unknown") for pid in pids)
+            print(f"     {label}: statuses={dict(st)} projects={dict(arch)}")
+    except Exception as exc:
+        print(f"     PROBE failed -- {exc}")
+
     # OOSOOB tag diagnostic. is_oosoob matches transform.OOSOOB_TAG_ID, so
     # confirm that id still exists and still carries the expected name, and
     # show how many entries carry it. Informational: nothing sets any_failed.
