@@ -1754,3 +1754,19 @@ class TestActivityRevenueColumns:
                             lambda name: [{"activity_group": "Ungrouped", "ag_sort": 10}])
         with pytest.raises(ValueError, match="collide"):
             views.activity_revenue_columns()
+
+
+class TestTimelogDetailEditTimes:
+    """created_at / updated_at, as Eastern wall-clock time (added 2026-10-02).
+    Looker renders a TIMESTAMP in UTC, so the conversion has to be in SQL."""
+
+    def test_both_times_are_converted_to_the_reporting_timezone(self, sql):
+        body = sql["v_timelog_detail"]
+        tz = views.REPORTING_TIMEZONE
+        assert f"DATETIME(tl.created_at, '{tz}') AS timelog_created_at," in body
+        assert f"DATETIME(tl.updated_at, '{tz}') AS timelog_updated_at," in body
+
+    def test_no_timestamp_is_converted_without_a_timezone(self, sql):
+        # DATETIME(ts) alone means UTC -- the same trap as bare CURRENT_DATE().
+        for name, body in sql.items():
+            assert not re.search(r"DATETIME\(\s*\w+\.\w+_at\s*\)", body), name

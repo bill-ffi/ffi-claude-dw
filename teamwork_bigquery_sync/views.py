@@ -989,6 +989,17 @@ SELECT
   tl.is_oosoob,
   tl.description AS timelog_description,
   tl.is_locked,
+  -- When the entry was first made and last edited in Teamwork, as Eastern
+  -- wall-clock time. Converted here because Looker Studio renders a BigQuery
+  -- TIMESTAMP in UTC with no timezone option (the reason v_data_freshness
+  -- does the same). DATETIME(ts, tz) follows daylight saving; a fixed offset
+  -- in Looker would be an hour wrong half the year.
+  --
+  -- timelog_updated_at is only as fresh as the last pull of that entry's
+  -- month: the sync re-pulls the current and previous month, so an edit to an
+  -- older entry shows up only after --backfill-months covers its month.
+  DATETIME(tl.created_at, '{REPORTING_TIMEZONE}') AS timelog_created_at,
+  DATETIME(tl.updated_at, '{REPORTING_TIMEZONE}') AS timelog_updated_at,
 
   -- UNITS ARE UNVERIFIED: see the note above this view in views.py before
   -- publishing any revenue figure from these two columns.
