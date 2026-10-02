@@ -110,6 +110,10 @@ TIMELOGS_SCHEMA = [
     # never FALSE -- see transform.OOSOOB_TAG_ID.
     bigquery.SchemaField("tag_ids", "INT64", mode="REPEATED"),
     bigquery.SchemaField("is_oosoob", "BOOL"),
+    # Who last edited the entry in Teamwork (editedByUserId). Added 2026-10-02.
+    # On an entry never edited it is the person who created it, matching
+    # updated_at == created_at. NULL for months not re-pulled since then.
+    bigquery.SchemaField("edited_by_user_id", "INT64"),
 ]
 
 USERS_SCHEMA = [

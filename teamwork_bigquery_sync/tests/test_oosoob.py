@@ -62,8 +62,14 @@ class TestSchema:
         assert f["is_oosoob"].field_type == "BOOL" and f["is_oosoob"].mode == "NULLABLE"
         assert f["tag_ids"].field_type == "INT64" and f["tag_ids"].mode == "REPEATED"
 
+    # Columns added to the live table after it was created, in the order they
+    # were added. ensure_table_columns appends, so the schema must list them
+    # last and in this order or the table and schema drift apart.
+    ADDED_LATER = ["tag_ids", "is_oosoob", "edited_by_user_id"]
+
     def test_appended_last_so_added_columns_keep_schema_order(self):
-        assert [f.name for f in schemas.TIMELOGS_SCHEMA][-2:] == ["tag_ids", "is_oosoob"]
+        names = [f.name for f in schemas.TIMELOGS_SCHEMA]
+        assert names[-len(self.ADDED_LATER):] == self.ADDED_LATER
 
     def test_not_in_the_always_populated_list(self):
         # Legitimately empty on history not yet re-pulled; listing them would
@@ -199,3 +205,32 @@ class TestView:
     def test_timelog_detail_exposes_the_flag(self):
         body = views.build_view_sql("p", "d")["v_timelog_detail"]
         assert "\n  tl.is_oosoob,\n" in body
+
+
+class TestEditedBy:
+    """editedByUserId -- who last edited the entry (added 2026-10-02)."""
+
+    def test_reads_editedByUserId(self):
+        row = transform.normalize_timelog(entry(editedByUserId=646923, updatedBy=1))
+        assert row["edited_by_user_id"] == 646923
+
+    def test_falls_back_to_updatedBy_int_or_ref(self):
+        assert transform.timelog_edited_by({"updatedBy": 654781}) == 654781
+        assert transform.timelog_edited_by({"updatedBy": {"id": 654781, "type": "users"}}) == 654781
+
+    def test_zero_or_missing_is_no_one(self):
+        assert transform.timelog_edited_by({"editedByUserId": 0}) is None
+        assert transform.timelog_edited_by({}) is None
+
+    def test_string_ids_become_integers(self):
+        assert transform.timelog_edited_by({"editedByUserId": "646923"}) == 646923
+
+    def test_column_is_nullable_int(self):
+        f = {f.name: f for f in schemas.TIMELOGS_SCHEMA}["edited_by_user_id"]
+        assert f.field_type == "INT64" and f.mode == "NULLABLE"
+
+    def test_timelog_detail_names_the_editor_without_fanning_out(self):
+        body = views.build_view_sql("p", "d")["v_timelog_detail"]
+        assert "\n  tl.edited_by_user_id,\n  eb.full_name AS edited_by_name,\n" in body
+        # LEFT, so an entry whose editor is not in users keeps its row.
+        assert "\nLEFT JOIN `p.d.users` eb ON eb.user_id = tl.edited_by_user_id\n" in body

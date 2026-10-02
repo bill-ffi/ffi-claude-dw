@@ -1000,6 +1000,11 @@ SELECT
   -- older entry shows up only after --backfill-months covers its month.
   DATETIME(tl.created_at, '{REPORTING_TIMEZONE}') AS timelog_created_at,
   DATETIME(tl.updated_at, '{REPORTING_TIMEZONE}') AS timelog_updated_at,
+  -- Who made that last edit. For an entry never edited, the person who
+  -- created it; compare with user_name to spot entries changed by someone
+  -- else (a reviewer). NULL for a month not re-pulled since 2026-10-02.
+  tl.edited_by_user_id,
+  eb.full_name AS edited_by_name,
 
   -- UNITS ARE UNVERIFIED: see the note above this view in views.py before
   -- publishing any revenue figure from these two columns.
@@ -1076,6 +1081,7 @@ LEFT JOIN {tasks} parent ON parent.task_id = tk.parent_task_id
 LEFT JOIN {activity_groups} ag ON ag.activity = tk.activity
 LEFT JOIN {users} u ON u.user_id = tl.user_id
 LEFT JOIN {users} lb ON lb.user_id = tl.logged_by_user_id
+LEFT JOIN {users} eb ON eb.user_id = tl.edited_by_user_id
 {proj_owner_join}
 """
 

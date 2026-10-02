@@ -298,6 +298,19 @@ def timelog_tag_ids(raw):
     return sorted({int(i) for i in ids if i is not None})
 
 
+def timelog_edited_by(raw):
+    """Who last edited a time entry. Confirmed live 2026-10-02 (dry run, 250
+    September entries): editedByUserId is always a real user id and always
+    equals updatedBy, which is the fallback here (an int, or an {"id"} ref).
+    0 is treated as "no one" rather than as a user id."""
+    value = raw.get("editedByUserId")
+    if value is None:
+        value = raw.get("updatedBy")
+        if isinstance(value, dict):
+            value = _ref_id(value)
+    return int(value) if value else None
+
+
 def normalize_timelog(raw):
     if raw.get("deleted") or raw.get("deletedAt"):
         return None
@@ -328,6 +341,7 @@ def normalize_timelog(raw):
         "synced_at": utc_now_iso(),
         "tag_ids": tag_ids,
         "is_oosoob": OOSOOB_TAG_ID in tag_ids,
+        "edited_by_user_id": timelog_edited_by(raw),
     }
 
 
