@@ -2114,7 +2114,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-527 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
+530 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
