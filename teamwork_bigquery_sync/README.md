@@ -71,6 +71,13 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
   in that stage of `RUN_SUMMARY`, warning if they differ. **Months not re-pulled
   since the column was added read `is_oosoob` = NULL (unknown), not FALSE,**
   until `--backfill-months` fills them. Exposed in `v_timelog_detail`.
+- **`timelogs.edited_by_user_id`** (added 2026-10-02): who last edited the
+  entry, from Teamwork's `editedByUserId` (always equal to `updatedBy`, the
+  fallback — confirmed on 250 live September entries). On an entry nobody has
+  edited it is the person who created it, matching `updated_at` = `created_at`.
+  `v_timelog_detail` names the editor as `edited_by_name`; compare it with
+  `user_name` to find entries changed by someone else. NULL for months not
+  re-pulled since the column was added.
 - **`tasks.activity`**: the "Activity" preset-list custom field, resolved to
   its option label. Pulled in bulk at zero extra API cost via
   `tasks.json?includeCustomFields=true` (confirmed real via Teamwork's own
@@ -598,7 +605,8 @@ Studio shows a raw TIMESTAMP in UTC. Comparing either with `log_date` shows
 time entered or changed well after the work date. `timelog_updated_at` is only
 as fresh as the last pull of that entry's month — the sync re-pulls the
 current and previous month, so an edit to an older entry appears only after
-`--backfill-months` covers it.
+`--backfill-months` covers it. `edited_by_name` says who made that last edit
+(see `timelogs.edited_by_user_id` above).
 
 Three things it does differently from the two exception views, because a
 drill-down surfaces rows those rules filter away:
@@ -2093,7 +2101,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-521 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
+527 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
