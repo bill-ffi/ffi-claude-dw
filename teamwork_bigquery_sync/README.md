@@ -591,6 +591,15 @@ in the pipeline, so no join can fan out. Every join is a `LEFT JOIN` — an
 inner join anywhere would silently drop time entries, which is the one
 thing a drill-down over timelogs must never do.
 
+**When an entry was made and last edited** (added 2026-10-02):
+`timelog_created_at` and `timelog_updated_at` are Teamwork's `createdAt` /
+`updatedAt` as **Eastern** wall-clock time, converted in SQL because Looker
+Studio shows a raw TIMESTAMP in UTC. Comparing either with `log_date` shows
+time entered or changed well after the work date. `timelog_updated_at` is only
+as fresh as the last pull of that entry's month — the sync re-pulls the
+current and previous month, so an edit to an older entry appears only after
+`--backfill-months` covers it.
+
 Three things it does differently from the two exception views, because a
 drill-down surfaces rows those rules filter away:
 
@@ -2084,7 +2093,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-519 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
+521 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
