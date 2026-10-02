@@ -1770,3 +1770,34 @@ class TestTimelogDetailEditTimes:
         # DATETIME(ts) alone means UTC -- the same trap as bare CURRENT_DATE().
         for name, body in sql.items():
             assert not re.search(r"DATETIME\(\s*\w+\.\w+_at\s*\)", body), name
+
+
+class TestTimelogDetailPeopleColumns:
+    """The three people on an entry -- whose time, who entered it, who last
+    edited it -- sit together, and user_name is the first name only
+    (requested 2026-10-02; logged_by_name / edited_by_name stay full names)."""
+
+    def _select_aliases(self, body):
+        select = body.split("\nFROM ", 1)[0]
+        return re.findall(r"\bAS (\w+),?\s*$|^\s+\w+\.(\w+),?\s*$", select, re.M)
+
+    def test_user_name_is_the_first_name(self, sql):
+        body = sql["v_timelog_detail"]
+        assert "\n  u.first_name AS user_name,\n" in body
+        assert "u.full_name AS user_name" not in body
+
+    def test_the_people_columns_are_one_block(self, sql):
+        aliases = [a or b for a, b in self._select_aliases(sql["v_timelog_detail"])]
+        people = [
+            "user_id", "user_name", "user_email", "user_type", "user_is_deleted",
+            "logged_by_user_id", "logged_by_name",
+            "edited_by_user_id", "edited_by_name",
+        ]
+        start = aliases.index("user_id")
+        assert aliases[start:start + len(people)] == people
+
+    def test_people_are_compared_by_id_in_the_docs(self, sql):
+        # user_name is a first name and the other two are full names, so a
+        # name comparison would call every entry "edited by someone else".
+        body = sql["v_timelog_detail"]
+        assert "compare people by their *_user_id columns" in body

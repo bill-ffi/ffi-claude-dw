@@ -1000,11 +1000,6 @@ SELECT
   -- older entry shows up only after --backfill-months covers its month.
   DATETIME(tl.created_at, '{REPORTING_TIMEZONE}') AS timelog_created_at,
   DATETIME(tl.updated_at, '{REPORTING_TIMEZONE}') AS timelog_updated_at,
-  -- Who made that last edit. For an entry never edited, the person who
-  -- created it; compare with user_name to spot entries changed by someone
-  -- else (a reviewer). NULL for a month not re-pulled since 2026-10-02.
-  tl.edited_by_user_id,
-  eb.full_name AS edited_by_name,
 
   -- UNITS ARE UNVERIFIED: see the note above this view in views.py before
   -- publishing any revenue figure from these two columns.
@@ -1013,14 +1008,22 @@ SELECT
     WHEN tl.is_billable IS TRUE THEN (tl.minutes / 60) * tl.billable_rate
   END AS billable_amount,
 
-  -- who the time belongs to, and who entered it
+  -- who the time belongs to, who entered it, and who last edited it.
+  -- user_name is the first name only (the person's full name stays in the
+  -- users table); logged_by_name and edited_by_name are full names. So
+  -- compare people by their *_user_id columns, never by these names.
   tl.user_id,
-  u.full_name AS user_name,
+  u.first_name AS user_name,
   u.email AS user_email,
   u.user_type,
   u.is_deleted AS user_is_deleted,
   tl.logged_by_user_id,
   lb.full_name AS logged_by_name,
+  -- Who made the last edit (Teamwork's editedByUserId). For an entry never
+  -- edited, the person who created it. NULL for a month not re-pulled since
+  -- 2026-10-02.
+  tl.edited_by_user_id,
+  eb.full_name AS edited_by_name,
 
   -- project and client
   p.project_id,

@@ -75,9 +75,10 @@ BigQuery (`radiant-rig-284611.teamwork_data`). Meant to run on a schedule
   entry, from Teamwork's `editedByUserId` (always equal to `updatedBy`, the
   fallback — confirmed on 250 live September entries). On an entry nobody has
   edited it is the person who created it, matching `updated_at` = `created_at`.
-  `v_timelog_detail` names the editor as `edited_by_name`; compare it with
-  `user_name` to find entries changed by someone else. NULL for months not
-  re-pulled since the column was added.
+  `v_timelog_detail` names the editor as `edited_by_name`; compare
+  `edited_by_user_id` with `user_id` (not the names: `user_name` is a first
+  name, `edited_by_name` a full name) to find entries changed by someone
+  else. NULL for months not re-pulled since the column was added.
 - **`tasks.activity`**: the "Activity" preset-list custom field, resolved to
   its option label. Pulled in bulk at zero extra API cost via
   `tasks.json?includeCustomFields=true` (confirmed real via Teamwork's own
@@ -607,6 +608,18 @@ as fresh as the last pull of that entry's month — the sync re-pulls the
 current and previous month, so an edit to an older entry appears only after
 `--backfill-months` covers it. `edited_by_name` says who made that last edit
 (see `timelogs.edited_by_user_id` above).
+
+**The people on an entry** sit together in one block: `user_id` /
+`user_name` (whose time it is), `logged_by_user_id` / `logged_by_name` (who
+typed it into Teamwork, which differs when someone enters time for a
+colleague) and `edited_by_user_id` / `edited_by_name` (who last changed it).
+Since 2026-10-02 `user_name` is the person's **first name only**;
+`logged_by_name` and `edited_by_name` are full names. Compare people by their
+`*_user_id` columns, never by name. Views built on `v_timelog_detail`
+(`v_exception_time_without_task`, `v_user_daily_time_split`) inherit the first
+name; they all group on `user_id` too, so two people sharing a first name
+are never merged in the data — only a Looker chart that groups on
+`user_name` alone would combine them.
 
 Three things it does differently from the two exception views, because a
 drill-down surfaces rows those rules filter away:
