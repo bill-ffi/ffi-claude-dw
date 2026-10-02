@@ -1287,6 +1287,32 @@ leaves GCP).
   - **Earlier, wrong answer**: before this was found, `v_timelog_detail` was
     described as including all archived-project time because the view has
     no filter. The view was never the problem; the pull was.
+  - **Removed-entries guard (added with the fix)**: before each timelogs
+    window is replaced, `bigquery_sync.stored_timelogs_in_window()` reads
+    what the table holds (with each entry's project archived state), and
+    `sync.removed_entries_report()` reports which of those ids the new pull
+    lacks, as `removed_entries` in that stage of `RUN_SUMMARY`:
+    `previously_stored`, `removed`, `removed_on_archived_projects`,
+    `removed_by_project`. It compares ids, not totals, because in an open
+    month additions outnumber deletions and a net count would hide a loss.
+    A removal on an **archived** project always warns — archived projects
+    are read-only, so it means the pull missed it. Other removals are
+    usually someone deleting an entry in Teamwork; they warn only above
+    `TIMELOG_REMOVED_WARN_FRACTION` (2%) of the window. `null` means the
+    check could not run. This would have fired on every backfill since the
+    first archived pay cycle; no check that compared our rows with the same
+    short pull could have.
+- **Budgets on archived projects (fixed 2026-10-02).** `budgets.json` has the
+  same trap: **20 budgets without `includeArchivedProjects=true`, 200 with
+  it** — 179 more projects, all archived. `meta.page.count` agrees and paging
+  is normal, so 200 is the real total. Found by auditing every
+  project-scoped list endpoint after the time gap above.
+  `teamwork_client.BUDGETS_LIST_PARAMS` now carries the flag and the dry run
+  compares the two counts. Effect: archived projects' budget columns in
+  `projects` are filled from the next full sync (a full replace, so no
+  backfill). **No view changes as a result** — `v_client_month` takes
+  budgets from non-archived projects only, and `v_project_detail` lists
+  active projects only.
 
 - **Adding a column to an existing table (added 2026-09-30, with
   `is_oosoob`).** `ensure_table()` only ever created *missing* tables, so a
@@ -2142,7 +2168,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-533 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
+544 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 

@@ -42,6 +42,7 @@ import transform
 import views
 from config import load_config
 from teamwork_client import (
+    BUDGETS_LIST_PARAMS,
     COMPANIES_PATH,
     CUSTOM_FIELDS_PATH,
     PROJECT_BUDGETS_PATH,
@@ -452,22 +453,22 @@ def run_dry_run(client):
     except Exception as exc:
         print(f"     WARNING: archived-project diagnostic could not run -- {exc}")
 
-    # Archived-project budgets diagnostic. budgets.json is the other list
-    # endpoint whose records belong to projects; projects.json, tasks.json and
-    # time.json all omit archived projects unless asked. This shows whether
-    # budgets.json does too (it is called with no params today). Counts only.
+    # Archived-project budgets diagnostic. budgets.json, like time.json, omits
+    # archived projects' budgets unless sent BUDGETS_LIST_PARAMS (20 vs 200 on
+    # 2026-10-02). This confirms the flag still adds them. Counts only.
     print("\n--- Archived-project budgets diagnostic ---")
     try:
         def _budgets(extra):
             budgets = list(client._paginate(PROJECT_BUDGETS_PATH, dict(extra), "budgets"))
             return len(budgets), len(transform.build_budgets_by_project(budgets))
         plain = _budgets({})
-        flagged = _budgets({"includeArchivedProjects": "true"})
-        print(f"[OK] budgets.json: {plain[0]} budgets on {plain[1]} projects without "
-              f"includeArchivedProjects, {flagged[0]} on {flagged[1]} with it")
-        if flagged != plain:
-            print("     WARNING: the flag changes the result -- archived projects' "
-                  "budgets are being missed. Add it to list_project_budgets().")
+        flagged = _budgets(BUDGETS_LIST_PARAMS)
+        print(f"[OK] budgets.json: {flagged[0]} budgets on {flagged[1]} projects with "
+              f"{BUDGETS_LIST_PARAMS}, {plain[0]} on {plain[1]} without it")
+        if flagged == plain:
+            print("     WARNING: the flag added nothing. Either no archived project "
+                  "has a budget, or Teamwork stopped honouring it and archived "
+                  "projects' budgets read NULL.")
     except Exception as exc:
         print(f"     WARNING: budgets diagnostic could not run -- {exc}")
 

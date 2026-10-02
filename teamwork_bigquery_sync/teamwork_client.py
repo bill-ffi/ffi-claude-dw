@@ -69,6 +69,8 @@ USERS_LIST_PARAMS = {"showDeleted": "true"}
 # Without this, time.json omits every entry on an archived project. See
 # list_timelogs().
 TIMELOGS_LIST_PARAMS = {"includeArchivedProjects": "true"}
+# Same trap on budgets.json. See list_project_budgets().
+BUDGETS_LIST_PARAMS = {"includeArchivedProjects": "true"}
 CUSTOM_FIELDS_PATH = "/projects/api/v3/customfields.json"
 TASK_CUSTOM_FIELDS_PATH_TEMPLATE = "/projects/api/v3/tasks/{task_id}/customfields.json"
 PROJECT_CATEGORIES_PATH = "/projects/api/v3/projectcategories.json"
@@ -437,7 +439,16 @@ class TeamworkClient:
         return ((payload.get("meta") or {}).get("page") or {}).get("count")
 
     def list_project_budgets(self):
-        return list(self._paginate(PROJECT_BUDGETS_PATH, {}, "budgets"))
+        """Every project budget, including those on archived projects.
+
+        budgets.json omits archived projects' budgets unless sent
+        BUDGETS_LIST_PARAMS. Confirmed live 2026-10-02: 20 budgets (all on
+        active projects) without it, 200 with it -- 179 more projects, all
+        archived. meta.page.count agrees (200) and paging is normal, so the
+        200 is the real total, not a page cap. Until then, archived
+        projects' budget columns read NULL.
+        """
+        return list(self._paginate(PROJECT_BUDGETS_PATH, BUDGETS_LIST_PARAMS, "budgets"))
 
     def list_users(self):
         """All people (Teamwork's term for users) on the account, INCLUDING

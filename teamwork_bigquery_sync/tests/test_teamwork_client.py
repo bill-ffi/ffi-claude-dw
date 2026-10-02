@@ -264,3 +264,18 @@ class TestListTimelogsIncludesArchivedProjects:
         c.count_timelogs_with_tag("2026-01-01", "2026-09-30", 395371)
         assert c.session.requests[0]["params"].get("includeArchivedProjects") == "true"
 
+
+
+class TestListBudgetsIncludesArchivedProjects:
+    """budgets.json omits archived projects' budgets unless asked: 20 budgets
+    without the flag, 200 with it (179 more projects, all archived), found
+    2026-10-02 while auditing endpoints after the time.json gap."""
+
+    def test_asks_for_archived_projects_on_every_page(self, client, no_sleep):
+        c = client([
+            page([{"id": 1, "projectId": 10}], has_more=True, key="budgets"),
+            page([{"id": 2, "projectId": 11}], key="budgets"),
+        ])
+        assert [b["id"] for b in c.list_project_budgets()] == [1, 2]
+        assert all(r["params"].get("includeArchivedProjects") == "true"
+                   for r in c.session.requests)
