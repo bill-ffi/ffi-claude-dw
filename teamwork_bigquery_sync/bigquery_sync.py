@@ -238,6 +238,40 @@ def list_unresolved_timelog_users(client, project_id, dataset_id):
         return None
 
 
+def stored_timelogs_in_window(client, project_id, dataset_id, start_date, end_date_exclusive):
+    """What the timelogs table holds for a window *before* it is replaced:
+    {timelog_id: (project_id, project_is_archived)}. None if the check could
+    not run (never a false clean).
+
+    Exists because each window is a delete-and-reinsert, so an entry the new
+    pull omits is silently deleted. Until 2026-10-02 time.json omitted every
+    entry on an archived project, and 9,014 entries since January vanished
+    that way while every run reported success. Comparing this against the
+    new pull (sync.removed_entries_report) names what a replace would drop.
+    """
+    sql = (
+        "SELECT tl.timelog_id, tl.project_id, (p.archived_at IS NOT NULL) AS archived "
+        f"FROM `{project_id}.{dataset_id}.{TIMELOGS_TABLE}` tl "
+        f"LEFT JOIN `{project_id}.{dataset_id}.{PROJECTS_TABLE}` p ON p.project_id = tl.project_id "
+        "WHERE tl.log_date >= @window_start AND tl.log_date < @window_end"
+    )
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("window_start", "DATE", start_date),
+            bigquery.ScalarQueryParameter("window_end", "DATE", end_date_exclusive),
+        ]
+    )
+    try:
+        return {
+            r[0]: (r[1], bool(r[2]))
+            for r in client.query(sql, job_config=job_config).result()
+        }
+    except Exception as exc:
+        logger.warning("Could not read the stored timelogs for %s to %s: %s",
+                       start_date, end_date_exclusive, exc)
+        return None
+
+
 def _count_timelogs_in_window(client, project_id, dataset_id, start_date, end_date_exclusive):
     """Rows currently stored for a timelogs window."""
     sql = (

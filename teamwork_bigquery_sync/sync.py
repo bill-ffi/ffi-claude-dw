@@ -452,6 +452,25 @@ def run_dry_run(client):
     except Exception as exc:
         print(f"     WARNING: archived-project diagnostic could not run -- {exc}")
 
+    # Archived-project budgets diagnostic. budgets.json is the other list
+    # endpoint whose records belong to projects; projects.json, tasks.json and
+    # time.json all omit archived projects unless asked. This shows whether
+    # budgets.json does too (it is called with no params today). Counts only.
+    print("\n--- Archived-project budgets diagnostic ---")
+    try:
+        def _budgets(extra):
+            budgets = list(client._paginate(PROJECT_BUDGETS_PATH, dict(extra), "budgets"))
+            return len(budgets), len(transform.build_budgets_by_project(budgets))
+        plain = _budgets({})
+        flagged = _budgets({"includeArchivedProjects": "true"})
+        print(f"[OK] budgets.json: {plain[0]} budgets on {plain[1]} projects without "
+              f"includeArchivedProjects, {flagged[0]} on {flagged[1]} with it")
+        if flagged != plain:
+            print("     WARNING: the flag changes the result -- archived projects' "
+                  "budgets are being missed. Add it to list_project_budgets().")
+    except Exception as exc:
+        print(f"     WARNING: budgets diagnostic could not run -- {exc}")
+
     # OOSOOB tag diagnostic. is_oosoob matches transform.OOSOOB_TAG_ID, so
     # confirm that id still exists and still carries the expected name, and
     # show how many entries carry it. Informational: nothing sets any_failed.
@@ -959,6 +978,13 @@ def sync_timelogs_for_window(tw_client, bq_client, gcp_project_id, dataset_id, w
             rows.append(row)
 
     oosoob = oosoob_cross_check(tw_client, rows, window_start, last_day_inclusive)
+    # Read BEFORE the replace, which deletes them.
+    removed = removed_entries_report(
+        bigquery_sync.stored_timelogs_in_window(
+            bq_client, gcp_project_id, dataset_id, window_start, window_end_exclusive
+        ),
+        rows, window_start, last_day_inclusive,
+    )
 
     written = bigquery_sync.replace_timelogs_window(
         bq_client,
@@ -976,7 +1002,61 @@ def sync_timelogs_for_window(tw_client, bq_client, gcp_project_id, dataset_id, w
         "window": [window_start.isoformat(), window_end_exclusive.isoformat()],
         "months_covered": _months_in_window(window_start, window_end_exclusive),
         "oosoob": oosoob,
+        "removed_entries": removed,
     }
+
+
+# A replace that would delete more than this share of a window's stored
+# entries is warned about even when none sit on archived projects -- a coarse
+# catch-all for a pull that comes back short for a reason not yet known.
+TIMELOG_REMOVED_WARN_FRACTION = 0.02
+
+
+def removed_entries_report(stored, rows, window_start, last_day_inclusive):
+    """Which stored entries the new pull lacks, i.e. what the replace is
+    about to delete: {"previously_stored", "removed",
+    "removed_on_archived_projects", "removed_by_project"}. None if the stored
+    rows could not be read.
+
+    Compares timelog ids, not totals: in an open month additions outnumber
+    deletions, so a net count would hide a loss. Some removals are ordinary
+    (someone deleted an entry in Teamwork). One on an archived project is not
+    -- archived projects are read-only, so it means the pull missed it, which
+    is how 9,014 entries were lost until 2026-10-02 (see
+    teamwork_client.list_timelogs). Informational, never fatal. Ids only,
+    since this prints into the Actions log.
+    """
+    if stored is None:
+        return None
+    pulled = {row["timelog_id"] for row in rows}
+    removed = [tid for tid in stored if tid not in pulled]
+    on_archived = sum(1 for tid in removed if stored[tid][1])
+    by_project = {}
+    for tid in removed:
+        by_project[stored[tid][0]] = by_project.get(stored[tid][0], 0) + 1
+    top = sorted(by_project.items(), key=lambda kv: (-kv[1], str(kv[0])))[:10]
+    report = {
+        "previously_stored": len(stored),
+        "removed": len(removed),
+        "removed_on_archived_projects": on_archived,
+        "removed_by_project": [{"project_id": p, "entries": n} for p, n in top],
+    }
+    if on_archived:
+        logger.warning(
+            "Replacing %s to %s deletes %d stored entries on ARCHIVED projects, "
+            "which are read-only in Teamwork -- the pull missed them. Check that "
+            "time.json still honours %s. By project: %s",
+            window_start, last_day_inclusive, on_archived,
+            TIMELOGS_LIST_PARAMS, report["removed_by_project"],
+        )
+    elif stored and len(removed) > TIMELOG_REMOVED_WARN_FRACTION * len(stored):
+        logger.warning(
+            "Replacing %s to %s deletes %d of %d stored entries (over %.0f%%). "
+            "Deletions in Teamwork are rare; check the pull. By project: %s",
+            window_start, last_day_inclusive, len(removed), len(stored),
+            TIMELOG_REMOVED_WARN_FRACTION * 100, report["removed_by_project"],
+        )
+    return report
 
 
 def oosoob_cross_check(tw_client, rows, window_start, last_day_inclusive):
