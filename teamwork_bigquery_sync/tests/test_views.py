@@ -903,7 +903,8 @@ class TestClientMonthView:
     def test_archived_budget_projects_still_count(self, sql):
         # "Whether the project is archived or not" (2026-10-03): a client's
         # Monthly Books project archived at year end keeps its past budget.
-        cte = sql[self.NAME].split("budgeted_projects AS (", 1)[1].split("),", 1)[0]
+        cte = sql[self.NAME].split("budgeted_projects AS (", 1)[1].split("\n),\n", 1)[0]
+        assert "WHERE p.category_name" in cte  # the slice reaches the filter
         assert "archived_at" not in cte
 
     def test_budget_is_not_divided_again_in_sql(self, sql):
