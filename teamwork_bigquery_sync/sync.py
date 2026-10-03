@@ -510,6 +510,43 @@ def run_dry_run(client):
     except Exception as exc:
         print(f"     PROBE failed -- {exc}")
 
+    # TEMPORARY probe (2026-10-03): Monthly Books (2026) / Monthly Close.
+    print("\n--- PROBE: Monthly Close budgets ---")
+    try:
+        import re as _re
+        from collections import Counter
+        projects, included = client.list_projects()
+        cats = {c.get("id"): c.get("name") for c in client.list_project_categories()}
+        print(f"     categories: {sorted(set(cats.values()))}")
+        print(f"     project 'type' values: {dict(Counter(str(p.get('type')) for p in projects))}")
+        budgets = client.list_project_budgets()
+        by_pid = {}
+        for b in budgets:
+            by_pid.setdefault(b.get("projectId") or (b.get("project") or {}).get("id"), []).append(b)
+        pat = _re.compile(r"^(\S+) Monthly Books \(2026\)$")
+        def desc(p):
+            bs = by_pid.get(p.get("id"), [])
+            return {"name": p.get("name"), "cat": cats.get(p.get("categoryId")),
+                    "type": p.get("type"), "archived": bool(p.get("archivedAt")),
+                    "start": str(p.get("startAt") or p.get("startDate"))[:10],
+                    "budgets": [f"{b.get('type')}/{'rep' if b.get('isRepeating') else 'one'}/{str(b.get('startDate'))[:10]}" for b in bs]}
+        loose = [p for p in projects if "monthly books (2026)" in str(p.get("name")).lower()]
+        print(f"     names containing 'Monthly Books (2026)': {len(loose)}; strict pattern: "
+              f"{sum(1 for p in loose if pat.match(str(p.get('name'))))}")
+        for p in sorted(loose, key=lambda p: str(p.get("name"))):
+            print("     MB: " + json.dumps(desc(p)))
+        mc = [p for p in projects if str(cats.get(p.get("categoryId"))).lower() == "monthly close"]
+        print(f"     category 'Monthly Close': {len(mc)} projects, {sum(1 for p in mc if not p.get('archivedAt'))} active")
+        for p in mc:
+            if p not in loose and not p.get("archivedAt"):
+                print("     MC-other-active: " + json.dumps(desc(p)))
+        for pid, bs in by_pid.items():
+            p = next((q for q in projects if q.get("id") == pid), {})
+            if not p.get("archivedAt") and p not in loose:
+                print("     budget-elsewhere-active: " + json.dumps(desc(p)))
+    except Exception as exc:
+        import traceback; print(f"     PROBE failed -- {traceback.format_exc()}")
+
     # OOSOOB tag diagnostic. is_oosoob matches transform.OOSOOB_TAG_ID, so
     # confirm that id still exists and still carries the expected name, and
     # show how many entries carry it. Informational: nothing sets any_failed.
