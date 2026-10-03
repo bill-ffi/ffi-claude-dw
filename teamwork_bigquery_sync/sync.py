@@ -731,7 +731,49 @@ def sync_projects(tw_client, bq_client, dataset_ref, allow_shrink=False):
         "clients_resolved": len(client_names),
         "rows_with_client_name": rows_with_client_name,
         "task_pull_project_scope": scope_breakdown,
+        "budget_setup": budget_setup_report(rows),
     }, task_pull_project_ids
+
+
+def budget_setup_report(rows):
+    """How client budgets are set up in Teamwork, against the rule v_client_month
+    applies (agreed 2026-10-03): one recurring DOLLAR budget per client, on its
+    project in views.BUDGET_PROJECT_CATEGORY. Lists, by project name, the
+    active budget projects with no dollar budget (their clients show no budget
+    in reports), active projects carrying a budget outside that category
+    (ignored by reports), and clients with more than one dollar budget project
+    (their target is counted twice). Warns only on the last, which inflates a
+    figure; the first two are setup work, reported every run.
+    """
+    category, budget_type = views.BUDGET_PROJECT_CATEGORY, views.BUDGET_TYPE
+
+    def has_target(row):
+        return row.get("budget_type") == budget_type and (row.get("budget_capacity") or 0) > 0
+
+    active = [r for r in rows if not r.get("archived_at")]
+    in_category = [r for r in active if r.get("category_name") == category]
+    without = sorted(r["name"] for r in in_category if not has_target(r))
+    outside = sorted(
+        f"{r['name']} ({r.get('budget_type')})" for r in active
+        if r.get("category_name") != category and r.get("budget_type")
+    )
+    by_client = {}
+    for r in rows:
+        if r.get("category_name") == category and has_target(r) and r.get("client_name"):
+            by_client.setdefault(r["client_name"], []).append(r["name"])
+    duplicated = {c: sorted(n) for c, n in sorted(by_client.items()) if len(n) > 1}
+    if duplicated:
+        logger.warning(
+            "Clients with more than one %s project carrying a dollar budget -- "
+            "v_client_month adds them, so each target counts more than once: %s",
+            category, duplicated,
+        )
+    return {
+        "budget_projects_with_target": sum(1 for r in in_category if has_target(r)),
+        "budget_projects_without_target": without,
+        "budgets_outside_budget_category": outside,
+        "clients_with_several_budget_projects": duplicated,
+    }
 
 
 ACTIVITY_FIELD_NAME = "Activity"

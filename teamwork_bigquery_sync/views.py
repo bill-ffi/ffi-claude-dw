@@ -205,6 +205,18 @@ DATA_FRESHNESS_STALE_AFTER_HOURS = 18
 # --backfill-months; lower it only if earlier history is actually loaded.
 CLIENT_MONTH_HISTORY_FLOOR = "2026-01-01"
 
+# Where client budgets live (agreed 2026-10-03). Since spring 2026 each
+# client's budget is a recurring monthly DOLLAR target on its one project in
+# this category, named "### Monthly Books (2026)" (### = client code). The
+# category is matched rather than the name so a differently named project in
+# it (e.g. "TRBC Monthly Close (2026)") still counts. Budgets anywhere else --
+# older one-off budgets on per-period projects, onboarding budgets, hour
+# budgets -- are not client targets and are ignored here.
+BUDGET_PROJECT_CATEGORY = "Monthly Close"
+# Only dollar budgets are targets; an hour (TIME) budget has no dollar figure
+# (transform.normalize_project leaves its dollar columns NULL).
+BUDGET_TYPE = "FINANCIAL"
+
 # v_client_activity_analysis: clients with at least this much billable revenue
 # in TOTAL over the last CLIENT_ACTIVITY_MONTHS complete calendar months (not
 # per month), and the length of that window (confirmed 2026-09-30).
@@ -1525,18 +1537,20 @@ WHERE p.archived_at IS NULL
     # convenience for single-month display only -- summing or averaging it
     # across months is wrong. Divide the two sums instead.
     #
-    # Month spine: one row per month each budgeted project is live, bounded by
-    # its own start_date and end_date per your instruction, clamped to
-    # CLIENT_MONTH_HISTORY_FLOOR at the bottom and the current month at the
-    # top. A project with no end_date is treated as ongoing. Budget therefore
-    # accrues only while the engagement is live -- charging a client for months
-    # before they onboarded would make the percentage meaningless.
+    # Which budgets (agreed 2026-10-03): the recurring dollar budget on each
+    # client's BUDGET_PROJECT_CATEGORY project, archived or not. Nothing else.
     #
-    # Budget is the CURRENT recurring budget repeated across months, because
-    # transform.pick_current_budget() keeps only the active one and the
-    # warehouse holds no budget history. Accepted deliberately (the feature is
-    # new in Teamwork); if a recurring budget is ever edited, past months
-    # silently re-base. See README.
+    # Which months: those the budget project is live -- its start_date to its
+    # end_date (no end_date = ongoing), clamped to CLIENT_MONTH_HISTORY_FLOOR
+    # and the current month -- AND in which the client has time logged. A
+    # month with no time carries no budget (this replaced the earlier rule
+    # that a quiet month still consumed budget).
+    #
+    # Which amount: the CURRENT recurring amount, repeated back to the
+    # project's start. Teamwork only returns the current month's copy of a
+    # recurring budget (all start 2026-10-01), so the warehouse holds no
+    # budget history; if an amount is edited, past months silently re-base.
+    # Accepted deliberately. See README.
     views["v_client_month"] = f"""
 CREATE OR REPLACE VIEW {fqn("v_client_month")} AS
 WITH bounds AS (
@@ -1544,9 +1558,9 @@ WITH bounds AS (
     DATE_TRUNC(DATE('{CLIENT_MONTH_HISTORY_FLOOR}'), MONTH) AS floor_month,
     DATE_TRUNC(CURRENT_DATE('{REPORTING_TIMEZONE}'), MONTH) AS current_month
 ),
--- Every non-archived project that carries a budget, with the month window it
--- is live for. Projects without a budget are absent here on purpose: they
--- contribute no denominator. They still contribute revenue below.
+-- Each client's budget project: a dollar budget in the budget category,
+-- archived or not, with the month window it is live for. Projects outside it
+-- contribute no denominator; they still contribute revenue below.
 budgeted_projects AS (
   SELECT
     p.project_id,
@@ -1562,7 +1576,8 @@ budgeted_projects AS (
     ) AS last_month
   FROM {projects} p
   CROSS JOIN bounds b
-  WHERE p.archived_at IS NULL
+  WHERE p.category_name = '{BUDGET_PROJECT_CATEGORY}'
+    AND p.budget_type = '{BUDGET_TYPE}'
     AND COALESCE(p.budget_capacity, 0) > 0
     AND p.client_name IS NOT NULL
 ),
@@ -1604,11 +1619,12 @@ client_month_actuals AS (
   GROUP BY d.client_name, d.log_month
 )
 SELECT
-  -- FULL OUTER JOIN so neither side is lost: a budgeted month with no time
-  -- still consumes budget, and revenue on an unbudgeted project still shows.
-  COALESCE(b.client_name, a.client_name) AS client_name,
-  COALESCE(b.month_start, a.month_start) AS month_start,
-  FORMAT_DATE('%Y-%m', COALESCE(b.month_start, a.month_start)) AS month_label,
+  -- One row per client-month WITH TIME LOGGED. The budget joins onto those
+  -- months only, so a month with no time carries no budget, and a month with
+  -- time but no budget project still shows its revenue.
+  a.client_name,
+  a.month_start,
+  FORMAT_DATE('%Y-%m', a.month_start) AS month_label,
 
   -- additive: safe to SUM over any date range
   COALESCE(b.monthly_budget, 0) AS monthly_budget,
@@ -1616,10 +1632,11 @@ SELECT
   COALESCE(a.billable_hours, 0) AS billable_hours,
   COALESCE(a.logged_hours, 0) AS logged_hours,
   COALESCE(a.time_entry_count, 0) AS time_entry_count,
-  -- Rollout check. While budgets are still being added to active projects,
-  -- project_count exceeding budgeted_project_count means this client-month's
-  -- revenue includes work from projects contributing no denominator, so any
-  -- budget percentage computed from it reads high. Converges as budgets land.
+  -- Rollout check. budgeted_project_count is the client's budget projects
+  -- with a dollar budget -- normally 1. has_budget FALSE on a client with
+  -- revenue means its Monthly Books project has no budget yet, so any budget
+  -- percentage over a range including it reads high. More than 1 means two
+  -- budget projects for one client, which double-counts the target.
   COALESCE(b.budgeted_project_count, 0) AS budgeted_project_count,
   COALESCE(a.project_count, 0) AS project_count,
   (COALESCE(b.monthly_budget, 0) > 0) AS has_budget
@@ -1645,10 +1662,10 @@ SELECT
   --   SUM(billable_revenue) / SUM(monthly_budget)
   --
   -- "Over budget" is the same expression compared to 1.
-FROM client_month_budget b
-FULL OUTER JOIN client_month_actuals a
-  ON a.client_name = b.client_name
- AND a.month_start = b.month_start
+FROM client_month_actuals a
+LEFT JOIN client_month_budget b
+  ON b.client_name = a.client_name
+ AND b.month_start = a.month_start
 """
 
     # Client activity analysis: one row per client with at least

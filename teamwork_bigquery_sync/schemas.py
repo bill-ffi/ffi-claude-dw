@@ -44,6 +44,11 @@ PROJECTS_SCHEMA = [
     bigquery.SchemaField("completed_by", "INT64"),
     bigquery.SchemaField("archived_at", "TIMESTAMP"),
     bigquery.SchemaField("synced_at", "TIMESTAMP", mode="REQUIRED"),
+    # The current budget's budgets.json "type": FINANCIAL (capacity in cents,
+    # converted to the dollar columns above) or TIME (capacity in minutes;
+    # the dollar columns are left NULL). Added 2026-10-03, last so that
+    # ensure_table_columns() appends it in schema order.
+    bigquery.SchemaField("budget_type", "STRING"),
 ]
 
 TASKS_SCHEMA = [

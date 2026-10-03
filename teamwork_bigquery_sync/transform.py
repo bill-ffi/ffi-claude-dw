@@ -57,6 +57,10 @@ def cents_to_dollars(value):
         return None
 
 
+# budgets.json "type" of a budget measured in hours; capacity is minutes.
+TIME_BUDGET_TYPE = "TIME"
+
+
 def pick_current_budget(budgets_for_project):
     """A project can have several budgets (e.g. recurring monthly time
     budgets). Prefer the ACTIVE one; among ties, the latest start date.
@@ -130,10 +134,15 @@ def normalize_project(
     category_id = raw.get("categoryId") or _ref_id(raw.get("category"))
     company_id = raw.get("companyId") or _ref_id(raw.get("company"))
     budget = pick_current_budget(budgets_by_project_id.get(project_id, []))
+    budget_type = budget.get("type") if budget else None
     # Cents on the wire; see cents_to_dollars(). budget_left is derived from
     # the converted values, which is equivalent to converting the difference.
-    budget_capacity = cents_to_dollars(budget.get("capacity") if budget else None)
-    budget_used = cents_to_dollars(budget.get("capacityUsed") if budget else None)
+    # A TIME budget's capacity is MINUTES, not cents, so it gets no dollar
+    # figure at all rather than a wrong one (40 hours would read as $24).
+    # Confirmed live 2026-10-03: budgets.json "type" is FINANCIAL or TIME.
+    money = budget if budget and budget_type != TIME_BUDGET_TYPE else None
+    budget_capacity = cents_to_dollars(money.get("capacity") if money else None)
+    budget_used = cents_to_dollars(money.get("capacityUsed") if money else None)
     budget_left = (
         budget_capacity - budget_used
         if budget_capacity is not None and budget_used is not None
@@ -160,6 +169,7 @@ def normalize_project(
         "budget_capacity": budget_capacity,
         "budget_used": budget_used,
         "budget_left": budget_left,
+        "budget_type": budget_type,
         "tag_ids": raw.get("tagIds") or [],
         # Constructed, not read off the payload -- see project_web_link().
         # The meta fallback only covers the no-base_url case; it has never

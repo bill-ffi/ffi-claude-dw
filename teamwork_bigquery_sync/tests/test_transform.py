@@ -8,6 +8,7 @@ from datetime import date
 
 import pytest
 
+import schemas
 import transform
 
 
@@ -426,3 +427,33 @@ class TestMoneyUnitsDifferPerEndpoint:
             {"id": 1, "date": "2026-09-01", "minutes": 60, "billableRate": 150}
         )
         assert row["billable_rate"] == 150
+
+
+class TestBudgetType:
+    """157 of 200 budgets turned out to be TIME budgets, whose capacity is
+    minutes, not cents (2026-10-03). Converting them as cents showed 40 hours
+    as $24. A time budget now gets no dollar figure, and its type is kept."""
+
+    def project(self, budget):
+        raw = {"id": 7, "name": "X Monthly Books (2026)", "status": "active"}
+        return transform.normalize_project(raw, {}, {7: [budget]})
+
+    def test_financial_budget_converts_cents_and_records_its_type(self):
+        row = self.project({"type": "FINANCIAL", "status": "ACTIVE",
+                            "capacity": 150000, "capacityUsed": 50000})
+        assert row["budget_type"] == "FINANCIAL"
+        assert row["budget_capacity"] == 1500.0 and row["budget_left"] == 1000.0
+
+    def test_time_budget_gets_no_dollar_figure(self):
+        row = self.project({"type": "TIME", "status": "ACTIVE",
+                            "capacity": 2400, "capacityUsed": 600})
+        assert row["budget_type"] == "TIME"
+        assert row["budget_capacity"] is None
+        assert row["budget_used"] is None and row["budget_left"] is None
+
+    def test_no_budget_has_no_type(self):
+        raw = {"id": 7, "name": "X", "status": "active"}
+        assert transform.normalize_project(raw, {}, {})["budget_type"] is None
+
+    def test_column_is_last_so_it_is_appended_in_order(self):
+        assert schemas.PROJECTS_SCHEMA[-1].name == "budget_type"

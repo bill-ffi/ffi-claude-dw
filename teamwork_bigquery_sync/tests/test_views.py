@@ -889,23 +889,37 @@ class TestClientMonthView:
         y, m, d = (int(p) for p in views.CLIENT_MONTH_HISTORY_FLOOR.split("-"))
         assert date(y, m, d)
 
-    def test_only_budgeted_non_archived_projects_form_the_denominator(self, sql):
+    def test_only_dollar_budgets_on_budget_projects_form_the_denominator(self, sql):
+        # Agreed 2026-10-03: client budgets live on the client's Monthly Close
+        # project as a recurring DOLLAR target. Budgets elsewhere (old one-off
+        # project budgets, onboarding, hour budgets) are not client targets.
         body = sql[self.NAME]
-        assert "WHERE p.archived_at IS NULL" in body
+        assert f"WHERE p.category_name = '{views.BUDGET_PROJECT_CATEGORY}'" in body
+        assert f"AND p.budget_type = '{views.BUDGET_TYPE}'" in body
+        assert views.BUDGET_PROJECT_CATEGORY == "Monthly Close"
+        assert views.BUDGET_TYPE == "FINANCIAL"
         assert "COALESCE(p.budget_capacity, 0) > 0" in body
+
+    def test_archived_budget_projects_still_count(self, sql):
+        # "Whether the project is archived or not" (2026-10-03): a client's
+        # Monthly Books project archived at year end keeps its past budget.
+        cte = sql[self.NAME].split("budgeted_projects AS (", 1)[1].split("),", 1)[0]
+        assert "archived_at" not in cte
 
     def test_budget_is_not_divided_again_in_sql(self, sql):
         """transform.cents_to_dollars already converted it on ingest."""
         body = sql[self.NAME]
         assert "budget_capacity / 100" not in body
 
-    def test_full_outer_join_keeps_both_sides(self, sql):
-        """A budgeted month with no time still consumes budget; revenue on an
-        unbudgeted project must not vanish."""
+    def test_budget_applies_only_to_months_with_time(self, sql):
+        # Agreed 2026-10-03: the budget applies to the periods where time is
+        # logged. So the rows are the client-months with time, and the budget
+        # joins onto them -- a budget month with no time yields no row, and a
+        # month with time but no budget project keeps its revenue.
         body = sql[self.NAME]
-        assert "FULL OUTER JOIN client_month_actuals a" in body
-        assert "COALESCE(b.client_name, a.client_name) AS client_name" in body
-        assert "COALESCE(b.month_start, a.month_start) AS month_start" in body
+        assert "FROM client_month_actuals a\nLEFT JOIN client_month_budget b" in body
+        assert "FULL OUTER JOIN" not in body
+        assert "  a.client_name,\n  a.month_start,\n" in body
 
     def test_additive_columns_are_zero_filled_so_they_can_be_summed(self, sql):
         body = sql[self.NAME]
@@ -935,7 +949,7 @@ class TestClientMonthView:
         added here, it must be as an aggregate in the report, not a column.
         """
         body = sql[self.NAME]
-        select = body[body.rindex("SELECT"):body.rindex("FROM client_month_budget")]
+        select = body[body.rindex("SELECT"):body.rindex("FROM client_month_actuals a")]
         # Strip SQL comments: the assertion is about emitted columns, not
         # prose. Explaining why a percentage is absent should not trip a test
         # looking for percentages.

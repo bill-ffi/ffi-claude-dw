@@ -212,15 +212,26 @@ absence: one for these two column names, one asserting no non-additive measure
 > them, and one rescaled column beside two that are not is worse than a
 > consistent convention.
 
-**Month spine.** One row per month each budgeted project is live, bounded by
-that project's own `start_date` and `end_date` (per instruction), clamped below
-by `CLIENT_MONTH_HISTORY_FLOOR` and above by the current month. No `end_date`
-means ongoing. Budget therefore accrues only while the engagement is live —
-charging a client for months before they onboarded would make the percentage
-meaningless. Simulated across seven cases before shipping (started before the
-floor, started and ended mid-window, ended before the floor, `end_date` in the
-future, no dates at all, starts next month); an empty window yields no rows
-rather than an error.
+**Which budgets (agreed 2026-10-03).** Since spring 2026 each client's budget
+is a **recurring monthly dollar target** on its one project in the
+**Monthly Close** category (`views.BUDGET_PROJECT_CATEGORY`), named
+"### Monthly Books (2026)". Only those count, archived or not, and only
+`budget_type = 'FINANCIAL'` (`views.BUDGET_TYPE`). The category is matched
+rather than the name so "TRBC Monthly Close (2026)" counts too. Everything
+else is ignored: the one-off budgets on older per-period projects
+("CHT - Monthly Books (2025-11)"), onboarding budgets, and hour budgets.
+Measured that day: 48 "### Monthly Books (2026)" projects, **16 with a
+dollar budget**; the full sync's `budget_setup` (projects stage) lists the
+rest every run, with any budgets outside the category and any client with
+two budget projects (warned, since the view would add both).
+
+**Which months.** A client-month carries the budget when the budget project
+is live — its `start_date` to its `end_date` (no `end_date` = ongoing),
+clamped below by `CLIENT_MONTH_HISTORY_FLOOR` and above by the current month —
+**and the client has time logged that month**. The rows are the client-months
+with time (`client_month_actuals LEFT JOIN client_month_budget`), so a month
+with no time has no row and no budget. This replaced the earlier
+`FULL OUTER JOIN`, under which a quiet month still consumed budget.
 
 **`CLIENT_MONTH_HISTORY_FLOOR` is `2026-01-01`** because `timelogs` history
 begins there. Without the clamp, a project that started earlier would get
@@ -228,23 +239,17 @@ budgeted months carrying a full month's budget against artificially zero
 revenue, dragging every percentage down. Raise it only after backfilling the
 corresponding months.
 
-**A `FULL OUTER JOIN`** keeps both sides: a budgeted month with no time logged
-still consumes budget (a quiet retainer month is real), and revenue on a
-project with no budget still appears rather than vanishing.
+> ⚠️ **Until every client's budget project has a budget, totals across
+> clients read high.** Revenue counts every client; only clients whose budget
+> project carries a dollar budget contribute a denominator. `has_budget` is the
+> per-row tell, and `budget_setup.budget_projects_without_target` in the
+> full sync's `RUN_SUMMARY` names the projects still to set up.
 
-> ⚠️ **While budgets are still being rolled out, any budget percentage reads
-> high.**
-> Revenue counts every project; only budgeted projects contribute a
-> denominator. `project_count` exceeding `budgeted_project_count` on a
-> client-month is the tell. A second, budgeted-projects-only revenue column was
-> built and then **deliberately cut** — budgets are expected on all active
-> projects imminently, and two revenue columns that converge to the same number
-> would be permanent confusion for a temporary condition.
-
-**Budget history is not modelled.** `transform.pick_current_budget()` keeps only
-the active budget, so the current recurring figure is repeated across all
-months. Accepted deliberately — the feature is new in Teamwork — but if a
-recurring budget is ever edited, past months silently re-base. Fixing that
+**Budget history is not modelled.** Teamwork returns only the current month's
+copy of a recurring budget (every one starts 2026-10-01), and
+`transform.pick_current_budget()` keeps one budget per project, so the current
+amount is repeated back to the project's start (agreed 2026-10-03). If an
+amount is edited, past months silently re-base. Fixing that
 means persisting the budgets the pipeline already fetches and discards; see the
 budget entry under "Known gaps".
 
@@ -1436,14 +1441,18 @@ leaves GCP).
     unconverted, specifically to stop someone "finishing the job".
   - `projects` is truncate-and-reload, so one full sync corrected all rows;
     no backfill was needed.
-  - **`budget_type` is deliberately NOT captured.** Teamwork also supports
-    *time* budgets, whose `capacity` is **minutes** — on which this conversion
-    would be wrong. Every budget checked on this account is financial, and
-    sourcing a type column means guessing a payload key, which is the exact
-    mistake that produced the two dead `web_link` columns. If a time budget is
-    ever configured, the symptom is a project whose budget reads as an
-    implausibly small dollar figure; confirm the payload key first, then
-    convert conditionally.
+  - **`budget_type` (captured 2026-10-03).** Teamwork also has *time*
+    budgets, whose `capacity` is **minutes**, and this conversion was wrong
+    for them. It was first skipped because every budget then visible was
+    financial — but only the 20 budgets on active projects were visible
+    (see "Budgets on archived projects"). With all 200: **157 are TIME**,
+    including 2 on active projects (SOC - Non-Monthly, MONO Non-Monthly
+    2026), which read as tiny dollar figures (40 hours as $24). The payload
+    key was confirmed live before use: `budgets.json` `type` is `FINANCIAL`
+    or `TIME`. `projects.budget_type` now carries it, and a TIME budget's
+    dollar columns are left NULL rather than converted. Budgets are meant to
+    be dollar targets (2026-10-03), so a TIME budget is a setup error to fix
+    in Teamwork, not a figure to convert.
 
 - **`web_link` is empty on BOTH `tasks` and `projects`, and always has been
   (confirmed 2026-09-15).** Measured: 0 of 14,595 tasks and 0 of 1,890
@@ -2184,7 +2193,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-553 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
+564 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
