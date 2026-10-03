@@ -1302,6 +1302,22 @@ leaves GCP).
     check could not run. This would have fired on every backfill since the
     first archived pay cycle; no check that compared our rows with the same
     short pull could have.
+- **Every entry must reach its project and task (check added 2026-10-03).**
+  The agreed objective: every time entry for the months pulled is loaded,
+  archived projects included, and every project and task that 2026 time is
+  logged against is loaded too. The task scope (`select_task_pull_projects`)
+  is *argued* to cover that — archived projects are read-only, so a project
+  with 2026 time was open in 2026 and is either active or archived after the
+  cutoff — but an argued scope is exactly what failed on time, so both full
+  syncs and backfills now measure it: `timelog_joins` in `RUN_SUMMARY`
+  (`bigquery_sync.check_timelog_joins`, all history) carries
+  `missing_project` and `missing_task` (entries, hours; `missing_task` also
+  `by_project`), which should both be **0** and warn otherwise, and
+  `no_task` — time logged straight to a project, which Teamwork allows and
+  which is a cleanup matter for `v_exception_time_without_task`, reported
+  but never warned. `null` means the check could not run. Not covered by any
+  check: time on a project the API key's user cannot see — only a periodic
+  comparison with Teamwork's own time report tests that.
 - **Budgets on archived projects (fixed 2026-10-02).** `budgets.json` has the
   same trap: **20 budgets without `includeArchivedProjects=true`, 200 with
   it** — 179 more projects, all archived. `meta.page.count` agrees and paging
@@ -2168,7 +2184,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-544 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
+553 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 
