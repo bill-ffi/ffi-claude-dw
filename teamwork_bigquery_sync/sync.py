@@ -472,6 +472,48 @@ def run_dry_run(client):
     except Exception as exc:
         print(f"     WARNING: budgets diagnostic could not run -- {exc}")
 
+    # TEMPORARY probe (2026-10-03): the 12 entries whose task is still missing.
+    print("\n--- PROBE: tasks still missing ---")
+    try:
+        projects = {pr.get("id"): pr for pr in client.list_projects()[0]}
+        for pid in (1433457, 1308229, 1388472, 1389349, 1389296):
+            pr = projects.get(pid, {})
+            times = list(client._paginate(TIMELOGS_PATH, dict(TIMELOGS_LIST_PARAMS,
+                         projectIds=str(pid), startDate="2026-01-01",
+                         endDate=date.today().isoformat()), "timelogs"))
+            timed = {}
+            for t in times:
+                if t.get("taskId"):
+                    timed[t["taskId"]] = timed.get(t["taskId"], 0) + 1
+            got = list(client._paginate(TASKS_PATH, dict(TeamworkClient.TASK_SCOPE_PARAMS,
+                       projectIds=str(pid)), "tasks"))
+            ids = {t.get("id") for t in got}
+            missing = sorted(set(timed) - ids)
+            print(f"     project {pid} {pr.get('name')!r} archivedAt={pr.get('archivedAt')}: "
+                  f"tasks={len(got)} timed_tasks={len(timed)} missing={[(m, timed[m]) for m in missing]}")
+            for tid in missing:
+                try:
+                    one = client._get(f"/projects/api/v3/tasks/{tid}.json", {"include": "tasklists,projects"})
+                    t = one.get("task") or {}
+                    inc = one.get("included") or {}
+                    tl = (inc.get("tasklists") or {}).get(str(t.get("tasklistId"))) or {}
+                    tp = (inc.get("projects") or {}).get(str((tl or {}).get("projectId"))) or {}
+                    print("       task " + json.dumps({
+                        "id": tid, "name": t.get("name"), "status": t.get("status"),
+                        "deletedAt": t.get("deletedAt"), "tasklistId": t.get("tasklistId"),
+                        "tasklist": tl.get("name"), "tasklist_status": tl.get("status"),
+                        "tasklist_projectId": tl.get("projectId"), "tasklist_project": tp.get("name"),
+                        "isPrivate": t.get("isPrivate"), "parentTaskId": t.get("parentTaskId"),
+                        "createdAt": t.get("createdAt")}, default=str))
+                except Exception as exc:
+                    print(f"       task {tid}: {str(exc)[:160]}")
+            if missing:
+                sample = next(t for t in times if t.get("taskId") == missing[0])
+                print(f"       its time entry: projectId={sample.get('projectId')} "
+                      f"taskIdPreMove={sample.get('taskIdPreMove')} taskPreMove={sample.get('taskPreMove')}")
+    except Exception as exc:
+        import traceback; print(f"     PROBE failed -- {traceback.format_exc()[-600:]}")
+
     # OOSOOB tag diagnostic. is_oosoob matches transform.OOSOOB_TAG_ID, so
     # confirm that id still exists and still carries the expected name, and
     # show how many entries carry it. Informational: nothing sets any_failed.
