@@ -472,6 +472,36 @@ def run_dry_run(client):
     except Exception as exc:
         print(f"     WARNING: budgets diagnostic could not run -- {exc}")
 
+    # TEMPORARY probe (2026-10-03): budget date fields. No amounts printed.
+    print("\n--- PROBE: budget dates ---")
+    try:
+        from collections import Counter
+        projects = {pr.get("id"): pr for pr in client.list_projects()[0]}
+        budgets = client.list_project_budgets()
+        keys = ("type", "status", "isRepeating", "repeatPeriod", "repeatUnit",
+                "timelogType", "isRetainer", "expenseType")
+        for k in keys:
+            print(f"     {k}: {dict(Counter(str(b.get(k)) for b in budgets))}")
+        print(f"     endDate null: {sum(1 for b in budgets if not b.get('endDate'))} of {len(budgets)}")
+        print(f"     originatorBudgetId set: {sum(1 for b in budgets if b.get('originatorBudgetId'))}")
+        same_start = same_end = 0
+        for b in budgets:
+            pr = projects.get(b.get("projectId") or (b.get("project") or {}).get("id")) or {}
+            same_start += str(b.get("startDate"))[:10] == str(pr.get("startAt") or pr.get("startDate"))[:10]
+            same_end += str(b.get("endDate"))[:10] == str(pr.get("endAt") or pr.get("endDate"))[:10]
+        print(f"     budget start == project start: {same_start}; end == end: {same_end}")
+        for b in sorted(budgets, key=lambda b: str(b.get("startDate")))[::25]:
+            pr = projects.get(b.get("projectId")) or {}
+            print("     sample: " + json.dumps({
+                "project": pr.get("name"), "archived": bool(pr.get("archivedAt")),
+                "b_start": b.get("startDate"), "b_end": b.get("endDate"),
+                "p_start": pr.get("startAt") or pr.get("startDate"),
+                "p_end": pr.get("endAt") or pr.get("endDate"),
+                "repeat": [b.get("isRepeating"), b.get("repeatPeriod"), b.get("repeatUnit")],
+                "seq": b.get("sequenceNumber"), "type": b.get("type")}, default=str))
+    except Exception as exc:
+        print(f"     PROBE failed -- {exc}")
+
     # OOSOOB tag diagnostic. is_oosoob matches transform.OOSOOB_TAG_ID, so
     # confirm that id still exists and still carries the expected name, and
     # show how many entries carry it. Informational: nothing sets any_failed.
