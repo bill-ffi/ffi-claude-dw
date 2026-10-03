@@ -472,6 +472,50 @@ def run_dry_run(client):
     except Exception as exc:
         print(f"     WARNING: budgets diagnostic could not run -- {exc}")
 
+    # TEMPORARY probe (2026-10-03): can Teamwork return deleted tasks?
+    print("\n--- PROBE: deleted tasks ---")
+    try:
+        pid = 1389322  # GRPN Non-Monthly (2026)
+        times = list(client._paginate(TIMELOGS_PATH, dict(TIMELOGS_LIST_PARAMS,
+                     projectIds=str(pid), startDate="2026-01-01",
+                     endDate=date.today().isoformat()), "timelogs"))
+        timed = {t.get("taskId") for t in times if t.get("taskId")}
+        print(f"     time entries on project: {len(times)}, distinct task ids: {len(timed)}")
+        base = dict(TeamworkClient.TASK_SCOPE_PARAMS, projectIds=str(pid))
+        variants = {
+            "scope only": {},
+            "showDeleted": {"showDeleted": "true"},
+            "includeDeleted": {"includeDeleted": "true"},
+            "includeDeletedTasks": {"includeDeletedTasks": "true"},
+            "status=deleted": {"status": "deleted"},
+        }
+        missing = None
+        for label, extra in variants.items():
+            got = list(client._paginate(TASKS_PATH, dict(base, **extra), "tasks"))
+            ids = {t.get("id") for t in got}
+            gone = sorted(timed - ids)
+            if label == "scope only":
+                missing = gone
+            dels = sum(1 for t in got if t.get("deletedAt") or t.get("status") == "deleted")
+            print(f"     {label:20} tasks={len(got)} flagged_deleted={dels} "
+                  f"timed_tasks_missing={len(gone)}")
+        print(f"     missing ids (scope only): {missing[:12]}")
+        for tid in (missing or [])[:3]:
+            for path in (f"/projects/api/v3/tasks/{tid}.json", f"/tasks/{tid}.json"):
+                try:
+                    one = client._get(path, {})
+                    t = one.get("task") or one.get("todo-item") or {}
+                    print(f"     GET {path}: keys={sorted(one.keys())[:6]} name={t.get('name') or t.get('content')!r} "
+                          f"status={t.get('status')} deletedAt={t.get('deletedAt')}")
+                except Exception as exc:
+                    print(f"     GET {path}: {str(exc)[:120]}")
+        sample = next((t for t in times if t.get("taskId") in set(missing or [])), None)
+        if sample:
+            print(f"     time entry on a missing task: task={sample.get('task')} "
+                  f"taskIdPreMove={sample.get('taskIdPreMove')} keys={sorted(sample.keys())}")
+    except Exception as exc:
+        import traceback; print(f"     PROBE failed -- {traceback.format_exc()[-600:]}")
+
     # OOSOOB tag diagnostic. is_oosoob matches transform.OOSOOB_TAG_ID, so
     # confirm that id still exists and still carries the expected name, and
     # show how many entries carry it. Informational: nothing sets any_failed.
