@@ -1087,6 +1087,27 @@ def oosoob_cross_check(tw_client, rows, window_start, last_day_inclusive):
     return {"marked": marked, "teamwork_count": teamwork_count}
 
 
+def timelog_join_report(bq_client, cfg):
+    """bigquery_sync.check_timelog_joins, warning when time cannot reach its
+    project or task. Informational, never fatal."""
+    joins = bigquery_sync.check_timelog_joins(bq_client, cfg.gcp_project_id, cfg.bq_dataset)
+    if joins and joins["missing_project"]["entries"]:
+        logger.warning(
+            "%d time entries (%sh) have no row in projects, so their project and "
+            "client read blank. Check teamwork_client.list_projects().",
+            joins["missing_project"]["entries"], joins["missing_project"]["hours"],
+        )
+    if joins and joins["missing_task"]["entries"]:
+        logger.warning(
+            "%d time entries (%sh) name a task that is not in tasks, so their task "
+            "and Activity read blank. Check sync.select_task_pull_projects(). By "
+            "project: %s",
+            joins["missing_task"]["entries"], joins["missing_task"]["hours"],
+            joins["missing_task"]["by_project"],
+        )
+    return joins
+
+
 def warn_on_table_expirations(report, dataset_path):
     """Logs a WARNING when anything in the dataset is set to be deleted.
     Informational, never fatal -- see bigquery_sync.check_table_expirations."""
@@ -1176,6 +1197,8 @@ def run_full_sync(cfg, allow_shrink=False):
             ", ".join(f"{u['user_id']} ({u['entries']} entries, {u['hours']}h)" for u in unresolved),
         )
 
+    joins = timelog_join_report(bq_client, cfg)
+
     expirations = bigquery_sync.check_table_expirations(
         bq_client, cfg.gcp_project_id, cfg.bq_dataset
     )
@@ -1190,6 +1213,7 @@ def run_full_sync(cfg, allow_shrink=False):
         "bq_dataset": cfg.bq_dataset,
         "stages": stages,
         "unresolved_timelog_users": unresolved,
+        "timelog_joins": joins,
         "table_expirations": expirations,
     }
     logger.info("RUN_SUMMARY %s", json.dumps(summary, default=str))
@@ -1305,6 +1329,8 @@ def run_backfill(cfg, months):
             stages[label] = {"status": "failed", "error": traceback.format_exc()}
             print(f"  FAILED — see log above")
 
+    joins = timelog_join_report(bq_client, cfg)
+
     finished_at = datetime.now(timezone.utc)
     summary = {
         "mode": "backfill",
@@ -1314,6 +1340,7 @@ def run_backfill(cfg, months):
         "gcp_project_id": cfg.gcp_project_id,
         "bq_dataset": cfg.bq_dataset,
         "months": stages,
+        "timelog_joins": joins,
     }
     logger.info("RUN_SUMMARY %s", json.dumps(summary, default=str))
 

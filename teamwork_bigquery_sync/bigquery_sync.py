@@ -272,6 +272,60 @@ def stored_timelogs_in_window(client, project_id, dataset_id, start_date, end_da
         return None
 
 
+def check_timelog_joins(client, project_id, dataset_id):
+    """Whether every time entry can reach its project and task:
+    {"missing_project": {"entries", "hours"},
+     "missing_task": {"entries", "hours", "by_project": [...]},
+     "no_task": {"entries", "hours"}}, or None if the check could not run.
+
+    The pipeline's objective (agreed 2026-10-03): every project and task that
+    2026 time is logged against is in BigQuery. missing_project and
+    missing_task should both be 0; the task scope (sync.
+    select_task_pull_projects) is argued to cover every task with 2026 time,
+    and this measures it instead of trusting the argument -- an untested
+    assumption about scope is how 9,014 entries on archived projects went
+    missing. no_task is time logged straight to a project, which Teamwork
+    allows; it is a policy matter (v_exception_time_without_task), reported
+    but not warned. Scans all loaded history, not one window.
+    """
+    base = (
+        f"FROM `{project_id}.{dataset_id}.{TIMELOGS_TABLE}` tl "
+        f"LEFT JOIN `{project_id}.{dataset_id}.{PROJECTS_TABLE}` p ON p.project_id = tl.project_id "
+        f"LEFT JOIN (SELECT DISTINCT task_id FROM `{project_id}.{dataset_id}.{TASKS_TABLE}`) tk "
+        "ON tk.task_id = tl.task_id "
+    )
+    missing_task = "tl.task_id IS NOT NULL AND tk.task_id IS NULL"
+    totals_sql = (
+        "SELECT "
+        "COUNTIF(p.project_id IS NULL), "
+        "ROUND(COALESCE(SUM(IF(p.project_id IS NULL, tl.minutes, 0)), 0) / 60, 1), "
+        f"COUNTIF({missing_task}), "
+        f"ROUND(COALESCE(SUM(IF({missing_task}, tl.minutes, 0)), 0) / 60, 1), "
+        "COUNTIF(tl.task_id IS NULL), "
+        "ROUND(COALESCE(SUM(IF(tl.task_id IS NULL, tl.minutes, 0)), 0) / 60, 1) "
+        + base
+    )
+    by_project_sql = (
+        "SELECT tl.project_id, ANY_VALUE(p.name), COUNT(*) AS entries "
+        + base + f"WHERE {missing_task} "
+        "GROUP BY tl.project_id ORDER BY entries DESC LIMIT 10"
+    )
+    try:
+        t = list(client.query(totals_sql).result())[0]
+        by_project = [
+            {"project_id": r[0], "project_name": r[1], "entries": r[2]}
+            for r in client.query(by_project_sql).result()
+        ] if t[2] else []
+    except Exception as exc:
+        logger.warning("Could not check timelog joins: %s", exc)
+        return None
+    return {
+        "missing_project": {"entries": t[0], "hours": t[1]},
+        "missing_task": {"entries": t[2], "hours": t[3], "by_project": by_project},
+        "no_task": {"entries": t[4], "hours": t[5]},
+    }
+
+
 def _count_timelogs_in_window(client, project_id, dataset_id, start_date, end_date_exclusive):
     """Rows currently stored for a timelogs window."""
     sql = (
