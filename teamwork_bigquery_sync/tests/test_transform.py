@@ -114,8 +114,16 @@ class TestNormalizeTask:
         raw.update(over)
         return raw
 
-    def test_deleted_tasks_are_dropped(self):
-        assert transform.normalize_task(self._raw(deletedAt="2026-01-01"), None) is None
+    def test_deleted_tasks_are_kept_and_flagged(self):
+        # Until 2026-10-03 deleted tasks were dropped, and 67 time entries
+        # (49.8h) on tasks deleted after time was logged read with no task or
+        # Activity. Teamwork keeps that time, so the task is kept, flagged.
+        row = transform.normalize_task(self._raw(deletedAt="2026-01-01"), None)
+        assert row is not None and row["is_deleted"] is True
+        assert transform.normalize_task(self._raw(), None)["is_deleted"] is False
+
+    def test_is_deleted_is_the_last_tasks_column(self):
+        assert schemas.TASKS_SCHEMA[-1].name == "is_deleted"
 
     def test_out_of_scope_projects_are_dropped(self):
         assert transform.normalize_task(self._raw(), {999}) is None

@@ -240,9 +240,10 @@ def task_web_link(base_url, task_id):
 
 
 def normalize_task(raw, in_scope_project_ids, base_url=None):
-    if raw.get("deletedAt"):
-        return None
-
+    # Deleted tasks are KEPT and flagged (2026-10-03): Teamwork keeps the time
+    # logged to a task after the task is deleted, and that time needs the
+    # task's name and Activity. Views that review live tasks filter on
+    # is_deleted; v_timelog_detail does not.
     tasklist = raw.get("tasklist") or {}
     tasklist_meta = tasklist.get("meta") or {}
     project_id = task_project_id(raw)
@@ -285,6 +286,7 @@ def normalize_task(raw, in_scope_project_ids, base_url=None):
         "updated_at": raw.get("updatedAt") or raw.get("dateUpdated"),
         "updated_by": raw.get("updatedBy"),
         "synced_at": utc_now_iso(),
+        "is_deleted": bool(raw.get("deletedAt")),
     }
 
 

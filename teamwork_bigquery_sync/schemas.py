@@ -84,6 +84,10 @@ TASKS_SCHEMA = [
     bigquery.SchemaField("updated_at", "TIMESTAMP"),
     bigquery.SchemaField("updated_by", "INT64"),
     bigquery.SchemaField("synced_at", "TIMESTAMP", mode="REQUIRED"),
+    # Deleted in Teamwork (deletedAt set). Kept because time logged to a task
+    # outlives it; views that review live tasks exclude these. Added
+    # 2026-10-03, last so ensure_table_columns() appends it in schema order.
+    bigquery.SchemaField("is_deleted", "BOOL"),
 ]
 
 TIMELOGS_SCHEMA = [

@@ -1307,6 +1307,22 @@ leaves GCP).
     check could not run. This would have fired on every backfill since the
     first archived pay cycle; no check that compared our rows with the same
     short pull could have.
+- **Time on deleted tasks (fixed 2026-10-03).** Teamwork keeps the time
+  logged to a task after the task is deleted, but the tasks pull skipped
+  deleted tasks (`normalize_task` returned None on `deletedAt`, and
+  `tasks.json` omits them unless sent `showDeleted=true` anyway). The new
+  `timelog_joins` check caught it on its first run: **67 entries (49.8h)**
+  naming a task missing from `tasks`, confirmed deleted in Teamwork.
+  `TeamworkClient.TASK_SCOPE_PARAMS` now sends `showDeleted=true` (live test:
+  22 tasks → 26 with 4 carrying `deletedAt` on GRPN Non-Monthly (2026), every
+  task with time found; `includeDeleted` and `includeDeletedTasks` are
+  ignored, as on `people.json`). Deleted tasks are **kept, with
+  `tasks.is_deleted = TRUE`**, and the tasks stage reports
+  `deleted_tasks_kept`. `v_timelog_detail` shows them (task name, Activity,
+  `task_is_deleted`) because the time still counts; the views that review
+  live tasks exclude them — the four task-based `v_exception_*` rules,
+  `v_task_review` and `v_project_detail`'s task counts — since a deleted
+  task cannot be fixed.
 - **Every entry must reach its project and task (check added 2026-10-03).**
   The agreed objective: every time entry for the months pulled is loaded,
   archived projects included, and every project and task that 2026 time is
@@ -2193,7 +2209,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-564 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
+576 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 

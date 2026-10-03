@@ -358,6 +358,12 @@ class TeamworkClient:
         "includeCompletedTasks": "true",
         "includeArchivedProjects": "true",
         "showCompletedLists": "true",
+        # Deleted tasks too: time logged to a task survives its deletion.
+        # Confirmed live 2026-10-03 on GRPN Non-Monthly (2026): 22 tasks
+        # without it, 26 with it (4 carrying deletedAt), and every task with
+        # time found. includeDeleted / includeDeletedTasks are ignored, as
+        # includeDeleted is on people.json.
+        "showDeleted": "true",
     }
 
     def count_tasks(self, project_ids=None):

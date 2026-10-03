@@ -882,11 +882,10 @@ def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids, allow_s
     # normalize_task() -> None: when the tasks table comes out the wrong
     # size, the reason needs to be in RUN_SUMMARY, not inferred later.
     rows_by_task_id = {}
-    dropped = {"deleted": 0, "no_project_id": 0, "out_of_scope": 0, "duplicate": 0}
+    # Deleted tasks are kept and flagged, not dropped (see
+    # transform.normalize_task); deleted_tasks_kept counts them.
+    dropped = {"no_project_id": 0, "out_of_scope": 0, "duplicate": 0}
     for raw in raw_tasks:
-        if raw.get("deletedAt"):
-            dropped["deleted"] += 1
-            continue
         project_id = transform.task_project_id(raw)
         if project_id is None:
             dropped["no_project_id"] += 1
@@ -982,6 +981,7 @@ def sync_tasks(tw_client, bq_client, dataset_ref, task_pull_project_ids, allow_s
         "rows_written": written,
         "projects_in_scope": len(task_pull_project_ids),
         "rows_dropped": dropped,
+        "deleted_tasks_kept": sum(1 for row in rows if row.get("is_deleted")),
         **fill_rate_report(schemas.TASKS_TABLE, rows),
         "activity": activity_stats,
     }

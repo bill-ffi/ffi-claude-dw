@@ -426,6 +426,7 @@ JOIN {projects} p ON p.project_id = t.project_id
 {proj_owner_join}
 WHERE t.activity IS NULL
   AND p.category_name IN UNNEST({monitored})
+  AND t.is_deleted IS NOT TRUE
   AND {has_no_activity_time_col}
 """
 
@@ -455,6 +456,7 @@ JOIN {projects} p ON p.project_id = t.project_id
 {proj_owner_join}
 WHERE t.activity IS NULL
   AND p.category_name IN UNNEST({monitored})
+  AND t.is_deleted IS NOT TRUE
   AND COALESCE(t.status, '') != 'completed'
   AND NOT {has_no_activity_time_col}
 GROUP BY p.project_id, p.name, p.category_name, p.client_name, proj_owner, t.tasklist_id, t.tasklist_name
@@ -502,6 +504,7 @@ JOIN {projects} p ON p.project_id = t.project_id
 {proj_owner_join}
 WHERE (t.estimate_minutes IS NULL OR t.estimate_minutes = 0)
   AND p.category_name IN UNNEST({monitored})
+  AND t.is_deleted IS NOT TRUE
   AND NOT (
     p.category_name = '{ESTIMATE_EXEMPT_CATEGORY}'
     AND COALESCE(t.tasklist_name, '') IN UNNEST({exempt_tasklists})
@@ -597,6 +600,7 @@ JOIN {projects} p ON p.project_id = t.project_id
 {proj_owner_join}
 WHERE p.category_name = '{RECURRING_REQUIRED_CATEGORY}'
   AND t.parent_task_id IS NULL
+  AND t.is_deleted IS NOT TRUE
   AND t.sequence_id IS NULL
 """
 
@@ -1061,6 +1065,9 @@ SELECT
   -- two apart. An Activity absent from the file stays NULL (the sync warns).
   {activity_group_cols("tk.activity", "tl.task_id", "p.company_id")},
   tk.status AS task_status,
+  -- The task was deleted in Teamwork after time was logged to it. Teamwork
+  -- keeps the time, so the entry still counts; the task is shown for context.
+  tk.is_deleted AS task_is_deleted,
   tk.estimate_minutes,
   tk.due_date AS task_due_date,
   tk.parent_task_id,
@@ -1377,6 +1384,7 @@ LEFT JOIN task_time tt ON tt.task_id = t.task_id
 LEFT JOIN {tasks} parent ON parent.task_id = t.parent_task_id
 LEFT JOIN {activity_groups} ag ON ag.activity = t.activity
 WHERE p.archived_at IS NULL
+  AND t.is_deleted IS NOT TRUE
 """
 
     # One row per ACTIVE project -- the projects-side counterpart to
@@ -1415,6 +1423,7 @@ WITH project_tasks AS (
     COUNTIF(COALESCE(t.status, '') != 'completed') AS open_task_count
   FROM {tasks} t
   WHERE t.project_id IS NOT NULL
+    AND t.is_deleted IS NOT TRUE
   GROUP BY t.project_id
 ),
 project_time AS (
