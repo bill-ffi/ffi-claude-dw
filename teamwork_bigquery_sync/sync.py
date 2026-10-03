@@ -482,6 +482,14 @@ def run_dry_run(client):
                 "timelogType", "isRetainer", "expenseType")
         for k in keys:
             print(f"     {k}: {dict(Counter(str(b.get(k)) for b in budgets))}")
+        def _arch(b):
+            pr = projects.get(b.get("projectId") or (b.get("project") or {}).get("id")) or {}
+            return "archived" if pr.get("archivedAt") else "active"
+        print("     type x repeating x project: " + json.dumps(dict(Counter(
+            f"{b.get('type')}/{'repeat' if b.get('isRepeating') else 'oneoff'}/{_arch(b)}"
+            for b in budgets))))
+        print("     active-project budget start dates: " + json.dumps(sorted(
+            str(b.get("startDate")) for b in budgets if _arch(b) == "active")))
         print(f"     endDate null: {sum(1 for b in budgets if not b.get('endDate'))} of {len(budgets)}")
         print(f"     originatorBudgetId set: {sum(1 for b in budgets if b.get('originatorBudgetId'))}")
         same_start = same_end = 0
