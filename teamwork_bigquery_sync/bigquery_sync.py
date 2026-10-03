@@ -272,6 +272,12 @@ def stored_timelogs_in_window(client, project_id, dataset_id, start_date, end_da
         return None
 
 
+# Upper bound on the missing task ids check_timelog_joins returns (and so on
+# the Teamwork lookups sync makes for them). Eleven on 2026-10-03; hundreds
+# would mean a scope bug, which the count alone already shows.
+MISSING_TASK_ID_LIMIT = 200
+
+
 def check_timelog_joins(client, project_id, dataset_id):
     """Whether every time entry can reach its project and task:
     {"missing_project": {"entries", "hours"},
@@ -310,18 +316,30 @@ def check_timelog_joins(client, project_id, dataset_id):
         + base + f"WHERE {missing_task} "
         "GROUP BY tl.project_id ORDER BY entries DESC LIMIT 10"
     )
+    # Every missing task id, so sync can ask Teamwork whether each still exists.
+    task_ids_sql = (
+        "SELECT tl.task_id, COUNT(*) AS entries, "
+        "ROUND(SUM(tl.minutes) / 60, 1) AS hours "
+        + base + f"WHERE {missing_task} "
+        f"GROUP BY tl.task_id ORDER BY entries DESC LIMIT {MISSING_TASK_ID_LIMIT}"
+    )
     try:
         t = list(client.query(totals_sql).result())[0]
         by_project = [
             {"project_id": r[0], "project_name": r[1], "entries": r[2]}
             for r in client.query(by_project_sql).result()
         ] if t[2] else []
+        task_ids = [
+            {"task_id": r[0], "entries": r[1], "hours": r[2]}
+            for r in client.query(task_ids_sql).result()
+        ] if t[2] else []
     except Exception as exc:
         logger.warning("Could not check timelog joins: %s", exc)
         return None
     return {
         "missing_project": {"entries": t[0], "hours": t[1]},
-        "missing_task": {"entries": t[2], "hours": t[3], "by_project": by_project},
+        "missing_task": {"entries": t[2], "hours": t[3], "by_project": by_project,
+                         "task_ids": task_ids},
         "no_task": {"entries": t[4], "hours": t[5]},
     }
 

@@ -1089,7 +1089,7 @@ SELECT
   tk.sequence_id,
   CASE
     WHEN tl.task_id IS NULL THEN 'No task (project-level time)'
-    WHEN tk.task_id IS NULL THEN 'Task outside tasks-table scope'
+    WHEN tk.task_id IS NULL THEN 'Task not in tasks table'
     ELSE 'Task matched'
   END AS task_join_status,
 

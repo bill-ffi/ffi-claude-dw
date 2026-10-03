@@ -633,13 +633,15 @@ drill-down surfaces rows those rules filter away:
 - **`task_join_status`** — explains *why* the task columns are blank on a
   row, which they can be for two unrelated reasons:
   `'No task (project-level time)'` (Teamwork allows logging time straight
-  to a project) versus `'Task outside tasks-table scope'` (the task exists
-  in Teamwork but `tasks` covers only active projects plus those archived
-  on/after the cutoff — 823 of 1,889 projects — while `timelogs` is scoped
-  only by date and so spans all of them). **Without this column a blank
-  Activity reads as a compliance failure when it is often just an
-  out-of-scope project.** Filter to `'Task matched'` before drawing any
-  conclusion about Activity coverage.
+  to a project) versus `'Task not in tasks table'` (the entry names a task
+  the `tasks` table lacks). Since 2026-10-03 the second case is, by
+  measurement, only tasks **Teamwork itself no longer has** — eleven tasks,
+  12 entries (6.8h), that answer 404 on a direct lookup (moved and then
+  deleted, or deleted and purged); the full sync's `timelog_joins` lists
+  them under `gone_from_teamwork` and warns on any other kind. The label
+  read `'Task outside tasks-table scope'` until then, which was untrue for
+  these — rename any Looker filter that used it. Filter to
+  `'Task matched'` before drawing any conclusion about Activity coverage.
 - **`hours` is computed as `minutes / 60`**, not read from `timelogs.hours`,
   which the pipeline stores pre-rounded to 4 decimal places. Per-row
   rounding is invisible on one entry and accumulates when Looker SUMs tens
@@ -1307,6 +1309,19 @@ leaves GCP).
     check could not run. This would have fired on every backfill since the
     first archived pay cycle; no check that compared our rows with the same
     short pull could have.
+- **Tasks Teamwork no longer has (2026-10-03).** After deleted tasks were
+  loaded, 12 entries (6.8h) still named a missing task: eleven task ids that
+  Teamwork answers **404** for on a direct `GET /projects/api/v3/tasks/{id}.json`,
+  with or without `showDeleted` — moved and then deleted, or deleted and
+  purged (HEX Payroll (2026)'s seven carry `taskIdPreMove` = their own id).
+  Teamwork's own time report still shows their names; the API does not, so
+  their task and Activity cannot be recovered. To keep the missing-task
+  warning meaningful, `timelog_joins.missing_task` now lists every missing id
+  (`bigquery_sync.MISSING_TASK_ID_LIMIT`, 200) and the sync asks Teamwork
+  about each (`TeamworkClient.task_exists`), splitting them into
+  `gone_from_teamwork` (404: reported, not warned), `still_in_teamwork`
+  (the pull missed it: **warns**) and `unchecked` (the lookup errored:
+  warns). One request per missing task per run — eleven today.
 - **Time on deleted tasks (fixed 2026-10-03).** Teamwork keeps the time
   logged to a task after the task is deleted, but the tasks pull skipped
   deleted tasks (`normalize_task` returned None on `deletedAt`, and
@@ -2209,7 +2224,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-576 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
+582 tests, ~1s, entirely offline — no Teamwork API, no BigQuery, no
 credentials, no network. CI runs them on every push
 (`.github/workflows/tests.yml`).
 

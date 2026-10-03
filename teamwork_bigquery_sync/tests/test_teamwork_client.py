@@ -279,3 +279,22 @@ class TestListBudgetsIncludesArchivedProjects:
         assert [b["id"] for b in c.list_project_budgets()] == [1, 2]
         assert all(r["params"].get("includeArchivedProjects") == "true"
                    for r in c.session.requests)
+
+
+class TestTaskExists:
+    """Tells a task the pull missed from one Teamwork no longer has (2026-10-03:
+    eleven tasks with 2026 time answered 404 on a direct lookup)."""
+
+    def test_found(self, client, no_sleep):
+        c = client([FakeResponse(payload={"task": {"id": 7}})])
+        assert c.task_exists(7) is True
+        assert c.session.requests[0]["url"].endswith("/projects/api/v3/tasks/7.json")
+
+    def test_404_means_gone(self, client, no_sleep):
+        c = client([FakeResponse(status_code=404, payload={"errors": []})])
+        assert c.task_exists(49992650) is False
+
+    def test_other_errors_raise_rather_than_guess(self, client, no_sleep):
+        c = client([FakeResponse(status_code=403, payload={"errors": []})])
+        with pytest.raises(tc.TeamworkAPIError):
+            c.task_exists(7)

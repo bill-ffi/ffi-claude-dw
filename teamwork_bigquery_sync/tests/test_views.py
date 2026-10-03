@@ -302,12 +302,15 @@ class TestTimelogDetailView:
             assert f"AS {col}" in body or f".{col}," in body, col
 
     def test_explains_why_task_columns_are_blank(self, sql):
-        # Blank task fields mean either project-level time or a task outside
-        # the tasks-table scope; a report cannot tell those apart otherwise.
+        # Blank task fields mean either project-level time or a task the
+        # tasks table lacks; a report cannot tell those apart otherwise. The
+        # second label used to read "outside tasks-table scope", which was
+        # untrue for tasks Teamwork itself no longer has (2026-10-03).
         body = sql["v_timelog_detail"]
         assert "AS task_join_status" in body
         assert "No task (project-level time)" in body
-        assert "Task outside tasks-table scope" in body
+        assert "WHEN tk.task_id IS NULL THEN 'Task not in tasks table'" in body
+        assert "outside tasks-table scope" not in body
 
     def test_hours_are_derived_from_minutes_not_the_rounded_column(self, sql):
         # timelogs.hours is stored pre-rounded to 4dp; summing it across tens

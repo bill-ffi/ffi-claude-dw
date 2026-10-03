@@ -24,10 +24,10 @@ class FakeJob:
 
 
 class FakeClient:
-    """Answers the totals query, then the by-project query."""
+    """Answers the totals query, then the by-project and task-id queries."""
 
-    def __init__(self, totals=(0, 0.0, 0, 0.0, 0, 0.0), by_project=(), raises=None):
-        self.answers = [[totals], list(by_project)]
+    def __init__(self, totals=(0, 0.0, 0, 0.0, 0, 0.0), by_project=(), task_ids=(), raises=None):
+        self.answers = [[totals], list(by_project), list(task_ids)]
         self.raises, self.sql = raises, []
 
     def query(self, sql):
@@ -42,18 +42,24 @@ class Cfg:
 class TestCheckTimelogJoins:
     def test_reports_each_gap(self):
         c = FakeClient(totals=(2, 1.5, 7, 4.4, 30, 12.0),
-                       by_project=[(1440795, "GRPN Payroll (2026)", 7)])
+                       by_project=[(1440795, "GRPN Payroll (2026)", 7)],
+                       task_ids=[(49992650, 6, 3.0), (50097313, 1, 1.4)])
         assert bigquery_sync.check_timelog_joins(c, "proj", "ds") == {
             "missing_project": {"entries": 2, "hours": 1.5},
             "missing_task": {"entries": 7, "hours": 4.4, "by_project": [
-                {"project_id": 1440795, "project_name": "GRPN Payroll (2026)", "entries": 7}]},
+                {"project_id": 1440795, "project_name": "GRPN Payroll (2026)", "entries": 7}],
+                "task_ids": [{"task_id": 49992650, "entries": 6, "hours": 3.0},
+                             {"task_id": 50097313, "entries": 1, "hours": 1.4}]},
             "no_task": {"entries": 30, "hours": 12.0},
         }
+        # Every missing id, not a top-N, so each can be looked up.
+        assert "GROUP BY tl.task_id" in c.sql[2]
+        assert f"LIMIT {bigquery_sync.MISSING_TASK_ID_LIMIT}" in c.sql[2]
 
     def test_clean_skips_the_breakdown(self):
         c = FakeClient()
         r = bigquery_sync.check_timelog_joins(c, "proj", "ds")
-        assert r["missing_task"] == {"entries": 0, "hours": 0.0, "by_project": []}
+        assert r["missing_task"] == {"entries": 0, "hours": 0.0, "by_project": [], "task_ids": []}
         assert len(c.sql) == 1
 
     def test_a_failed_check_is_none_not_a_false_clean(self):
@@ -76,24 +82,64 @@ class TestCheckTimelogJoins:
         assert "WHERE tl.task_id IS NOT NULL AND tk.task_id IS NULL" in c.sql[1]
 
 
+class FakeTw:
+    """task_exists(): True for ids in `alive`, False for `gone`, raises otherwise."""
+
+    def __init__(self, alive=(), gone=()):
+        self.alive, self.gone, self.asked = set(alive), set(gone), []
+
+    def task_exists(self, task_id):
+        self.asked.append(task_id)
+        if task_id in self.alive:
+            return True
+        if task_id in self.gone:
+            return False
+        raise RuntimeError("HTTP 503")
+
+
 class TestJoinReport:
-    def run(self, monkeypatch, caplog, result):
+    def run(self, monkeypatch, caplog, result, tw=None):
         monkeypatch.setattr(bigquery_sync, "check_timelog_joins", lambda *a: result)
         with caplog.at_level(logging.WARNING):
-            return sync.timelog_join_report(None, Cfg())
+            return sync.timelog_join_report(None, Cfg(), tw or FakeTw())
 
-    def gaps(self, project=0, task=0, no_task=0):
+    def gaps(self, project=0, task_ids=(), no_task=0):
+        ids = [{"task_id": t, "entries": n, "hours": 1.0} for t, n in task_ids]
         return {"missing_project": {"entries": project, "hours": 1.0},
-                "missing_task": {"entries": task, "hours": 1.0, "by_project": []},
+                "missing_task": {"entries": sum(n for _, n in task_ids), "hours": 1.0,
+                                 "by_project": [], "task_ids": ids},
                 "no_task": {"entries": no_task, "hours": 1.0}}
 
     def test_missing_project_warns(self, monkeypatch, caplog):
         self.run(monkeypatch, caplog, self.gaps(project=3))
         assert "have no row in projects" in caplog.text
 
-    def test_missing_task_warns(self, monkeypatch, caplog):
-        self.run(monkeypatch, caplog, self.gaps(task=3))
-        assert "name a task that is not in tasks" in caplog.text
+    def test_a_task_teamwork_still_has_warns(self, monkeypatch, caplog):
+        # The pull missed it: a real scope gap.
+        r = self.run(monkeypatch, caplog, self.gaps(task_ids=[(5, 3)]), FakeTw(alive={5}))
+        assert r["missing_task"]["still_in_teamwork"] == {"entries": 3, "hours": 1.0, "task_ids": [5]}
+        assert "the tasks pull missed them" in caplog.text
+
+    def test_a_task_teamwork_no_longer_has_is_reported_not_warned(self, monkeypatch, caplog):
+        # 404: nothing could recover it, so warning would fire every run.
+        r = self.run(monkeypatch, caplog, self.gaps(task_ids=[(49992650, 7)]),
+                     FakeTw(gone={49992650}))
+        assert r["missing_task"]["gone_from_teamwork"] == {
+            "entries": 7, "hours": 1.0, "task_ids": [49992650]}
+        assert r["missing_task"]["still_in_teamwork"]["entries"] == 0
+        assert caplog.records == []
+
+    def test_a_lookup_that_fails_is_unchecked_and_warns(self, monkeypatch, caplog):
+        r = self.run(monkeypatch, caplog, self.gaps(task_ids=[(9, 2)]), FakeTw())
+        assert r["missing_task"]["unchecked"]["task_ids"] == [9]
+        assert "could not be looked up" in caplog.text
+
+    def test_each_missing_task_is_asked_about_once(self, monkeypatch, caplog):
+        tw = FakeTw(alive={1}, gone={2, 3})
+        r = self.run(monkeypatch, caplog, self.gaps(task_ids=[(1, 1), (2, 4), (3, 2)]), tw)
+        assert tw.asked == [1, 2, 3]
+        assert r["missing_task"]["gone_from_teamwork"]["entries"] == 6
+        assert "task_ids" not in r["missing_task"]  # replaced by the buckets
 
     def test_untasked_time_is_reported_not_warned(self, monkeypatch, caplog):
         # Policy, not data loss: warning on it would fire every run.
@@ -106,5 +152,5 @@ class TestJoinReport:
     def test_both_runs_that_write_timelogs_report_it(self):
         for fn in (sync.run_full_sync, sync.run_backfill):
             source = inspect.getsource(fn)
-            assert "joins = timelog_join_report(bq_client, cfg)" in source, fn.__name__
+            assert "joins = timelog_join_report(bq_client, cfg, tw_client)" in source, fn.__name__
             assert '"timelog_joins": joins,' in source, fn.__name__

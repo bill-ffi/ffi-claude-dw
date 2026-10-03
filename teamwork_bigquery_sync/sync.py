@@ -1129,7 +1129,33 @@ def oosoob_cross_check(tw_client, rows, window_start, last_day_inclusive):
     return {"marked": marked, "teamwork_count": teamwork_count}
 
 
-def timelog_join_report(bq_client, cfg):
+def classify_missing_tasks(tw_client, task_ids):
+    """Asks Teamwork about each task the tasks table lacks.
+
+    {"gone_from_teamwork", "still_in_teamwork", "unchecked"}, each
+    {"entries", "hours", "task_ids"}. A task Teamwork answers 404 for no
+    longer exists anywhere (moved and then deleted, or deleted and purged --
+    eleven such on 2026-10-03, whose time still names them); nothing the pull
+    could do would recover it, so it is reported, not warned. A task Teamwork
+    still returns means the tasks pull missed it -- a real scope gap. Any
+    lookup that errors is unchecked rather than guessed.
+    """
+    buckets = {k: {"entries": 0, "hours": 0.0, "task_ids": []}
+               for k in ("gone_from_teamwork", "still_in_teamwork", "unchecked")}
+    for item in task_ids:
+        try:
+            key = "still_in_teamwork" if tw_client.task_exists(item["task_id"]) else "gone_from_teamwork"
+        except Exception as exc:
+            logger.warning("Could not look up task %s in Teamwork: %s", item["task_id"], exc)
+            key = "unchecked"
+        bucket = buckets[key]
+        bucket["entries"] += item["entries"]
+        bucket["hours"] = round(bucket["hours"] + (item.get("hours") or 0), 1)
+        bucket["task_ids"].append(item["task_id"])
+    return buckets
+
+
+def timelog_join_report(bq_client, cfg, tw_client):
     """bigquery_sync.check_timelog_joins, warning when time cannot reach its
     project or task. Informational, never fatal."""
     joins = bigquery_sync.check_timelog_joins(bq_client, cfg.gcp_project_id, cfg.bq_dataset)
@@ -1140,13 +1166,30 @@ def timelog_join_report(bq_client, cfg):
             joins["missing_project"]["entries"], joins["missing_project"]["hours"],
         )
     if joins and joins["missing_task"]["entries"]:
-        logger.warning(
-            "%d time entries (%sh) name a task that is not in tasks, so their task "
-            "and Activity read blank. Check sync.select_task_pull_projects(). By "
-            "project: %s",
-            joins["missing_task"]["entries"], joins["missing_task"]["hours"],
-            joins["missing_task"]["by_project"],
-        )
+        missing = joins["missing_task"]
+        missing.update(classify_missing_tasks(tw_client, missing.pop("task_ids")))
+        gone = missing["gone_from_teamwork"]
+        if gone["entries"]:
+            logger.info(
+                "%d time entries (%sh) name tasks Teamwork no longer has (404): %s. "
+                "Their task and Activity cannot be recovered.",
+                gone["entries"], gone["hours"], gone["task_ids"],
+            )
+        missed = missing["still_in_teamwork"]
+        if missed["entries"]:
+            logger.warning(
+                "%d time entries (%sh) name tasks that Teamwork still has but the "
+                "tasks table lacks -- the tasks pull missed them: %s. Check "
+                "sync.select_task_pull_projects() and TASK_SCOPE_PARAMS.",
+                missed["entries"], missed["hours"], missed["task_ids"],
+            )
+        unchecked = missing["unchecked"]
+        if unchecked["entries"]:
+            logger.warning(
+                "%d time entries (%sh) name tasks missing from tasks that could not "
+                "be looked up in Teamwork: %s.",
+                unchecked["entries"], unchecked["hours"], unchecked["task_ids"],
+            )
     return joins
 
 
@@ -1239,7 +1282,7 @@ def run_full_sync(cfg, allow_shrink=False):
             ", ".join(f"{u['user_id']} ({u['entries']} entries, {u['hours']}h)" for u in unresolved),
         )
 
-    joins = timelog_join_report(bq_client, cfg)
+    joins = timelog_join_report(bq_client, cfg, tw_client)
 
     expirations = bigquery_sync.check_table_expirations(
         bq_client, cfg.gcp_project_id, cfg.bq_dataset
@@ -1371,7 +1414,7 @@ def run_backfill(cfg, months):
             stages[label] = {"status": "failed", "error": traceback.format_exc()}
             print(f"  FAILED — see log above")
 
-    joins = timelog_join_report(bq_client, cfg)
+    joins = timelog_join_report(bq_client, cfg, tw_client)
 
     finished_at = datetime.now(timezone.utc)
     summary = {

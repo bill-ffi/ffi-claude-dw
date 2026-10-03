@@ -76,6 +76,7 @@ TASK_CUSTOM_FIELDS_PATH_TEMPLATE = "/projects/api/v3/tasks/{task_id}/customfield
 PROJECT_CATEGORIES_PATH = "/projects/api/v3/projectcategories.json"
 COMPANIES_PATH = "/projects/api/v3/companies.json"
 TAGS_PATH = "/projects/api/v3/tags.json"
+TASK_PATH_TEMPLATE = "/projects/api/v3/tasks/{task_id}.json"
 
 # How many task-custom-field-value requests to have in flight at once when
 # fetching per-task (no bulk endpoint exists for this). Kept modest given
@@ -423,6 +424,23 @@ class TeamworkClient:
         """
         params = dict(TIMELOGS_LIST_PARAMS, startDate=start_date, endDate=end_date)
         return list(self._paginate(TIMELOGS_PATH, params, "timelogs"))
+
+    def task_exists(self, task_id):
+        """True if Teamwork still returns this task, False if it answers 404.
+
+        Used to tell a task the tasks pull missed (a scope bug) from one that
+        no longer exists anywhere. Confirmed live 2026-10-03: eleven tasks with
+        2026 time -- moved, then deleted, or deleted and purged -- 404 here
+        even though their time entries still name them. Any other error
+        raises, so the caller can report it as unchecked rather than guess.
+        """
+        try:
+            self._get(TASK_PATH_TEMPLATE.format(task_id=task_id), {})
+        except TeamworkAPIError as exc:
+            if exc.status_code == 404:
+                return False
+            raise
+        return True
 
     def list_tags(self):
         """Every tag on the account ({"id", "name", "projectId", ...}); item key
